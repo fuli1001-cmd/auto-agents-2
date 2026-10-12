@@ -1,0 +1,98 @@
+{
+  "date": "2026-10-12",
+  "kind": "real-framework-smoke",
+  "frameworks": {
+    "react": {
+      "exit_code": 0,
+      "duration_seconds": 1.73,
+      "source_hash": "c4c63715637a9976c5c84244b4f79122dabe6b3637d03f75ecf1dcde21798ca6",
+      "environment_hash": "9249f9c720d86eef2b1db6cde784732ff684b4f3fb8e8978ae87e094fd9249c6",
+      "browser": [
+        {
+          "viewport": 1440,
+          "status": 200,
+          "actions": [
+            {
+              "route": "/",
+              "action": "click",
+              "selector": "#increment",
+              "value": ""
+            },
+            {
+              "route": "/",
+              "action": "expect_text",
+              "selector": "#count",
+              "value": "1"
+            }
+          ],
+          "screenshot_sha256": "944ea556b1da568f5ad77b8474afb8e8ee18f8b7f58d66ed0074f90bb0d09790"
+        },
+        {
+          "viewport": 390,
+          "status": 200,
+          "actions": [
+            {
+              "route": "/",
+              "action": "click",
+              "selector": "#increment",
+              "value": ""
+            },
+            {
+              "route": "/",
+              "action": "expect_text",
+              "selector": "#count",
+              "value": "1"
+            }
+          ],
+          "screenshot_sha256": "0cf437f8dfa6b3390bed46139592ad7885341f3003d39f6567e6e9ad2e2bd64f"
+        }
+      ]
+    },
+    "next": {
+      "exit_code": 0,
+      "duration_seconds": 19.255,
+      "source_hash": "e70230e601c8f7be52c2b98f7dc2b9f1ca37f5d7fd6c92d21b81fb1998b5b731",
+      "environment_hash": "9249f9c720d86eef2b1db6cde784732ff684b4f3fb8e8978ae87e094fd9249c6",
+      "browser": [
+        {
+          "viewport": 1440,
+          "status": 200,
+          "actions": [
+            {
+              "route": "/",
+              "action": "click",
+              "selector": "#increment",
+              "value": ""
+            },
+            {
+              "route": "/",
+              "action": "expect_text",
+              "selector": "#count",
+              "value": "1"
+            }
+          ],
+          "screenshot_sha256": "944ea556b1da568f5ad77b8474afb8e8ee18f8b7f58d66ed0074f90bb0d09790"
+        },
+        {
+          "viewport": 390,
+          "status": 200,
+          "actions": [
+            {
+              "route": "/",
+              "action": "click",
+              "selector": "#increment",
+              "value": ""
+            },
+            {
+              "route": "/",
+              "action": "expect_text",
+              "selector": "#count",
+              "value": "1"
+            }
+          ],
+          "screenshot_sha256": "0cf437f8dfa6b3390bed46139592ad7885341f3003d39f6567e6e9ad2e2bd64f"
+        }
+      ]
+    }
+  }
+}

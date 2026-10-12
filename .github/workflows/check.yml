@@ -1,0 +1,15 @@
+name: checks
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m venv .venv
+      - run: .venv/bin/python -m pip install --cache-dir .cache/pip -r requirements-dev.lock
+      - run: .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+      - run: .venv/bin/python -m ruff check src tests
+      - run: .venv/bin/python -m pytest -q

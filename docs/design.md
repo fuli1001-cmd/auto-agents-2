@@ -1,0 +1,126 @@
+# auto-agents-2 设计与实施规范
+
+## 目标与边界
+
+aa2 是以持久化状态、版本化工程产物和可执行验收为基础的软件开发编排器。首期支持 Linux/WSL2、Python、React 和 Next.js，使用 Codex CLI 和 Antigravity CLI。交付到本地 Git，不自动推送和部署，不自动更换模型，不引入 Jev，不要求 Docker。
+
+新项目、既有项目和后续迭代使用同一流程。Python 默认 FastAPI，React 默认 Vite/TypeScript，Next.js 默认 App Router/TypeScript；既有工程的框架和行为保持为基线。
+
+## 迭代与需求
+
+`run --requirements SOURCE` 表示新迭代；`run` 不带需求参数表示续跑。上一轮未完成时直接报错，提示正确续跑命令，不读取新需求、不启动模型、不更新 provider，也不排队。没有 `--new`。
+
+原始需求可以只有一个想法。保存原始内容、来源和指纹，澄清后生成具有稳定需求 ID 的开发规格、验收条件和决策记录。已确定的规格供所有后续阶段使用，修订产生新版本。
+
+新迭代先做覆盖评估。对比原始请求、已有规格、实际选定基线、测试和验证证据，分类为已满足、实际变化、回归和未知。原文相同不等于已实现，表述变化不等于新增功能。
+
+- 全部满足：返回 `NO_CHANGES`，保存评估证据，不生成实施任务或空提交。
+- 部分满足：只规划变化、缺失或回归部分。
+- 证据不足：先检查或澄清，不能直接重复实现。
+
+指纹快速路径要求原始需求、当前源码及依赖声明匹配已验证版本，且无需要重新验证的外部服务依据。已有实现仅在其他分支时必须明确基线，不能误报当前版本满足。
+
+## 模块与接口
+
+| 模块 | 职责 |
+|---|---|
+| WorkflowEngine | 状态推进、预算、恢复、回退、等待 |
+| Store / ArtifactStore | SQLite 事务、事件、检查点、不可变产物 |
+| ConfigStore / ProviderRouter | 实例、level、profile、参数、故障切换 |
+| CodexTransport / AntigravityTransport | 各 CLI 的 argv、输入流、原生认证目录 |
+| PromptCompiler / ContextBuilder | 有界上下文、模型表达适配、输出契约 |
+| WorkspaceManager | Git 基线、worktree、候选修改、集成、交付 |
+| EnvironmentManager | 依赖指纹、共享环境、安装与就绪校验 |
+| VerificationService | 实际测试、源码版本、环境和结果记录 |
+| ResearchService / DesignCatalog | 引用快照、一手资料证据与固定版本的设计来源 |
+| SandboxRunner | 只读视图、明确写入位置、子进程生命周期 |
+| ResourceManager | 归属、引用、配额、自动回收 |
+| CLI / Interaction | 对话、审批、状态、用量与诊断 |
+
+使用 Python 3.11、asyncio、Pydantic、SQLite WAL、Typer、Rich 和 prompt_toolkit。依赖通过显式接口和组合组织。
+
+Agent 接口接收阶段、上下文、输出 schema、工作区和操作身份，返回已通过 schema 校验的候选结果。CLI 退出成功、模型完成回答和任务验收通过分别判断。
+
+## Provider 和 Prompt
+
+配置层次为阶段 → efforts level → active provider 实例 → profile_map → 原生 profile 或统一 JSON profile。level 可以自定义。多个实例可使用相同 kind、不同配置目录和账号。
+
+支持环境变量及 argv 数组 extra_args；null 移除继承变量。模型与推理参数属于用户配置。aa2 不做自动追新，模型 prompt profile 的自动识别只调整文本表达。
+
+切换只能发生在配置实例集合中，成功后保存 active provider。已经派发的调用保持原配置；后续调用采用新配置。成功故障切换不自动跳回旧 provider。用量保留所有失败调用。
+
+Prompt 分为通用任务语义、阶段角色、模型适配、工具调用适配。参考 GPT-6、Gemini、Claude 官方指导，版本化维护并回归测试。模型不得通过原始文档、AGENTS.md 或自评扩大硬权限。
+
+独立审查默认使用当前 provider 新会话，直接读取规格、代码差异和证据；不继承实现会话。跨模型复审是后续可选能力。
+
+## 工作流与门禁
+
+1. 接入项目，检查环境、Git 和既有测试，建立安全基线。
+2. 保存需求快照，覆盖评估，对话澄清和独立需求检查。
+3. 研究外部服务一手资料，标明版本和实际验证程度。
+4. 有 UI 变化时生成静态交互原型。新设计参考 VoltAgent/awesome-design-md，固定来源版本。
+5. 自动浏览器与独立审查通过后等待人工原型审批。
+6. 设计模块、接口、数据约束、事务、迁移和验证策略。
+7. 生成覆盖未满足需求的任务 DAG 并独立审查。
+8. 逐任务实现、针对性测试、独立审查，受控集成。
+9. 完整验收、前端对照、文档更新和本地 Git 交付。
+
+原型审批绑定内容指纹。迭代只改变相关页面和组件，公共样式变化触发相关回归。审批前本轮后续阶段暂停，但进程和预览服务保持可用。
+
+`frontend` 表示目标包含前端，`ui_changes` 表示本轮是否改变界面。界面未变且内容指纹完全匹配时复用之前的原型审批，最终应用浏览器验证仍然执行。设计目录使用 Git 提交指纹，避免匿名 API 限额影响新项目初始化。
+
+任务包含需求 ID、允许路径、依赖、验收方式和实际检查命令。共享文件冲突的任务串行。首期最多两个开发工作区和一个集成工作区。
+
+## 文件修改与测试保护
+
+Provider 在只读视图中检查项目，返回结构化文件变更。控制器先验证所有路径及范围，再将候选写入工作区。替换操作记录前后内容指纹，以便部分应用中断后的幂等恢复。
+
+开发可以提供新测试及现有测试候选修改，受保护测试、fixture、脚本和截图基线的变化必须经过独立审查。实现者不能直接改正式验收数据或 controller 状态。
+
+检查由 VerificationService 运行，并绑定源码、环境和实际退出结果。针对性测试与最终验收分层，避免每个小任务都重复完整 E2E。pytest 使用独立保存的 JUnit 用例与通过数量作为证据。候选代码、环境、规格或检查命令改变后相应证据失效。
+
+## 恢复与有界循环
+
+状态和事件在同一事务中保存。等待输入、执行、暂停和完成区别记录。恢复先取得项目锁，核对残留进程和工作区，再接续未完成子步骤。恢复无需再次传入需求文档。
+
+每个逻辑任务默认最多四轮实现；连续两轮未解决检查/缺陷无改善时诊断；每轮迭代最多两次自动回退；基础设施最多三次自动重试；单次模型调用默认超时三十分钟。基础设施失败次数跨进程保留，人工确认 retry 后可以授予额外尝试，不删除既有计数。
+
+进展使用已解决验收项、复测关闭的缺陷和有证据的诊断。任务改名、重启或换 provider 不应清零原问题累计消耗。回退仅使受影响阶段和证据失效，历史保留。
+
+恢复保证到可以核对的操作边界，不保证恢复单个模型请求内部的 token 位置。提交、集成和其他副作用先核对已有结果，再决定是否执行。
+
+## 环境与回收
+
+aa2 使用 autoagents 或本项目 Conda 环境，目标依赖不装进 aa2 环境。目标项目内按依赖指纹共享只读环境，工作区专属安装和版本冲突使用不同环境。安装期间不修改被其他任务使用的环境。
+
+原生 Python、Conda base、全局 npm 和全局 shell 配置保持隔离。缓存和浏览器资源位于受管理目录。Docker 不属于首期必要运行条件。
+
+ResourceManager 只管理登记的资源。步骤、任务、阶段完成及恢复时触发回收，每六十秒补扫。默认可再生缓存上限十 GiB、闲置期限七天、最低可用磁盘五 GiB。自动与手动 GC 使用同一规则。
+
+必要恢复数据、有效审批、需求规格和交付证据不能当作临时文件删除。先保存并核验产物，再回收工作区和一次性测试数据。
+
+## 日志与验收
+
+日志包含时间戳，已知总量显示真实进度，同一活动原行刷新。token 按 run 累计，沿用 provider 的原生 total 口径，缓存与思考 token 单列且不重复相加，缺失用量明确标记。事件记录保留模型/环境/人工等待的时间边界，检查证据记录执行耗时；完整的各阶段性能分析面板留给后续版本。
+
+必须验证未完成迭代拒绝新建、同文及同义需求去重、部分差异规划、旧实现回归、证据缺失、部分文件应用恢复、审查期间恢复、provider 切换、用量去重、环境不串线、活跃资源不误删、原型版本审批和最终候选一致性。
+
+## 一手资料
+
+- https://learn.chatgpt.com/docs/non-interactive-mode
+- https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices
+- https://antigravity.google/docs/cli/headless/
+- https://ai.google.dev/gemini-api/docs/prompting-strategies#gemini-3
+- https://github.com/VoltAgent/awesome-design-md
+- https://git-scm.com/docs/git-worktree
+- https://docs.conda.io/projects/conda/en/stable/user-guide/tasks/manage-environments.html
+- https://github.com/containers/bubblewrap
+- https://nextjs.org/docs/app/api-reference/cli/next#next-typegen-options
+
+## 首期实现约束
+
+Node 首期使用 npm，已有 pnpm/yarn 工程不会自动改写。Conda 与 Python 依赖清单应分开声明，本地/editable pip 依赖通过 requirements 文件进入独立环境。默认识别项目根目录以及 backend/frontend/api/web；其他布局可以在任务中声明 cwd、环境清单和启动命令，新增生态需扩展 ProjectProfile/EnvironmentManager。
+
+规划审查、候选测试修改审查、原型审查和最终实现审查使用不同的验收标准，避免把“尚未实现”误判为规划缺陷。新原型必须记录所选设计的固定版本 URL；既有原型修改由已审查规格中的 prototype_paths 限定。README 阶段不能覆写已经确定的规格、架构和控制器证据。
+
+应用交付到本地分支；自动上线、生产数据迁移执行、Windows 原生沙箱、其他游戏生态和包管理器不在本版运行范围内。

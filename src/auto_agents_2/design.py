@@ -1,0 +1,230 @@
+from __future__ import annotations
+
+import asyncio
+import functools
+import http.server
+import json
+import os
+import shutil
+import socket
+import threading
+from pathlib import Path
+from urllib.parse import quote, urlsplit
+
+import httpx
+
+from .errors import AA2Error
+from .sandbox import SandboxRunner
+from .util import atomic_write, digest
+
+
+class DesignCatalog:
+    def __init__(self, cache: Path, sandbox: SandboxRunner | None = None):
+        self.cache = cache
+        self.sandbox = sandbox or SandboxRunner(cache)
+
+    async def candidates(self, requirement_text: str) -> list[dict]:
+        index = self.cache / "index.json"
+        data = json.loads(index.read_text()) if index.exists() else {}
+        if data.get("source") != "git-commit":
+            data = await self._git_catalog()
+            atomic_write(index, json.dumps(data))
+        paths = [n["path"] for n in data.get("tree", []) if n["path"].endswith("DESIGN.md")]
+        if not paths:
+            raise AA2Error("Design catalog contains no DESIGN.md files")
+        words = requirement_text.lower().split()
+        paths.sort(key=lambda p: (-sum(w in p.lower() for w in words if len(w) > 2), p))
+        sha = data["sha"]
+        return [{"path": p, "url": f"https://raw.githubusercontent.com/VoltAgent/awesome-design-md/{sha}/{quote(p)}",
+                 "revision": sha} for p in paths]
+
+    async def _git_catalog(self):
+        """Resolve an actual commit through public Git, without relying on API quota."""
+        self.cache.mkdir(parents=True, exist_ok=True)
+        repo = self.cache / "repository"
+        variables = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+
+        async def command(args):
+            process = await self.sandbox.spawn(["git", "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", *args],
+                                               self.cache, variables, [repo])
+            try:
+                async with asyncio.timeout(120):
+                    stdout, stderr = await process.communicate()
+                if process.returncode:
+                    raise AA2Error("Design catalog Git fetch failed: " + stderr.decode(errors="replace")[-1500:])
+                return stdout.decode()
+            finally:
+                await self.sandbox.stop(process)
+
+        if not (repo / ".git").exists():
+            if repo.exists():
+                shutil.rmtree(repo)
+            await command(["clone", "--depth", "1", "--filter=blob:none", "--no-checkout", "--single-branch", "--branch", "main",
+                           "https://github.com/VoltAgent/awesome-design-md.git", str(repo)])
+        sha = (await command(["-C", str(repo), "rev-parse", "HEAD"])).strip()
+        paths = (await command(["-C", str(repo), "ls-tree", "-r", "--name-only", "-z", "HEAD"])).split("\0")
+        return {"source": "git-commit", "sha": sha, "tree": [{"path": path} for path in paths if path]}
+
+
+class PreviewServer:
+    def __init__(self, directory: Path):
+        class Handler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+        handler = functools.partial(Handler, directory=str(directory))
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.url = f"http://127.0.0.1:{self.server.server_port}/"
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *args):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+async def exercise(page, actions, route):
+    completed = []
+    for step in actions:
+        if step.route != route:
+            continue
+        locator = page.locator(step.selector)
+        if step.action == "expect_visible":
+            await locator.wait_for(state="visible", timeout=10000)
+        elif step.action == "expect_text":
+            from playwright.async_api import expect
+            await expect(locator).to_have_text(step.value, timeout=10000)
+        elif step.action in {"fill", "press"}:
+            await getattr(locator, step.action)(step.value, timeout=10000)
+        else:
+            await getattr(locator, step.action)(timeout=10000)
+        completed.append(step.model_dump())
+    return completed
+
+
+async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[dict]:
+    """Render static pages in a real browser; save screenshots before human approval."""
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        raise AA2Error("Install aa2[browser] in the aa2 environment for prototype verification") from exc
+    pages = list(directory.rglob("*.html"))
+    if not pages:
+        raise AA2Error("Prototype has no HTML pages")
+    output.mkdir(parents=True, exist_ok=True)
+    results = []
+    with PreviewServer(directory) as server:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            try:
+                for file in pages:
+                    for width, height in ((1440, 900), (390, 844)):
+                        page = await browser.new_page(viewport={"width": width, "height": height})
+                        errors = []
+                        page.on("pageerror", lambda error: errors.append(str(error)))
+                        async def local_only(request):
+                            if urlsplit(request.request.url).netloc == urlsplit(server.url).netloc:
+                                await request.continue_()
+                            else:
+                                errors.append("Prototype attempted external request: " + request.request.url)
+                                await request.abort()
+                        await page.route("**/*", local_only)
+                        route = "/" + file.relative_to(directory).as_posix()
+                        response = await page.goto(server.url.rstrip("/") + route, wait_until="networkidle")
+                        completed = await exercise(page, actions, route)
+                        image = output / f"{file.stem}-{digest(route)[:8]}-{width}.png"
+                        await page.screenshot(path=str(image), full_page=True)
+                        results.append({"page": str(file.relative_to(directory)), "viewport": width,
+                                        "status": response.status if response else 0, "errors": errors,
+                                        "screenshot": str(image), "actions": completed})
+                        await page.close()
+            finally:
+                await browser.close()
+    if any(r["errors"] or r["status"] >= 400 for r in results):
+        raise AA2Error("Prototype browser checks failed: " + json.dumps(results))
+    return results
+
+
+async def inspect_application(spec, workspace, output, environment, sandbox, root):
+    from .config import ConfigStore
+    from .resources import ResourceManager
+    from .store import Store
+    resources = ResourceManager(Store(root.parent), ConfigStore(root.parent).load().cleanup)
+    with resources.temporary("preview") as scratch:
+        return await _inspect_application(spec, workspace, output, environment, sandbox, root, scratch)
+
+
+async def _inspect_application(spec, workspace, output, environment, sandbox, root, scratch):
+    import asyncio
+
+    from playwright.async_api import async_playwright
+
+    from .util import contained
+
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    argv = [a.replace("{port}", str(port)) for a in spec.command.argv]
+    if not any("{port}" in a for a in spec.command.argv):
+        raise AA2Error("Preview command must contain a {port} placeholder")
+    cwd = workspace if spec.command.cwd == "." else contained(workspace, spec.command.cwd)
+    process = await sandbox.spawn(argv, cwd, environment.variables(scratch),
+                                  [scratch, cwd / ".next", cwd / "dist", cwd / "node_modules/.vite"], [environment.prefix])
+    # Drain pipes to avoid deadlocking a long-running server; retain a bounded diagnostic tail.
+    tail = []
+
+    async def drain(stream):
+        while line := await stream.readline():
+            tail.append(line.decode(errors="replace")[-2000:])
+            del tail[:-30]
+
+    drains = [asyncio.create_task(drain(process.stdout)), asyncio.create_task(drain(process.stderr))]
+    results = []
+    output.mkdir(parents=True, exist_ok=True)
+    try:
+        async with httpx.AsyncClient(timeout=2) as client:
+            for _ in range(60):
+                if process.returncode is not None:
+                    raise AA2Error("Preview process exited: " + "".join(tail))
+                try:
+                    response = await client.get(f"http://127.0.0.1:{port}/")
+                    if response.status_code < 500:
+                        break
+                except httpx.HTTPError:
+                    pass
+                await asyncio.sleep(1)
+            else:
+                raise AA2Error("Preview server readiness timeout: " + "".join(tail))
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            try:
+                for index, route in enumerate(spec.routes):
+                    if not route.startswith("/") or route.startswith("//"):
+                        raise AA2Error("Preview routes must be local paths")
+                    for width, height in ((1440, 900), (390, 844)):
+                        page = await browser.new_page(viewport={"width": width, "height": height})
+                        errors = []
+                        page.on("pageerror", lambda error: errors.append(str(error)))
+                        response = await page.goto(f"http://127.0.0.1:{port}{route}", wait_until="networkidle")
+                        completed = await exercise(page, spec.actions, route)
+                        screenshot = output / f"route-{index}-{width}.png"
+                        await page.screenshot(path=str(screenshot), full_page=True)
+                        results.append({"route": route, "viewport": width, "errors": errors,
+                                        "status": response.status if response else 0, "screenshot": str(screenshot), "actions": completed})
+                        await page.close()
+            finally:
+                await browser.close()
+        if any(r["errors"] or r["status"] >= 400 for r in results):
+            raise AA2Error("Implemented UI browser checks failed: " + json.dumps(results))
+        return results
+    finally:
+        await sandbox.stop(process)
+        await asyncio.gather(*drains, return_exceptions=True)
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def browser_environment(cache: Path):
+    """Configure the browser driver of this single-project CLI process, never the user's shell."""
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(cache)

@@ -1,0 +1,17 @@
+.conda-env/
+.venv/
+.cache/
+.aa2/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.env
+.env.*
+!.env.example
+node_modules/
+.next/
+test-results/

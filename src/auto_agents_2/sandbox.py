@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+from .errors import PolicyViolation
+from .util import atomic_write, identifier, write_json
+
+
+class SandboxRunner:
+    """A process-wide read-only host view with explicit, controller-owned write mounts."""
+
+    def __init__(self, state_root: Path, binary: str = "bwrap", *, _test_unconfined: bool = False):
+        self.root = state_root.resolve()
+        local = Path(sys.executable).parent / binary
+        self.binary = shutil.which(binary) or str(local if local.is_file() else Path(binary).expanduser())
+        self.test_unconfined = _test_unconfined
+
+    def command(self, argv: list[str], cwd: Path, writable: list[Path],
+                readable: list[Path] | None = None, overlays: list[tuple[Path, Path]] | None = None) -> list[str]:
+        if self.test_unconfined:
+            return argv
+        if not Path(self.binary).is_file():
+            raise PolicyViolation("bubblewrap 不可用；请在 aa2 专用环境安装后运行 aa2 doctor")
+        cmd = [self.binary, "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc",
+               "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
+        user_home = Path.home()
+        cmd += ["--tmpfs", str(user_home)]
+        mounts = [Path(sys.prefix), cwd.resolve(), *(p.resolve() for p in readable or [])]
+        executable = Path(argv[0])
+        if executable.is_absolute() and executable.is_file():
+            real = executable.resolve()
+            if real.is_relative_to(user_home) or real.is_relative_to(Path("/tmp")):
+                prefix = next((p for p in (*executable.parents, *real.parents)
+                               if p.is_relative_to(user_home) and
+                               ((p / "bin/python").exists() or (p / "bin/node").exists())), None)
+                mounts.insert(0, prefix or real)
+                if executable != real and not (prefix and executable.is_relative_to(prefix)):
+                    cmd += ["--ro-bind", str(real), str(executable)]
+        metadata = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                  capture_output=True, text=True, timeout=10)
+        if metadata.returncode == 0:
+            mounts.append(Path(metadata.stdout.strip()))
+        for path in mounts:
+            if path.is_relative_to(self.root):
+                continue
+            if path.exists():
+                cmd += ["--ro-bind", str(path), str(path)]
+        # Mask state AFTER a parent project mount; restore only explicitly selected children.
+        cmd += ["--tmpfs", str(self.root)]
+        for path in mounts:
+            if path.is_relative_to(self.root) and path.exists():
+                cmd += ["--ro-bind", str(path), str(path)]
+        for path in writable:
+            if path.absolute() != path.resolve() or not any(path.resolve().is_relative_to(root) for root in (self.root, cwd.resolve())):
+                raise PolicyViolation(f"Writable mount must be an owned path without symlinks: {path}")
+            if not path.is_file():
+                path.mkdir(parents=True, exist_ok=True)
+            cmd += ["--bind", str(path.resolve()), str(path.resolve())]
+        for source, destination in overlays or []:
+            if source.absolute() != source.resolve() or not source.resolve().is_relative_to(self.root):
+                raise PolicyViolation("Provider session overlays must be owned by the controller")
+            cmd += ["--bind", str(source.resolve()), str(destination)]
+        cmd += ["--chdir", str(cwd.resolve()), "--", *argv]
+        return cmd
+
+    def probe(self) -> tuple[bool, str]:
+        if self.test_unconfined:
+            return True, "test-only runner"
+        scratch = self.root / "tmp" / identifier("sandbox_probe")
+        scratch.mkdir(parents=True)
+        protected = scratch / "protected.txt"
+        atomic_write(protected, "original")
+        out = scratch / "out"
+        out.mkdir()
+        script = 'test "$(cat protected.txt)" = original && ! (echo bad > protected.txt) && echo ok > out/ok'
+        try:
+            result = subprocess.run(self.command(["/bin/sh", "-c", script], scratch, [out]),
+                                    capture_output=True, text=True, timeout=10)
+            ok = result.returncode == 0 and protected.read_text() == "original" and (out / "ok").exists()
+            return ok, "read-only enforcement passed" if ok else result.stderr[-2000:]
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, str(exc)
+        finally:
+            shutil.rmtree(scratch)
+
+    async def spawn(self, argv, cwd, env, writable, readable=None, overlays=None):
+        executable = shutil.which(argv[0], path=env.get("PATH"))
+        if not executable:
+            raise PolicyViolation(f"Executable unavailable in selected environment: {argv[0]}")
+        argv = [executable, *argv[1:]]
+        env = {**env, "GIT_OPTIONAL_LOCKS": "0"}
+        command = self.command(argv, cwd, writable, readable, overlays)
+        process = await asyncio.create_subprocess_exec(
+            *command, cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            start_new_session=True, limit=8 * 1024 * 1024)
+        process_root = self.root / "processes"
+        process_root.mkdir(parents=True, exist_ok=True)
+        write_json(process_root / f"{process.pid}.json", {
+            "pid": process.pid, "start": process_start(process.pid), "cwd": str(cwd),
+        })
+        return process
+
+    async def stop(self, process):
+        if process.returncode is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                await asyncio.wait_for(process.wait(), 2)
+            except (ProcessLookupError, asyncio.TimeoutError):
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+        # A leader can exit before its children. The owned process group still needs reaping.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        (self.root / "processes" / f"{process.pid}.json").unlink(missing_ok=True)
+
+    def reap_orphans(self):
+        directory = self.root / "processes"
+        if not directory.exists():
+            return
+        for file in directory.glob("*.json"):
+            data = json.loads(file.read_text())
+            pid = data["pid"]
+            if process_start(pid) == data["start"] and data["start"] and os.getpgid(pid) == pid:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            file.unlink(missing_ok=True)
+
+
+def process_start(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return ""
