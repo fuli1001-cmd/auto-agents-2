@@ -14,8 +14,10 @@ from prompt_toolkit import PromptSession
 from rich.console import Console
 
 from .config import ConfigStore
+from .display import ProgressDisplay
 from .engine import WorkflowEngine
 from .errors import AA2Error, BusyProject, IncompleteIteration
+from .interaction import prompt_answer
 from .models import ReviewResult
 from .providers import ProviderRouter
 from .resources import ResourceManager
@@ -29,9 +31,6 @@ provider_app = typer.Typer(help="配置中的 provider 实例")
 app.add_typer(provider_app, name="provider")
 console = Console()
 Project = Annotated[Path, typer.Option("--project", "-p", help="目标项目目录")]
-STAGE_LABELS = {"clarify": "需求澄清", "coverage_review": "需求覆盖审查", "provider_research": "外部服务研究",
-                "prototype": "前端原型", "design": "架构设计", "plan": "任务规划", "implement": "开发实现",
-                "review": "独立审查", "verify": "最终验收", "readme": "更新文档"}
 
 
 def configuration(project: Path):
@@ -73,49 +72,26 @@ def init(project: Project = Path("."), from_config: Annotated[Path | None, typer
         fail(exc)
 
 
-async def render(store: Store, stop: asyncio.Event, paused: asyncio.Event, last: int):
-    operation = "启动"
-    started = time.monotonic()
-    while not stop.is_set():
-        for event in store.events(after=last):
-            last = event["seq"]
-            kind, data = event["kind"], event["data"]
-            if kind == "agent.started":
-                label = STAGE_LABELS.get(data["stage"], data["stage"])
-                if "test-change-review" in data.get("operation", ""):
-                    label = "测试与配置变更审查"
-                model = data.get("model") or "CLI 默认（未知）"
-                effort = data.get("effort") or "CLI 默认（未知）"
-                operation = f"{label}｜{data['provider']}｜模型：{model}｜推理：{effort}"
-                started = time.monotonic()
-            elif kind == "task.integrated":
-                operation = f"任务验收 {data['done']}/{data['total']}"
-            elif kind == "run.updated" and data.get("status") == "WAITING_USER":
-                operation = "等待用户输入：可使用 aa2 respond"
-            elif kind == "resources.collected":
-                operation = f"清理 {data['removed']} 项资源，释放 {data['bytes'] / 1024**2:.1f} MiB"
-            elif kind == "provider.changed":
-                operation = f"provider 已切换：{data['to']}"
-            elif kind == "environment.preparing":
-                operation = f"准备项目环境｜{data['profile']}"
-                started = time.monotonic()
-            elif kind == "run.updated" and data.get("delivery_phase"):
-                operation = "交付｜" + {"ready": "核对目标分支", "reintegrating": "隔离集成与复测", "publishing": "更新主目录",
-                                      "published": "主目录已更新", "runtime": "准备主目录运行环境", "repairing_runtime": "隔离修复运行检查", "complete": "交付完成"}.get(data["delivery_phase"], data["delivery_phase"])
-            elif kind == "delivery.completed":
-                operation = f"交付完成｜{data['target']}｜{data['commit'][:12]}"
-            elif kind == "environment.ready":
-                operation = "项目环境已就绪，执行验证"
+async def render(store: Store, stop: asyncio.Event, paused: asyncio.Event, last: int, input_ready=None):
+    display = ProgressDisplay(console, sys.stdout.isatty())
+    try:
+        while not stop.is_set():
+            if not paused.is_set() or input_ready is None or not input_ready.is_set():
+                for event in store.events(after=last):
+                    last = event["seq"]
+                    display.event(event)
+            if paused.is_set():
+                display.pause()
+                if input_ready is not None:
+                    input_ready.set()
             else:
-                continue
-            if not sys.stdout.isatty():
-                console.print(f"[{time.strftime('%H:%M:%S', time.localtime(event['time']))}] {operation}", markup=False)
-        if sys.stdout.isatty() and not paused.is_set():
-            console.file.write(f"\r\033[K[{time.strftime('%H:%M:%S')}] {operation}｜{int(time.monotonic()-started)}s")
-            console.file.flush()
-        await asyncio.sleep(1)
-    if sys.stdout.isatty():
-        console.file.write("\r\033[K")
+                display.refresh()
+            await asyncio.sleep(1)
+        # Calls can finish while the controller is stopping.
+        for event in store.events(after=last):
+            display.event(event)
+    finally:
+        display.close()
 
 
 async def execute(project, requirements=None, provider=None, run_id=None):
@@ -125,16 +101,18 @@ async def execute(project, requirements=None, provider=None, run_id=None):
         raise IncompleteIteration(f"上一轮迭代尚未完成。请先执行：aa2 run --project {shlex.quote(str(project))}")
     stop = asyncio.Event()
     paused = asyncio.Event()
+    input_ready = asyncio.Event()
     with store.connect() as db:
         cursor = db.execute("SELECT COALESCE(MAX(seq),0) FROM events").fetchone()[0]
-    display = asyncio.create_task(render(store, stop, paused, cursor))
+    display = asyncio.create_task(render(store, stop, paused, cursor, input_ready))
     session = PromptSession() if sys.stdin.isatty() and sys.stdout.isatty() else None
 
     async def question(request):
+        input_ready.clear()
         paused.set()
-        console.file.write("\r\033[K")
         try:
-            return await session.prompt_async(f"\n{request['prompt']}\n> ")
+            await input_ready.wait()
+            return await prompt_answer(session, request)
         finally:
             paused.clear()
 
@@ -179,7 +157,7 @@ def run(project: Project = Path("."), requirements: Annotated[str | None, typer.
         asyncio.run(execute(project.resolve(), requirements, provider))
     except AA2Error as exc:
         fail(exc)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         console.print("已暂停并保存检查点；使用相同项目的 aa2 run 续跑。")
 
 
@@ -191,7 +169,7 @@ def resume(project: Project = Path("."), run_id: Annotated[str | None, typer.Opt
         asyncio.run(execute(project.resolve(), provider=provider, run_id=run_id))
     except AA2Error as exc:
         fail(exc)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         console.print("已保存检查点。")
 
 
@@ -223,11 +201,19 @@ def logs(project: Project = Path("."), run_id: Annotated[str | None, typer.Optio
 
 
 @app.command()
-def respond(answer: Annotated[str, typer.Option("--answer")], project: Project = Path("."),
+def respond(answer: Annotated[str | None, typer.Option("--answer")] = None, project: Project = Path("."),
             request: Annotated[str | None, typer.Option("--request")] = None,
             run_id: Annotated[str | None, typer.Option("--run")] = None,
-            artifact: Annotated[str | None, typer.Option("--artifact")] = None):
+            artifact: Annotated[str | None, typer.Option("--artifact")] = None,
+            answer_file: Annotated[Path | None, typer.Option("--answer-file", help="UTF-8 多行回复文件")] = None):
     try:
+        if (answer is None) == (answer_file is None):
+            raise AA2Error("请指定 --answer 或 --answer-file，二选一。")
+        if answer_file is not None:
+            try:
+                answer = answer_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise AA2Error("无法读取 UTF-8 回复文件") from exc
         configuration(project)
         store = Store(project)
         current = store.run(run_id) if run_id else store.current(unfinished=True)
@@ -236,7 +222,7 @@ def respond(answer: Annotated[str, typer.Option("--answer")], project: Project =
             pending = [q for q in pending if q["id"] == request]
         if len(pending) != 1:
             raise AA2Error("需要唯一待处理问题；使用 --request 指定 status 显示的问题")
-        if pending[0]["key"] == "prototype-approval" and answer.lower() == "approve" and artifact is None:
+        if pending[0]["key"] == "prototype-approval" and artifact is None:
             raise AA2Error("脚本审批需要 --artifact 指定 status 显示的原型版本")
         store.answer(pending[0]["id"], answer, artifact)
         console.print("回复已保存。")

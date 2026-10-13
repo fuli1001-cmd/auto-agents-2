@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import time
 from pathlib import Path
 from typing import Protocol
 
@@ -17,6 +18,22 @@ from .sandbox import SandboxRunner
 from .store import Store
 from .transports import BUILTIN_TRANSPORTS, CLITransport
 from .util import atomic_write, digest, identifier, scrub_text, write_json
+
+
+def diagnostic_summary(text: str) -> str:
+    """Classify diagnostics without logging native configuration or credentials."""
+    lower = text.lower()
+    for needles, label in (
+        (("429", "rate limit", "capacity", "overloaded"), "provider 限流或容量不足"),
+        (("retry", "reconnect"), "provider 正在重试或重连"),
+        (("timeout", "timed out"), "provider 报告等待超时"),
+        (("connection", "disconnect", "503"), "provider 连接异常"),
+        (("401", "403", "unauthorized", "authentication"), "provider 认证或权限异常"),
+        (("config", "argument", "profile"), "provider 配置或参数异常"),
+    ):
+        if any(word in lower for word in needles):
+            return label
+    return "provider 诊断输出"
 
 
 class Agent(Protocol):
@@ -129,6 +146,8 @@ class ProviderRouter:
                     errors.append(f"{candidate}: {exc}")
                     if not exc.retryable or retry == cfg.execution.infra_retries:
                         break
+                    self.store.event(run_id, "agent.retrying", {"operation": operation, "provider": candidate,
+                                     "retry": retry + 1, "delay": min(2 ** retry, 15)})
                     await asyncio.sleep(min(2 ** retry, 15))
         raise ProviderError("; ".join(errors)[-3000:])
 
@@ -170,54 +189,108 @@ class ProviderRouter:
         self.store.event(run_id, "agent.started", {"attempt": aid, "operation": operation, "stage": stage,
                          "provider": eff["provider"], "level": eff["level"], "model": eff["model"],
                          "effort": eff["effort"],
+                         "task_title": context.get("task", {}).get("title", ""),
                          "config_hash": eff["fingerprint"], "prompt_version": PROMPT_VERSION, "prompt_family": family})
         decoder, errors = self.decoders.get(eff["kind"], EventDecoder)(eff["kind"]), []
         process = None
+        outcome = "interrupted"
+        last_output = None
+        published = 0.0
+        session = previous
+
+        def observe(stream, detail="", force=False):
+            nonlocal last_output, published
+            last_output = time.time()
+            if force or time.monotonic() - published >= 1:
+                self.store.event(run_id, "agent.output", {"attempt": aid, "last_output": last_output,
+                                 "stream": stream, "detail": detail})
+                published = time.monotonic()
+
+        def decode(line):
+            nonlocal session
+            try:
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    raise ValueError("Expected object")
+                decoder.feed(event)
+                if decoder.session and decoder.session != session:
+                    session = decoder.session
+                    self.store.checkpoint(run_id, f"session/{operation}/{eff['provider']}", session)
+                typ = event.get("type", event.get("event", ""))
+                item = event.get("item") or {}
+                detail = {"thread.started": "会话已建立", "turn.started": "等待模型响应",
+                          "turn.completed": "响应已返回，校验结果", "turn.failed": "调用失败",
+                          "error": "provider 报错"}.get(typ, "")
+                if typ in {"item.started", "item.completed"}:
+                    what = {"command_execution": "工具", "mcp_tool_call": "工具", "web_search": "搜索",
+                            "agent_message": "响应内容", "reasoning": "模型事件"}.get(item.get("type"), "执行事件")
+                    detail = what + ("执行中" if typ == "item.started" else "已返回")
+                if detail:
+                    observe("stdout", detail, force=True)
+            except (ValueError, TypeError):
+                errors.append(scrub_text(line.decode(errors="replace")[:2000], secret_values))
+                del errors[:-100]
+
         try:
             process = await self.sandbox.spawn(argv, workspace, env, [out], [schema_file, root / "prompt.txt", *assets, *context_files], overlays)
+            self.store.event(run_id, "agent.spawned", {"attempt": aid, "pid": process.pid})
 
             async def stdout():
-                while line := await process.stdout.readline():
-                    try:
-                        event = json.loads(line)
-                        decoder.feed(event)
-                        if decoder.session:
-                            self.store.checkpoint(run_id, f"session/{operation}/{eff['provider']}", decoder.session)
-                    except (ValueError, TypeError):
-                        errors.append(scrub_text(line.decode(errors="replace")[:2000], secret_values))
+                pending = bytearray()
+                while chunk := await process.stdout.read(65536):
+                    observe("stdout")
+                    pending.extend(chunk)
+                    while b"\n" in pending:
+                        line, _, rest = pending.partition(b"\n")
+                        pending = bytearray(rest)
+                        decode(line)
+                    if len(pending) > 8 * 1024 * 1024:
+                        raise ProviderError("Provider event exceeds 8 MiB")
+                if pending:
+                    decode(pending)
 
             async def stderr():
-                while line := await process.stderr.readline():
-                    errors.append(scrub_text(line.decode(errors="replace")[:2000], secret_values))
+                while chunk := await process.stderr.read(8192):
+                    observe("stderr", diagnostic_summary(chunk.decode(errors="replace")))
+                    errors.append(scrub_text(chunk.decode(errors="replace")[:2000], secret_values))
                     if len(errors) > 100:
                         del errors[:50]
 
-            async with asyncio.timeout(self.config.load().execution.agent_timeout):
+            readers = [asyncio.create_task(stdout()), asyncio.create_task(stderr())]
+            try:
                 if transport.stdin_prompt:
                     process.stdin.write(transport.encode_prompt(prompt))
                     await process.stdin.drain()
                 process.stdin.close()
-                await asyncio.gather(stdout(), stderr(), process.wait())
+                await asyncio.gather(*readers, process.wait())
+            finally:
+                for reader in readers:
+                    reader.cancel()
+                await asyncio.gather(*readers, return_exceptions=True)
             if process.returncode != 0 or decoder.error or not decoder.finished:
-                message = scrub_text(decoder.error or "".join(errors)[-2000:] or f"incomplete provider result ({process.returncode})", secret_values)
-                raise ProviderError(message, retryable=any(t in message.lower() for t in ("timeout", "429", "503", "connection", "rate limit", "capacity", "overloaded")))
+                message = decoder.error or "".join(errors)[-2000:]
+                raise ProviderError(diagnostic_summary(message) + f"；未取得完整结果（退出码 {process.returncode}）",
+                    retryable=any(t in message.lower() for t in ("timeout", "timed out", "429", "503", "connection", "rate limit", "capacity", "overloaded")))
             response = (out / "result.json").read_text() if (out / "result.json").exists() else (decoder.messages[-1] if decoder.messages else "")
             try:
                 result = schema.model_validate_json(response)
             except ValueError as exc:
-                raise ProviderError(f"Invalid structured response: {exc}") from exc
+                raise ProviderError("Invalid structured response: schema validation failed") from exc
+            outcome = "success"
             return result
-        except TimeoutError as exc:
-            decoder.usage.complete = False
-            raise ProviderError("Agent invocation timeout", retryable=True) from exc
         except OSError as exc:
+            outcome = "error"
             raise ProviderError(str(exc)) from exc
+        except Exception:
+            outcome = "error"
+            raise
         finally:
             if process:
                 await self.sandbox.stop(process)
             self.store.add_usage(run_id, eff["provider"], aid, "invocation", decoder.usage.model_dump())
             self.store.event(run_id, "agent.finished", {"attempt": aid, "complete": decoder.finished,
-                                                       "diagnostic": scrub_text("".join(errors)[-2000:], secret_values)})
+                                                       "outcome": outcome, "last_output": last_output,
+                                                       "diagnostic": diagnostic_summary("".join(errors)) if errors else ""})
             # Candidate responses have been consumed; persistent sessions and usage survive.
             shutil.rmtree(root, ignore_errors=True)
 

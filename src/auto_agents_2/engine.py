@@ -7,6 +7,7 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Awaitable, Callable
+from urllib.parse import quote
 
 from .artifacts import ArtifactStore
 from .config import ConfigStore
@@ -15,6 +16,7 @@ from .delivery import DeliveryCoordinator, RuntimeVerificationError
 from .design import DesignCatalog, PreviewServer, browser_environment, inspect_application, inspect_prototype
 from .environment import EnvironmentManager
 from .errors import AA2Error, PolicyViolation, ProviderError
+from .interaction import choice_spec, is_prototype_approval, question_text
 from .models import (
     CheckResult,
     Command,
@@ -26,6 +28,7 @@ from .models import (
 )
 from .planning import ready_batch, validate_plan
 from .profiles import ProjectProfile
+from .progress import capture_output, observe_activity
 from .providers import Agent, ProviderRouter
 from .requirements import capture, validate_coverage
 from .research import ResearchService
@@ -146,16 +149,29 @@ class WorkflowEngine:
                 self.resources.collect()
                 elapsed = 0
 
-    async def _ask(self, rid, key, prompt, artifact_hash="") -> str:
-        question = self.store.request(rid, key, prompt, artifact_hash)
+    async def _ask(self, rid, key, prompt, artifact_hash="", interaction=None) -> str:
+        if interaction is None and (key.startswith(("incident/", "provider/", "replan-budget/", "round-budget/"))
+                                    or key in {"token-budget", "coverage-evidence", "disk-space"}):
+            prompt = prompt.replace("回复 retry", "确认重试").replace("回复 continue", "确认继续")
+            interaction = choice_spec(["已处理，继续", "暂停，稍后续跑"], ["continue", "pause"], yes_no=True)
+            interaction["pause_on"] = "n"
+        prompt = question_text(prompt)
+        interaction = interaction or {"kind": "text"}
+        question = self.store.request(rid, key, prompt, artifact_hash, interaction)
         if question["answer"] is None and self.store.run(rid)["status"] != "WAITING_USER":
             self.store.update(rid, status="WAITING_USER")
+        if question["answer"] is None:
+            hint = (f"aa2 respond --project {shlex.quote(str(self.project))} --request {question['id']}"
+                    + (f" --artifact {artifact_hash}" if key == "prototype-approval" else "")
+                    + (" --answer <选项>" if interaction["kind"] == "choice" else " --answer-file <文本文件>"))
+            self.store.event(rid, "question.waiting", {"label": "等待用户审核原型" if key == "prototype-approval" else "等待用户输入",
+                             "prompt": prompt, "interaction": interaction, "reply_hint": hint})
         while question["answer"] is None:
             if self.question_handler:
                 async with self.question_lock:
                     async def external_answer():
                         while True:
-                            current = self.store.request(rid, key, prompt, artifact_hash)
+                            current = self.store.request(rid, key, prompt, artifact_hash, interaction)
                             if current["answer"] is not None:
                                 return current["answer"]
                             await asyncio.sleep(self.config.load().execution.wait_poll_seconds)
@@ -166,18 +182,28 @@ class WorkflowEngine:
                         try:
                             self.store.answer(question["id"], answer, artifact_hash)
                         except AA2Error:
-                            pass  # Another attached client answered first.
+                            # Only a competing valid response may win this race.
+                            current = self.store.request(rid, key, prompt, artifact_hash, interaction)
+                            if current["answer"] is None:
+                                raise
                     finally:
                         for task in tasks:
                             task.cancel()
                         await asyncio.gather(*tasks, return_exceptions=True)
             else:
                 await asyncio.sleep(self.config.load().execution.wait_poll_seconds)
-            question = self.store.request(rid, key, prompt, artifact_hash)
+            question = self.store.request(rid, key, prompt, artifact_hash, interaction)
             if self.store.run(rid)["status"] == "CANCELLED":
                 raise AA2Error("Iteration cancelled")
         self.store.update(rid, status="RUNNING")
-        return question["answer"]
+        answer = question["answer"]
+        if question["interaction"].get("kind") == "choice":
+            answer = next(o["value"] for o in question["interaction"]["options"] if o["key"] == answer)
+        if question["interaction"].get("pause_on") == question["answer"]:
+            # A pause is not a reusable confirmation on the next resume.
+            self.store.supersede_questions(rid, key, include_answered=True)
+            raise asyncio.CancelledError()
+        return answer
 
     async def _invoke(self, stage, context, schema, workspace, rid, key, fresh=False):
         maximum = self.config.load().execution.max_tokens
@@ -198,6 +224,136 @@ class WorkflowEngine:
         self.store.event(rid, "artifact.created", {"stage": stage, "operation": key, "artifact": artifact})
         return result
 
+    async def _questions(self, rid, key, questions, fingerprint):
+        answers = []
+        for index, question in enumerate(questions):
+            prompt = question if isinstance(question, str) else question.prompt
+            options = [] if isinstance(question, str) else question.options
+            answer = await self._ask(rid, f"{key}/{index}", prompt, fingerprint,
+                                     choice_spec(options) if options else None)
+            answers.append({"question": prompt, "answer": answer})
+        return answers
+
+    async def _approve_prototype(self, rid, work, fingerprint):
+        directory = work / "design/prototypes"
+        pages = sorted(directory.rglob("*.html"))
+        if not pages:
+            raise AA2Error("原型页面尚未准备好，不能请求审核")
+        with PreviewServer(directory) as preview:
+            links = []
+            for page in pages:
+                name = page.relative_to(directory).as_posix()
+                label = "原型说明" if page.name == "review.html" else "界面预览"
+                links.append(f"{label}（{name}）：{preview.url}{quote(name)}")
+            prompt = ("等待用户审核原型\n原型已准备好，请在浏览器中查看：\n" + "\n".join(links)
+                      + "\n通过后继续开发；不通过则填写修改意见，修改后重新审核。"
+                      + "\n等待期间预览保持可用，后续开发暂不继续。")
+            answer = await self._ask(rid, "prototype-approval", prompt, fingerprint,
+                                     choice_spec(["通过，继续开发", "不通过，填写修改意见"], ["approve", "reject"]))
+            if self._prototype_hash(work) != fingerprint:
+                raise AA2Error("原型在审核期间发生变化，已保留现场；请核对修改后再续跑")
+            if answer not in {"approve", "通过", "批准"}:  # Includes saved legacy approvals.
+                feedback = await self._ask(rid, "prototype-feedback", "请输入原型修改意见：", fingerprint)
+                return feedback
+        return None
+
+    def _legacy_prototype(self, rid):
+        pending = next((q for q in self.store.pending(rid) if q["key"] == "prototype"), None)
+        if not pending:
+            return None
+        # Reuse the immutable candidate behind the old, premature question.
+        for event in reversed(self.store.events(rid)):
+            if event["kind"] == "artifact.created" and event["data"].get("operation") == "prototype":
+                data = self.artifacts.json(event["data"]["artifact"])
+                if digest(data) == pending["artifact_hash"]:
+                    return DocumentResult.model_validate(data)
+        return None
+
+    async def _prepare_prototype(self, rid, work, specification, assessment, context, original):
+        key = "prototype/pending"
+        identity = digest([assessment, self.store.get(rid, "baseline"), self.store.get(rid, "replan_feedback")])
+        pending = self.store.get(rid, key, {})
+        if pending and pending["identity"] != identity:
+            # Keep the old candidate in immutable artifacts/history; do not apply it.
+            pending = {}
+        if not pending:
+            document = self._legacy_prototype(rid)
+            if (work / "DESIGN.md").is_file():
+                context["design_baseline"] = (work / "DESIGN.md").read_text()
+            else:
+                self.resources.register(self.store.root / "cache/design", "cache", rid)
+                with observe_activity(self.store, rid, "准备原型设计参考"):
+                    context["design_candidates"] = await DesignCatalog(self.store.root / "cache/design", self.sandbox).candidates(original)
+            if document is None:
+                document = await self._invoke("prototype", context, DocumentResult, work, rid, "prototype")
+            pending = {"identity": identity, "document": document.model_dump(),
+                       "design_candidates": context.get("design_candidates", [])}
+            self.store.checkpoint(rid, key, pending)
+        document = DocumentResult.model_validate(pending["document"])
+        if pending["design_candidates"]:
+            context["design_candidates"] = pending["design_candidates"]
+        self.store.supersede_questions(rid, "prototype")
+        for correction in range(2):
+            genuine = [q for q in document.questions if not is_prototype_approval(q)]
+            premature = len(genuine) != len(document.questions)
+            if genuine:
+                context["prototype_answer"] = await self._questions(rid, "prototype-clarification", genuine, digest(document.model_dump()))
+            elif not premature or document.files:
+                break
+            else:
+                context["controller_feedback"] = "Generate prototype files now. Human approval is requested by the controller after files, checks and preview exist. Do not ask for it in questions."
+            document = await self._invoke("prototype", context, DocumentResult, work, rid, "prototype")
+            pending["document"] = document.model_dump()
+            self.store.checkpoint(rid, key, pending)
+        else:
+            raise AA2Error("原型尚有未解决的问题，未进入人工审核")
+        document = document.model_copy(update={"questions": []})
+        if "prepared" not in pending:
+            candidates = {item["url"] for item in pending["design_candidates"]}
+            selected = [source for source in document.sources if source.url in candidates]
+            if candidates and not selected:
+                raise Replan("prototype", "Cite the chosen pinned DESIGN.md candidate URL in sources before producing a new design")
+            retrieved = await ResearchService(self.artifacts).verify(selected) if selected else []
+            prior_pages = git(work, "ls-tree", "-r", "--name-only", self.store.get(rid, "baseline"), "--", "design/prototypes")
+            scopes = specification.prototype_paths if prior_pages else ["design/prototypes", "DESIGN.md"]
+            if prior_pages and document.files and not scopes:
+                raise Replan("clarify", "Existing prototypes require explicit prototype_paths; preserve unrelated designs")
+            if any(not (p == "DESIGN.md" or p.startswith("design/prototypes/")) for p in specification.prototype_paths):
+                raise Replan("clarify", "prototype_paths must refer only to prototype pages or DESIGN.md")
+            pending.update(document=document.model_dump(), retrieved=retrieved,
+                           prepared=prepare_changes(work, document.files, scopes, protected=False, contracts=True))
+            self.store.checkpoint(rid, key, pending)
+        if "fingerprint" not in pending:
+            apply_prepared(work, pending["prepared"])
+            pending["fingerprint"] = self._prototype_hash(work)
+            self.store.checkpoint(rid, key, pending)
+        fingerprint = self._prototype_hash(work)
+        if fingerprint != pending["fingerprint"]:
+            raise AA2Error("待审核原型已被修改，已保留现场；请核对修改后再续跑")
+        await self._ensure_browser(rid, work)
+        if "visuals" not in pending:
+            with observe_activity(self.store, rid, "原型浏览器检查"):
+                pending["visuals"] = await inspect_prototype(work / "design/prototypes", self.store.root / "visuals" / rid / "prototype", document.browser_actions)
+            self.store.checkpoint(rid, key, pending)
+        if "review" not in pending:
+            review = await self._invoke("review", {"specification": assessment, "prototype": document.model_dump(),
+                "review_kind": "prototype", "design_evidence": pending["retrieved"], "browser_evidence": pending["visuals"],
+                "project": self.contexts.build(work)}, ReviewResult, work, rid, "prototype-review", fresh=True)
+            if not review.approved:
+                raise Replan("prototype", review.summary)
+            pending["review"] = review.model_dump()
+            self.store.checkpoint(rid, key, pending)
+        if self._prototype_hash(work) != fingerprint:
+            raise AA2Error("原型在检查期间被修改，需要重新检查")
+        prior = self.store.get(rid, "prototype_approval", {}).get("hash") == fingerprint or any(
+            self.store.get(p["id"], "prototype_approval", {}).get("hash") == fingerprint for p in self.store.successful())
+        if not prior:
+            feedback = await self._approve_prototype(rid, work, fingerprint)
+            if feedback is not None:
+                raise Replan("prototype", feedback)
+        self.store.checkpoint(rid, "prototype_approval", {"hash": fingerprint, "review": pending["review"], "visuals": pending["visuals"]})
+        return document, pending["retrieved"]
+
     async def _execute(self, rid):
         if self.store.run(rid)["status"] == "SUCCEEDED":
             self.resources.finish_delivery(rid)
@@ -217,7 +373,8 @@ class WorkflowEngine:
                 if len(choices) == 1:
                     target = choices[0]
                 else:
-                    target = (await self._ask(rid, "delivery-target", "请选择交付目标分支：" + ", ".join(choices), digest(choices))).strip()
+                    target = (await self._ask(rid, "delivery-target", "请选择交付目标分支：", digest(choices),
+                                             choice_spec(choices))).strip()
                     if target not in choices:
                         raise AA2Error("请选择已存在的本地分支，或在 delivery.target_branch 中明确配置")
                 self.config.select_target(target)
@@ -255,7 +412,7 @@ class WorkflowEngine:
             for turn in range(20):
                 result = await self._invoke("clarify", context, IntakeResult, work, rid, "clarify")
                 if result.questions:
-                    response = await self._ask(rid, f"clarify/{turn}", "\n".join(result.questions), digest(result.model_dump()))
+                    response = await self._questions(rid, f"clarify/{turn}", result.questions, digest(result.model_dump()))
                     context.setdefault("decisions", []).append(response)
                     self.store.checkpoint(rid, "clarify_context", context)
                     continue
@@ -328,23 +485,20 @@ class WorkflowEngine:
                     self.store.checkpoint(rid, stage, reused)
                     context[stage] = reused
                     continue
-                await self._ensure_browser(rid, work)
-                if (work / "DESIGN.md").is_file():
-                    context["design_baseline"] = (work / "DESIGN.md").read_text()
-                else:
-                    self.resources.register(self.store.root / "cache/design", "cache", rid)
-                    context["design_candidates"] = await DesignCatalog(self.store.root / "cache/design", self.sandbox).candidates(original)
             schema = PlanResult if stage == "plan" else DocumentResult
             if stage == "plan":
                 context["task_origins"] = self.store.get(rid, "task_origins", {})
-            document = await self._invoke(stage, context, schema, work, rid, stage)
-            if isinstance(document, DocumentResult) and document.questions:
-                answer = await self._ask(rid, stage, "\n".join(document.questions), digest(document.model_dump()))
-                context[stage + "_answer"] = answer
+            if stage == "prototype":
+                document, retrieved = await self._prepare_prototype(rid, work, result, assessment, context, original)
+            else:
                 document = await self._invoke(stage, context, schema, work, rid, stage)
-                if document.questions:
-                    raise AA2Error(f"{stage} still has unresolved questions")
-            retrieved = []
+                if isinstance(document, DocumentResult) and document.questions:
+                    answer = await self._questions(rid, stage, document.questions, digest(document.model_dump()))
+                    context[stage + "_answer"] = answer
+                    document = await self._invoke(stage, context, schema, work, rid, stage)
+                    if document.questions:
+                        raise AA2Error(f"{stage} still has unresolved questions")
+                retrieved = []
             if stage == "provider_research" and document.sources:
                 retrieved = await ResearchService(self.artifacts).verify(document.sources)
                 review = await self._invoke("review", {"review_kind": "research", "research": document.model_dump(),
@@ -352,38 +506,6 @@ class WorkflowEngine:
                                             work, rid, "research-review", fresh=True)
                 if not review.approved:
                     raise Replan(stage, review.summary)
-            if stage == "prototype":
-                if "design_candidates" in context:
-                    candidates = {item["url"] for item in context["design_candidates"]}
-                    selected = [source for source in document.sources if source.url in candidates]
-                    if not selected:
-                        raise Replan("prototype", "Cite the chosen pinned DESIGN.md candidate in sources before producing a new design")
-                    retrieved = await ResearchService(self.artifacts).verify(selected)
-                    context["selected_design_sources"] = retrieved
-                prior_pages = git(work, "ls-tree", "-r", "--name-only", self.store.get(rid, "baseline"), "--", "design/prototypes")
-                scopes = result.prototype_paths if prior_pages else ["design/prototypes", "DESIGN.md"]
-                if prior_pages and document.files and not scopes:
-                    raise Replan("clarify", "Existing prototypes require explicit prototype_paths for this iteration; preserve unrelated approved pages and the design baseline")
-                if any(not (p == "DESIGN.md" or p.startswith("design/prototypes/")) for p in result.prototype_paths):
-                    raise Replan("clarify", "prototype_paths must refer only to approved prototype pages/components or DESIGN.md")
-                apply_changes(work, document.files, scopes, protected=False, contracts=True)
-                visuals = await inspect_prototype(work / "design/prototypes", self.store.root / "visuals" / rid / "prototype", document.browser_actions)
-                review = await self._invoke("review", {"specification": assessment, "prototype": document.model_dump(),
-                                                     "review_kind": "prototype",
-                                                     "design_evidence": retrieved,
-                                                     "browser_evidence": visuals, "project": self.contexts.build(work)},
-                                            ReviewResult, work, rid, "prototype-review", fresh=True)
-                if not review.approved:
-                    raise Replan("prototype", review.summary)
-                fingerprint = self._prototype_hash(work)
-                prior_approval = any(self.store.get(p["id"], "prototype_approval", {}).get("hash") == fingerprint
-                                     for p in self.store.successful())
-                if not prior_approval:
-                    with PreviewServer(work / "design/prototypes") as preview:
-                        answer = await self._ask(rid, "prototype-approval", f"原型自动审查通过。预览：{preview.url}\n输入 approve 批准，或填写修改意见。", fingerprint)
-                    if answer.strip().lower() not in {"approve", "通过", "批准"}:
-                        raise Replan("prototype", answer)
-                self.store.checkpoint(rid, "prototype_approval", {"hash": fingerprint, "review": review.model_dump(), "visuals": visuals})
             if stage == "plan":
                 unmet = {c.requirement_id for c in result.coverage if c.status != "satisfied"} or {r.id for r in result.requirements}
                 validate_plan(document, unmet)
@@ -447,8 +569,9 @@ class WorkflowEngine:
             if self.store.get(rid, "prototype_approval", {}).get("hash") != self._prototype_hash(work):
                 raise Replan("prototype", "Prototype changed after human approval")
             await self._ensure_browser(rid, work)
-            visuals = await inspect_application(plan.preview, work, self.store.root / "visuals" / rid / "implemented",
-                                                environment, self.sandbox, self.store.root)
+            with observe_activity(self.store, rid, "实现界面浏览器验收"):
+                visuals = await inspect_application(plan.preview, work, self.store.root / "visuals" / rid / "implemented",
+                                                    environment, self.sandbox, self.store.root)
             self.store.checkpoint(rid, "verify/visuals", visuals)
         cached_review = self.store.get(rid, "verify/review") if self.store.get(rid, "verify/review_identity") == verify_key else None
         review = ReviewResult.model_validate(cached_review) if cached_review else await self._invoke("verify", {**context, "project": self.contexts.build(work),
@@ -468,18 +591,19 @@ class WorkflowEngine:
 
     async def _environment(self, work, rid, plan=None):
         profile = ProjectProfile.detect(work, self.config.load().project_profile)
-        self.store.event(rid, "environment.preparing", {"profile": profile.name})
-        for name in ("conda", "npm", "design"):
-            cache = self.store.root / "cache" / name
-            cache.mkdir(parents=True, exist_ok=True)
-            self.resources.register(cache, "cache", rid)
-        environment = await self.environments.ensure(work, profile.name, plan.environment_file if plan else "",
-                                                      plan.requirements_file if plan else "")
-        self.resources.register(environment.prefix, "environment", rid)
-        for directory in profile.node_roots:
-            await self.environments.install_node(directory, environment)
-        self.store.event(rid, "environment.ready", {"fingerprint": environment.fingerprint})
-        return environment
+        with observe_activity(self.store, rid, f"准备项目环境（{work.name}）｜{profile.name}"):
+            self.store.event(rid, "environment.preparing", {"profile": profile.name})
+            for name in ("conda", "npm", "design"):
+                cache = self.store.root / "cache" / name
+                cache.mkdir(parents=True, exist_ok=True)
+                self.resources.register(cache, "cache", rid)
+            environment = await self.environments.ensure(work, profile.name, plan.environment_file if plan else "",
+                                                          plan.requirements_file if plan else "")
+            self.resources.register(environment.prefix, "environment", rid)
+            for directory in profile.node_roots:
+                await self.environments.install_node(directory, environment)
+            self.store.event(rid, "environment.ready", {"fingerprint": environment.fingerprint})
+            return environment
 
     async def _develop(self, rid, integration, plan, context):
         cfg = self.config.load()
@@ -611,13 +735,13 @@ class WorkflowEngine:
         if any(cache.glob("chromium-*/chrome-linux*/chrome")):
             return
         import os
-        with self.resources.temporary("browser-install") as scratch:
+        with observe_activity(self.store, rid, "准备浏览器环境"), self.resources.temporary("browser-install") as scratch:
             env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(cache), "TMPDIR": str(scratch)}
             process = await self.sandbox.spawn([sys.executable, "-m", "playwright", "install", "chromium"],
                                                workspace, env, [cache, scratch])
             try:
                 async with asyncio.timeout(900):
-                    _, stderr = await process.communicate()
+                    _, stderr = await capture_output(process)
                 if process.returncode:
                     raise AA2Error("Project-local browser installation failed: " + stderr.decode(errors="replace")[-2000:])
             finally:
@@ -716,8 +840,9 @@ class WorkflowEngine:
         evidence = {"checks": [c.model_dump() for c in checks]}
         if plan and plan.preview:
             await self._ensure_browser(rid, self.project)
-            evidence["visuals"] = await inspect_application(plan.preview, self.project,
-                self.store.root / "visuals" / rid / "runtime", environment, self.sandbox, self.store.root)
+            with observe_activity(self.store, rid, "交付界面运行检查"):
+                evidence["visuals"] = await inspect_application(plan.preview, self.project,
+                    self.store.root / "visuals" / rid / "runtime", environment, self.sandbox, self.store.root)
         return evidence
 
     def _runtime_instructions(self, work):
@@ -772,17 +897,21 @@ class WorkflowEngine:
                 prototype_hash = self._prototype_hash(work)
                 if self.store.get(rid, "prototype_approval", {}).get("hash") != prototype_hash:
                     await self._ensure_browser(rid, work)
-                    prototype = await inspect_prototype(work / "design/prototypes", self.store.root / "visuals" / rid / "reintegration-prototype", [])
+                    with observe_activity(self.store, rid, "集成后原型浏览器检查"):
+                        prototype = await inspect_prototype(work / "design/prototypes", self.store.root / "visuals" / rid / "reintegration-prototype", [])
                     review = await self._invoke("review", {"review_kind": "prototype", "project": self.contexts.build(work), "visuals": prototype},
                                                 ReviewResult, work, rid, "reintegration-prototype", fresh=True)
                     if not review.approved:
                         raise AA2Error(review.summary)
-                    answer = await self._ask(rid, "prototype-approval", "主分支集成改变了原型，请审查后回复 approve。", prototype_hash)
-                    if answer.strip().lower() != "approve":
-                        raise AA2Error("原型未批准")
+                    feedback = await self._approve_prototype(rid, work, prototype_hash)
+                    if feedback is not None:
+                        await self._delivery_repair(rid, work, {"prototype_feedback": feedback},
+                            [p for p in git(work, "ls-files", "design/prototypes", "DESIGN.md").splitlines() if p])
+                        continue
                     self.store.checkpoint(rid, "prototype_approval", {"hash": prototype_hash})
-                visuals = await inspect_application(plan.preview, work, self.store.root / "visuals" / rid / "reintegrated",
-                                                    environment, self.sandbox, self.store.root)
+                with observe_activity(self.store, rid, "集成后界面浏览器验收"):
+                    visuals = await inspect_application(plan.preview, work, self.store.root / "visuals" / rid / "reintegrated",
+                                                        environment, self.sandbox, self.store.root)
             review = await self._invoke("verify", {"project": self.contexts.build(work), "specification": self.store.get(rid, "clarify"),
                 "evidence": [c.model_dump() for c in evidence], "implemented_visuals": visuals, "incoming": incoming},
                 ReviewResult, work, rid, f"reintegration-review/{journal['reintegrations']}", fresh=True)

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .config import ConfigStore
 from .errors import AA2Error
+from .progress import capture_output
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
 from .store import Store
@@ -94,7 +95,7 @@ class EnvironmentManager:
         process = await self.sandbox.spawn(argv, workspace, env, writes, list(reads))
         try:
             async with asyncio.timeout(timeout):
-                stdout, stderr = await process.communicate()
+                stdout, stderr = await capture_output(process)
             if process.returncode:
                 raise AA2Error("Dependency preparation failed: " + stderr.decode(errors="replace")[-2000:])
             return stdout.decode(errors="replace")

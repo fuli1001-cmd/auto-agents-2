@@ -14,6 +14,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from .errors import AA2Error
+from .progress import capture_output, current_activity
 from .sandbox import SandboxRunner
 from .util import atomic_write, digest
 
@@ -49,7 +50,7 @@ class DesignCatalog:
                                                self.cache, variables, [repo])
             try:
                 async with asyncio.timeout(120):
-                    stdout, stderr = await process.communicate()
+                    stdout, stderr = await capture_output(process)
                 if process.returncode:
                     raise AA2Error("Design catalog Git fetch failed: " + stderr.decode(errors="replace")[-1500:])
                 return stdout.decode()
@@ -115,6 +116,9 @@ async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[d
         raise AA2Error("Prototype has no HTML pages")
     output.mkdir(parents=True, exist_ok=True)
     results = []
+    activity = current_activity.get()
+    if activity:
+        activity.progress(0, len(pages) * 2)
     with PreviewServer(directory) as server:
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch()
@@ -139,6 +143,9 @@ async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[d
                         results.append({"page": str(file.relative_to(directory)), "viewport": width,
                                         "status": response.status if response else 0, "errors": errors,
                                         "screenshot": str(image), "actions": completed})
+                        if activity:
+                            activity.output()
+                            activity.progress(len(results), len(pages) * 2)
                         await page.close()
             finally:
                 await browser.close()
@@ -176,12 +183,17 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
     tail = []
 
     async def drain(stream):
-        while line := await stream.readline():
+        while line := await stream.read(8192):
+            if current_activity.get():
+                current_activity.get().output()
             tail.append(line.decode(errors="replace")[-2000:])
             del tail[:-30]
 
     drains = [asyncio.create_task(drain(process.stdout)), asyncio.create_task(drain(process.stderr))]
     results = []
+    activity = current_activity.get()
+    if activity:
+        activity.progress(0, len(spec.routes) * 2)
     output.mkdir(parents=True, exist_ok=True)
     try:
         async with httpx.AsyncClient(timeout=2) as client:
@@ -213,6 +225,9 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
                         await page.screenshot(path=str(screenshot), full_page=True)
                         results.append({"route": route, "viewport": width, "errors": errors,
                                         "status": response.status if response else 0, "screenshot": str(screenshot), "actions": completed})
+                        if activity:
+                            activity.output()
+                            activity.progress(len(results), len(spec.routes) * 2)
                         await page.close()
             finally:
                 await browser.close()

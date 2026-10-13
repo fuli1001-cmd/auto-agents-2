@@ -177,7 +177,8 @@ async def test_reviewer_rejects_test_weakening_before_any_candidate_is_applied(t
 
 
 @pytest.mark.asyncio
-async def test_prototype_waits_for_versioned_human_approval_and_external_reply(tmp_path, monkeypatch):
+@pytest.mark.parametrize("resume", [False, True])
+async def test_prototype_waits_for_versioned_human_approval_and_external_reply(tmp_path, monkeypatch, resume):
     project = tmp_path / "project"
     project.mkdir()
     requirements = tmp_path / "requirements.md"
@@ -187,7 +188,9 @@ async def test_prototype_waits_for_versioned_human_approval_and_external_reply(t
         async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
             if stage == "prototype":
                 self.calls.append((stage, fresh))
-                return DocumentResult(summary="prototype", document="Static counter", sources=[SourceEvidence(url="https://fixture.invalid/DESIGN.md", claim="style")],
+                return DocumentResult(summary="prototype", document="Static counter",
+                                      questions=["R008 要求先取得人工批准：请审核原型是否通过？"],
+                                      sources=[SourceEvidence(url="https://fixture.invalid/DESIGN.md", claim="style")],
                                       files=[Change(path="design/prototypes/index.html", content="<h1>Counter</h1>"),
                                              Change(path="DESIGN.md", content="Simple monochrome counter")])
             result = await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
@@ -227,10 +230,30 @@ async def test_prototype_waits_for_versioned_human_approval_and_external_reply(t
         question = workflow.store.pending(rid)[0]
         assert question["key"] == "prototype-approval" and question["artifact_hash"]
         assert "design" not in [stage for stage, _ in agent.calls]
+        assert "R008" not in question["prompt"]
+        assert "等待用户审核原型" in question["prompt"]
+        assert "http://127.0.0.1:" in question["prompt"]
+        if resume:
+            before = len(agent.calls)
+            running.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+            assert workflow.store.current()["status"] == "PAUSED"
+            workflow = engine(project, agent)
+            workflow._ensure_browser = browser
+            workflow.question_handler = unanswered_tty
+            question_visible.clear()
+            running = asyncio.create_task(workflow.start())
+            await asyncio.wait_for(question_visible.wait(), 10)
+            resumed = workflow.store.pending(rid)[0]
+            assert resumed["id"] == question["id"] and resumed["artifact_hash"] == question["artifact_hash"]
+            assert len(agent.calls) == before  # No repeated generation or independent review.
         from auto_agents_2.errors import AA2Error
         with pytest.raises(AA2Error, match="版本"):
             workflow.store.answer(question["id"], "approve", "wrong-digest")
-        workflow.store.answer(question["id"], "approve", question["artifact_hash"])
+        with pytest.raises(AA2Error, match="选项"):
+            workflow.store.answer(question["id"], "approve", question["artifact_hash"])
+        workflow.store.answer(question["id"], "1", question["artifact_hash"])
         result = await asyncio.wait_for(running, 15)
         assert result["status"] == "SUCCEEDED"
         assert workflow.store.get(rid, "prototype_approval")["hash"] == question["artifact_hash"]

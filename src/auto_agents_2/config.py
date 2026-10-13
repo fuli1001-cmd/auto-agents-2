@@ -43,7 +43,9 @@ class Execution(Record):
     max_stalled_rounds: int = Field(default=2, ge=1)
     max_replans: int = Field(default=2, ge=0)
     infra_retries: int = Field(default=3, ge=0, le=10)
-    agent_timeout: int = Field(default=1800, ge=1)
+    # Accepted only for compatibility with existing project configuration. Model
+    # calls have no wall-clock deadline; command/build timeouts remain separate.
+    agent_timeout: int | None = Field(default=None, exclude=True)
     max_tokens: int | None = Field(default=None, ge=1)
     wait_poll_seconds: float = Field(default=1, gt=0)
 

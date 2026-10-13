@@ -464,7 +464,7 @@ async def test_ambiguous_target_is_selected_once_and_frozen(tmp_path):
     async def select(question):
         questions.append(question["key"])
         assert question["key"] == "delivery-target"
-        return "master"
+        return next(o["key"] for o in question["interaction"]["options"] if o["value"] == "master")
 
     workflow.question_handler = select
     first = await workflow.start(str(requirements))

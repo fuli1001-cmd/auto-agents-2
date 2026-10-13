@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .errors import AA2Error, IncompleteIteration
+from .interaction import validate_answer
 from .util import digest, identifier, now, redact
 
 TERMINAL = ("SUCCEEDED", "CANCELLED")
@@ -51,6 +52,12 @@ class Store:
             """)
             if db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] != "1":
                 raise AA2Error("Unsupported state database version")
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(questions)")}
+            if "interaction" not in columns:
+                db.execute("ALTER TABLE questions ADD COLUMN interaction TEXT NOT NULL DEFAULT '{}'")
+            if "superseded" not in columns:
+                db.execute("ALTER TABLE questions ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0")
 
     @contextmanager
     def connect(self):
@@ -139,28 +146,49 @@ class Store:
                            (rid, key, key + "/%"))
             self._event(db, rid, "checkpoints.invalidated", {"keys": keys})
 
-    def request(self, rid, key, prompt, artifact_hash="") -> dict:
+    @staticmethod
+    def _question(row):
+        return {**dict(row), "interaction": json.loads(row["interaction"])}
+
+    def request(self, rid, key, prompt, artifact_hash="", interaction=None) -> dict:
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             qid = identifier("question")
-            db.execute("INSERT OR IGNORE INTO questions VALUES(?,?,?,?,?,NULL,?)",
-                       (qid, rid, key, prompt, artifact_hash, now()))
+            db.execute("INSERT OR IGNORE INTO questions(id,run_id,key,prompt,artifact_hash,answer,created,interaction) VALUES(?,?,?,?,?,NULL,?,?)",
+                       (qid, rid, key, prompt, artifact_hash, now(), json.dumps(interaction or {})))
+            # Refresh preview URLs after restart without losing question history.
+            db.execute("UPDATE questions SET prompt=?,interaction=?,superseded=0 WHERE run_id=? AND key=? AND artifact_hash=? AND answer IS NULL",
+                       (prompt, json.dumps(interaction or {}), rid, key, artifact_hash))
+            db.execute("UPDATE questions SET superseded=1 WHERE run_id=? AND key=? AND artifact_hash!=? AND answer IS NULL",
+                       (rid, key, artifact_hash))
             row = db.execute("SELECT * FROM questions WHERE run_id=? AND key=? AND artifact_hash=?",
                              (rid, key, artifact_hash)).fetchone()
-            return dict(row)
+            return self._question(row)
+
+    def supersede_questions(self, rid, key, *, include_answered=False):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("UPDATE questions SET superseded=1 WHERE run_id=? AND key=? AND answer IS NULL", (rid, key))
+            if include_answered:
+                db.execute("UPDATE questions SET superseded=1,key=key||'/history/'||id WHERE run_id=? AND key=? AND answer IS NOT NULL", (rid, key))
+            self._event(db, rid, "question.superseded", {"key": key})
 
     def pending(self, rid):
         with self.connect() as db:
-            return [dict(r) for r in db.execute(
-                "SELECT * FROM questions WHERE run_id=? AND answer IS NULL ORDER BY created", (rid,))]
+            return [self._question(r) for r in db.execute(
+                "SELECT * FROM questions WHERE run_id=? AND answer IS NULL AND superseded=0 ORDER BY created", (rid,))]
 
     def answer(self, qid, answer, artifact_hash: str | None = None):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone()
-            if not row or row["answer"] is not None:
+            if not row or row["answer"] is not None or row["superseded"]:
                 raise AA2Error("问题不存在或已经处理")
             if artifact_hash is not None and row["artifact_hash"] != artifact_hash:
                 raise AA2Error("审批版本不匹配")
+            if row["key"] == "prototype-approval" and artifact_hash != row["artifact_hash"]:
+                raise AA2Error("原型审核必须指定当前审批版本")
+            answer = validate_answer(answer, json.loads(row["interaction"]))
             db.execute("UPDATE questions SET answer=? WHERE id=?", (answer, qid))
             self._event(db, row["run_id"], "question.answered", {"question_id": qid})
 

@@ -1,0 +1,146 @@
+"""Retained step history and a separate live area for active steps."""
+from __future__ import annotations
+
+import re
+import time
+from dataclasses import dataclass
+
+from rich.console import Group
+from rich.live import Live
+from rich.text import Text
+
+from .interaction import user_text
+
+STAGE_LABELS = {"clarify": "需求澄清", "coverage_review": "需求覆盖审查", "provider_research": "外部服务研究",
+                "prototype": "生成界面原型", "design": "架构设计", "plan": "任务规划", "implement": "开发实现",
+                "review": "独立审查", "verify": "最终验收", "readme": "更新文档"}
+
+
+def agent_label(data):
+    stage, operation = data["stage"], data.get("operation", "")
+    label = STAGE_LABELS.get(stage, stage)
+    for key, value in (("prototype-review", "原型自动审查"), ("reintegration-prototype", "集成后原型审查"),
+                       ("plan-review", "任务规划审查"), ("test-change-review", "测试与配置变更审查")):
+        if key in operation:
+            label = value
+    if data.get("task_title"):
+        label += "（" + user_text(data["task_title"]) + "）"
+    return (f"{label}｜{data['provider']}｜模型：{data.get('model') or 'CLI 默认（未知）'}"
+            f"｜推理：{data.get('effort') or 'CLI 默认（未知）'}")
+
+
+@dataclass
+class Step:
+    title: str
+    started: float
+    output: float | None = None
+    detail: str = ""
+    done: int = 0
+    total: int | None = None
+
+    def line(self, now, outcome=None):
+        stamp = time.strftime("%H:%M:%S", time.localtime(self.started))
+        prefix = f"[{stamp}] {user_text(self.title)}"
+        duration = max(0, int(now - self.started))
+        if outcome:
+            state = {"success": "完成", "error": "失败", "interrupted": "已暂停"}.get(outcome, outcome)
+            return f"{prefix}｜{state}｜耗时 {duration}s"
+        suffix = f"｜已运行 {duration}s"
+        if self.total is not None:
+            suffix += f"｜进度 {self.done}/{self.total}"
+        suffix += ("｜尚未收到输出" if self.output is None
+                   else f"｜最近输出 {max(0, int(now - self.output))} 秒前")
+        if self.detail:
+            suffix += "｜" + user_text(self.detail)
+        if now - (self.output or self.started) >= 300:
+            suffix += "｜⚠ 长时间无输出，状态待确认"
+        return prefix + suffix
+
+
+class ProgressDisplay:
+    def __init__(self, console, tty):
+        self.console, self.tty = console, tty
+        self.steps = {}
+        self.live = None
+
+    def pause(self):
+        if self.live:
+            self.live.stop()
+            self.live = None
+
+    def message(self, text):
+        if not re.match(r"\[\d{2}:\d{2}:\d{2}\]", text):
+            text = f"[{time.strftime('%H:%M:%S')}] {text}"
+        self.console.print(Text(user_text(text)))
+
+    def start(self, key, label, when, total=None):
+        self.steps[key] = Step(label, when, total=total)
+        if not self.tty:
+            self.message(f"[{time.strftime('%H:%M:%S', time.localtime(when))}] {label}")
+
+    def finish(self, key, when, outcome):
+        step = self.steps.pop(key, None)
+        if step:
+            self.message(step.line(when, outcome))
+
+    def event(self, event):
+        kind, data, when = event["kind"], event["data"], event["time"]
+        key = data.get("attempt", data.get("activity", "agent"))
+        if kind == "agent.started":
+            self.start(key, agent_label(data), when)
+        elif kind == "activity.started":
+            self.start(key, data["label"], when, data.get("total"))
+        elif kind in {"agent.output", "activity.output", "activity.progress"}:
+            step = self.steps.get(key)
+            if step:
+                if data.get("last_output") is not None:
+                    step.output = data["last_output"]
+                if data.get("detail"):
+                    step.detail = data["detail"]
+                step.done = data.get("done", step.done)
+                step.total = data.get("total", step.total)
+        elif kind == "agent.spawned" and key in self.steps:
+            self.steps[key].detail = "进程已启动"
+        elif kind in {"agent.finished", "activity.finished"}:
+            self.finish(key, when, data.get("outcome", "success" if data.get("complete") else "error"))
+        elif kind == "agent.retrying":
+            self.message(f"[{time.strftime('%H:%M:%S', time.localtime(when))}] 调用失败，准备重试"
+                         f"｜{data['provider']}｜第 {data['retry']} 次｜等待 {data['delay']}s")
+        elif kind == "question.waiting":
+            self.message(data["label"])
+            if not self.tty:
+                self.message(data["prompt"])
+                for option in data.get("interaction", {}).get("options", []):
+                    self.message(f"{option['key']}. {option['label']}")
+                self.message(data["reply_hint"])
+        elif kind == "task.integrated":
+            self.message(f"任务验收 {data['done']}/{data['total']}")
+        elif kind == "provider.changed":
+            self.message(f"provider 已切换：{data['to']}")
+        elif kind == "run.updated" and data.get("delivery_phase"):
+            self.message("交付｜" + {"ready": "核对目标分支", "reintegrating": "隔离集成与复测", "publishing": "更新主目录",
+                "published": "主目录已更新", "runtime": "准备主目录运行环境", "repairing_runtime": "隔离修复运行检查",
+                "complete": "交付完成"}.get(data["delivery_phase"], data["delivery_phase"]))
+        elif kind == "delivery.completed":
+            self.message(f"交付完成｜{data['target']}｜{data['commit'][:12]}")
+
+    def refresh(self, now=None):
+        now = time.time() if now is None else now
+        if not self.tty:
+            return
+        # Let Rich account for wrapped rows on narrow terminals; never hide the
+        # output age or warning behind a long model/profile name.
+        lines = Group(*(Text(s.line(now), overflow="fold") for s in self.steps.values()))
+        if not self.steps:
+            self.pause()
+        elif self.live is None:
+            self.live = Live(lines, console=self.console, auto_refresh=False, transient=True,
+                             redirect_stdout=False, redirect_stderr=False)
+            self.live.start(refresh=True)
+        else:
+            self.live.update(lines, refresh=True)
+
+    def close(self):
+        self.pause()
+        for key in list(self.steps):
+            self.finish(key, time.time(), "interrupted")

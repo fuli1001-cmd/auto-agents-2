@@ -37,10 +37,16 @@ class Coverage(Record):
     rationale: str
 
 
+class UserQuestion(Record):
+    prompt: str
+    options: list[str] = []
+    purpose: Literal["clarification", "prototype_approval"] = "clarification"
+
+
 class IntakeResult(Record):
     summary: str
     document: str
-    questions: list[str] = []
+    questions: list[str | UserQuestion] = []
     requirements: list[Requirement] = []
     coverage: list[Coverage] = []
     verification: list[Command] = []
@@ -66,7 +72,7 @@ class BrowserAction(Record):
 class DocumentResult(Record):
     summary: str
     document: str
-    questions: list[str] = []
+    questions: list[str | UserQuestion] = []
     sources: list[SourceEvidence] = []
     files: list[Change] = []
     browser_actions: list[BrowserAction] = []

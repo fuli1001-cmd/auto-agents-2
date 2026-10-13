@@ -12,6 +12,7 @@ from .config import Cleanup
 from .environment import Environment
 from .errors import PolicyViolation
 from .models import CheckResult, Command
+from .progress import Activity
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
 from .store import Store
@@ -28,15 +29,27 @@ class VerificationService:
     async def run(self, commands: list[Command], workspace: Path, environment: Environment | None = None) -> list[CheckResult]:
         results = []
         baseline = tree_hash(workspace)
-        for command in commands:
-            with self.resources.temporary("check") as scratch:
-                result = await self._check(command, workspace, environment, baseline, scratch)
-                results.append(result)
-            if result.exit_code:
-                break
+        store = self.resources.store
+        run = store.current(unfinished=True)
+        activity = Activity(store, run["id"] if run else None, f"执行检查（{workspace.name}）", total=len(commands))
+        try:
+            for command in commands:
+                with self.resources.temporary("check") as scratch:
+                    result = await self._check(command, workspace, environment, baseline, scratch, activity)
+                    results.append(result)
+                activity.progress(len(results), len(commands))
+                if result.exit_code:
+                    break
+        except asyncio.CancelledError:
+            activity.finish("interrupted")
+            raise
+        except Exception:
+            activity.finish("error")
+            raise
+        activity.finish("success" if passed(results) else "error")
         return results
 
-    async def _check(self, command, workspace, environment, baseline, scratch):
+    async def _check(self, command, workspace, environment, baseline, scratch, activity=None):
         cwd = workspace if command.cwd == "." else contained(workspace, command.cwd)
         executable = Path(command.argv[0]).name
         if executable in {"sh", "bash", "zsh", "sudo", "conda", "pip", "pip3", "curl", "wget"}:
@@ -58,6 +71,8 @@ class VerificationService:
 
         async def drain(stream, tail):
             while chunk := await stream.read(8192):
+                if activity:
+                    activity.output()
                 tail.extend(chunk)
                 del tail[:-25000]
 
