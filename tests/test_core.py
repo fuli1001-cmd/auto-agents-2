@@ -52,6 +52,16 @@ def test_checkpoint_and_question_survive_restart(project):
         restarted.answer(question["id"], "approve", "sha-v1")
 
 
+def test_removed_timeout_setting_is_rejected(project):
+    config = ConfigStore(project)
+    body = config.load().model_dump(mode="json")
+    assert "agent_timeout" not in body["execution"]
+    body["execution"]["agent_timeout"] = 1800
+    write_json(config.path, body)
+    with pytest.raises(ConfigurationError, match="agent_timeout"):
+        config.load()
+
+
 def test_usage_deduplicates_and_counts_failed_calls(project):
     store = Store(project)
     rid = store.admit("idea", {})["id"]

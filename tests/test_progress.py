@@ -100,7 +100,7 @@ async def test_renderer_flushes_history_before_prompt_and_stops_writing_while_ed
 
 
 @pytest.mark.parametrize("interrupt", [False, True])
-async def test_provider_stream_observation_no_deadline_and_interrupt_cleanup(tmp_path, interrupt):
+async def test_provider_stream_observation_and_interrupt_cleanup(tmp_path, interrupt):
     config, store = configured(tmp_path)
     native = tmp_path / "native"
     native.mkdir()
@@ -120,7 +120,6 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":1,"output_toke
 ''')
     binary.chmod(0o755)
     body = config.load().model_dump(mode="json")
-    body["execution"]["agent_timeout"] = 1  # Legacy configuration must no longer kill this call.
     body["providers"] = {"codex": body["providers"]["codex"]}
     body["active_provider"] = "codex"
     body["providers"]["codex"]["binary"] = str(binary)
