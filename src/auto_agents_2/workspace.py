@@ -45,12 +45,12 @@ def path_allowed(path: str, scopes: list[str]) -> bool:
 
 def prepare_changes(root: Path, changes: list[Change], scopes: list[str], *, protected: bool = True, contracts: bool = False):
     prepared = []
-    paths = set()
+    by_path = {}
     for change in changes:
         path = contained(root, change.path)
-        if change.path in paths:
-            raise PolicyViolation(f"Duplicate change: {change.path}")
-        paths.add(change.path)
+        previous = by_path.get(path)
+        if previous is not None and (previous["operation"] != "replace" or change.operation != "replace"):
+            raise PolicyViolation(f"Duplicate change: {change.path}; only sequential replacements may share a path")
         parts = Path(change.path).parts
         if any(p in EXCLUDED for p in parts) or path.name == ".env" or (path.name.startswith(".env.") and path.name != ".env.example"):
             raise PolicyViolation(f"Protected path: {change.path}")
@@ -67,15 +67,23 @@ def prepare_changes(root: Path, changes: list[Change], scopes: list[str], *, pro
             import json
             if change.operation != "write" or json.loads(path.read_text()).get("scripts") != json.loads(change.content).get("scripts"):
                 raise PolicyViolation("package.json script changes require independent authorization")
+        original = path.read_bytes() if previous is None and path.is_file() else None
         if change.operation == "replace":
-            if not path.is_file() or not change.old_text or path.read_text().count(change.old_text) != 1:
+            source = previous["content"] if previous is not None else (original.decode() if original is not None else None)
+            if source is None or not change.old_text or source.count(change.old_text) != 1:
                 raise PolicyViolation(f"Replacement must match exactly once: {change.path}")
-            content = path.read_text().replace(change.old_text, change.content, 1)
+            content = source.replace(change.old_text, change.content, 1)
         else:
             content = change.content
-        prepared.append({"path": change.path, "operation": change.operation, "content": content,
-                         "before": digest(path.read_bytes()) if path.is_file() else None,
-                         "after": None if change.operation == "delete" else digest(content)})
+        if previous is not None:
+            # One before/after pair per file makes partially applied batches replayable.
+            previous.update(content=content, after=digest(content))
+        else:
+            item = {"path": change.path, "operation": change.operation, "content": content,
+                    "before": digest(original) if original is not None else None,
+                    "after": None if change.operation == "delete" else digest(content)}
+            by_path[path] = item
+            prepared.append(item)
     return prepared
 
 

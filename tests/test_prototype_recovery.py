@@ -239,3 +239,30 @@ async def test_resume_rechecks_old_screenshot_only_evidence(tmp_path, monkeypatc
     with pytest.raises(asyncio.CancelledError):
         await workflow._prepare_prototype(rid, tmp_path, spec, spec.model_dump(), {}, "UI")
     assert calls.count("browser") == 2 and calls.count("review") == 2
+
+
+async def test_resume_saved_candidate_with_multiple_replacements_without_regenerating(tmp_path, monkeypatch):
+    workflow, rid, original, _, calls = prototype_fixture(tmp_path, monkeypatch)
+    spec = IntakeResult(summary="ui", document="UI", frontend=True)
+    directory = tmp_path / "design/prototypes/task"
+    directory.mkdir(parents=True)
+    (directory / "index.html").write_text("<h1>Preview</h1>")
+    (directory / "prototype.js").write_text("const a = 1; const b = 2;")
+    document = original.model_copy(update={"questions": [], "files": [
+        Change(path="design/prototypes/task/prototype.js", operation="replace", old_text="a = 1", content="a = 3"),
+        Change(path="design/prototypes/task/prototype.js", operation="replace", old_text="b = 2", content="b = 4")]})
+    workflow.store.checkpoint(rid, "prototype/pending", {
+        "identity": digest([spec.model_dump(), workflow.store.get(rid, "baseline"), None]),
+        "document": document.model_dump(), "design_candidates": []})
+
+    async def approve(question):
+        assert question["key"] == "prototype-approval"
+        return "1"
+
+    workflow.question_handler = approve
+    await workflow._prepare_prototype(rid, tmp_path, spec, spec.model_dump(), {}, "UI")
+    assert "prototype" not in calls
+    assert calls == ["browser", "review"]
+    assert (directory / "prototype.js").read_text() == "const a = 3; const b = 4;"
+    pending = workflow.store.get(rid, "prototype/pending")
+    assert len(pending["document"]["files"]) == 2 and len(pending["prepared"]) == 1

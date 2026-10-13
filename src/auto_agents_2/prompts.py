@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-PROMPT_VERSION = "2026-10-13.3"
+PROMPT_VERSION = "2026-10-13.4"
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
     "gemini": "https://ai.google.dev/gemini-api/docs/prompting-strategies#gemini-3",
@@ -28,6 +28,9 @@ Return only the requested structured result. Include concrete evidence for concl
 Do not claim tests were executed unless their actual results are available. aa2 runs
 the required checks independently. Avoid duplicate investigation and excessive tests.
 Use relative paths, structured argv (no shell wrappers), and stable requirement/task IDs.
+Multiple replace changes to one file run in list order in memory; each old_text must
+match exactly once in the content after preceding replacements. Never mix write/delete
+with another change to the same file. All changes are validated before any file is written.
 Use the user's language for questions and documentation. New web backends default to
 Python/FastAPI; frontends use React/Vite with TypeScript or Next.js App Router with
 TypeScript according to the requirements. Preserve existing frameworks. Small Python
