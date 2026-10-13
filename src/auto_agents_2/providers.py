@@ -26,7 +26,6 @@ def diagnostic_summary(text: str) -> str:
     for needles, label in (
         (("429", "rate limit", "capacity", "overloaded"), "provider 限流或容量不足"),
         (("retry", "reconnect"), "provider 正在重试或重连"),
-        (("timeout", "timed out"), "provider 报告等待超时"),
         (("connection", "disconnect", "503"), "provider 连接异常"),
         (("401", "403", "unauthorized", "authentication"), "provider 认证或权限异常"),
         (("config", "argument", "profile"), "provider 配置或参数异常"),
@@ -290,7 +289,8 @@ class ProviderRouter:
             self.store.add_usage(run_id, eff["provider"], aid, "invocation", decoder.usage.model_dump())
             self.store.event(run_id, "agent.finished", {"attempt": aid, "complete": decoder.finished,
                                                        "outcome": outcome, "last_output": last_output,
-                                                       "diagnostic": diagnostic_summary("".join(errors)) if errors else ""})
+                                                       "diagnostic": diagnostic_summary(decoder.error or "".join(errors))
+                                                       if outcome == "error" else ""})
             # Candidate responses have been consumed; persistent sessions and usage survive.
             shutil.rmtree(root, ignore_errors=True)
 

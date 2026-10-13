@@ -5,9 +5,10 @@ from pathlib import Path
 import pytest
 
 from auto_agents_2.config import ConfigStore
-from auto_agents_2.design import inspect_application, inspect_prototype
+from auto_agents_2.design import inspect_application, inspect_prototype, prototype_routes
 from auto_agents_2.environment import Environment
 from auto_agents_2.models import BrowserAction, Command, PreviewSpec
+from auto_agents_2.replanning import browser_criteria
 from auto_agents_2.sandbox import SandboxRunner
 
 
@@ -48,3 +49,52 @@ async def test_prototype_cannot_call_external_service(browser_cache, tmp_path):
     (tmp_path / "index.html").write_text('<script>fetch("https://example.invalid/charge-card").catch(()=>{});</script>')
     with pytest.raises(AA2Error, match="external request"):
         await inspect_prototype(tmp_path, tmp_path / "images")
+
+
+async def test_nested_prototype_query_scenarios_execute_all_actions(browser_cache, tmp_path):
+    directory = tmp_path / "pages"
+    (directory / "task").mkdir(parents=True)
+    (directory / "task/index.html").write_text('''<button id="add" onclick="
+        localStorage.setItem('used','yes');document.querySelector('#result').textContent='done'">Add</button>
+        <p id="result"></p><script>
+        document.querySelector('#result').textContent = localStorage.getItem('used') ||
+            new URLSearchParams(location.search).get('scene') || 'default';
+        </script>''')
+    actions = []
+    for route, initial in (("/index.html", "default"), ("/index.html?scene=empty", "empty"),
+                           ("/task/index.html?scene=error", "error")):
+        actions.extend([BrowserAction(route=route, action="expect_text", selector="#result", value=initial),
+                        BrowserAction(route=route, action="click", selector="#add"),
+                        BrowserAction(route=route, action="expect_text", selector="#result", value="done")])
+    rows = await inspect_prototype(directory, tmp_path / "images", actions)
+    assert len(rows) == 6
+    assert all(r["resolved_route"].startswith("/task/index.html") for r in rows)
+    assert all(len(r["actions"]) == 3 for r in rows)
+    assert len({r["screenshot"] for r in rows}) == 6
+    assert all(browser_criteria(actions, rows).values())
+
+
+@pytest.mark.parametrize("route", ["/missing.html", "/index.html", "https://example.com/index.html",
+                                   "//example.com/index.html", "/%2e%2e/index.html", "/a/../b/index.html"])
+def test_unmatched_ambiguous_and_nonlocal_routes_are_rejected(tmp_path, route):
+    from auto_agents_2.errors import AA2Error
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "index.html").write_text("<p>test</p>")
+    with pytest.raises(AA2Error):
+        prototype_routes(tmp_path, [BrowserAction(route=route, action="expect_visible", selector="p")])
+    assert prototype_routes(tmp_path, [BrowserAction(route="/a/index.html", action="expect_visible", selector="p")])[0] == (
+        "/a/index.html", "/a/index.html")
+
+
+async def test_failed_interaction_keeps_completed_prefix_and_failure(browser_cache, tmp_path):
+    from auto_agents_2.errors import PrototypeBrowserError
+    (tmp_path / "index.html").write_text('<button id="ok">OK</button>')
+    actions = [BrowserAction(route="/index.html", action="click", selector="#ok"),
+               BrowserAction(route="/index.html", action="click", selector="[")]
+    with pytest.raises(PrototypeBrowserError) as failed:
+        await inspect_prototype(tmp_path, tmp_path / "images", actions)
+    row = failed.value.results[0]
+    assert row["actions"] == [actions[0].model_dump()]
+    assert row["failed_action"] == actions[1].model_dump()
+    assert row["errors"] and Path(row["screenshot"]).exists()

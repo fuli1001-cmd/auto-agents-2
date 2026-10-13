@@ -13,9 +13,16 @@ from .artifacts import ArtifactStore
 from .config import ConfigStore
 from .context import ContextBuilder
 from .delivery import DeliveryCoordinator, RuntimeVerificationError
-from .design import DesignCatalog, PreviewServer, browser_environment, inspect_application, inspect_prototype
+from .design import (
+    PROTOTYPE_BROWSER_VERSION,
+    DesignCatalog,
+    PreviewServer,
+    browser_environment,
+    inspect_application,
+    inspect_prototype,
+)
 from .environment import EnvironmentManager
-from .errors import AA2Error, PolicyViolation, ProviderError
+from .errors import AA2Error, PolicyViolation, PrototypeBrowserError, ProviderError
 from .interaction import choice_spec, is_prototype_approval, question_text
 from .models import (
     CheckResult,
@@ -36,7 +43,7 @@ from .research import ResearchService
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
 from .store import Store
-from .util import atomic_write, digest, file_lock, scrub_text
+from .util import atomic_write, digest, file_lock, identifier, scrub_text
 from .verification import VerificationService, passed
 from .workspace import WorkspaceManager, apply_changes, apply_prepared, git, prepare_changes, tree_hash
 
@@ -297,10 +304,36 @@ class WorkflowEngine:
                     return DocumentResult.model_validate(data)
         return None
 
+    async def _prototype_browser_report(self, rid, work, document):
+        await self._ensure_browser(rid, work)
+        fingerprint = self._prototype_hash(work)
+        results, error = [], ""
+        try:
+            with observe_activity(self.store, rid, "原型浏览器检查"):
+                results = await inspect_prototype(work / "design/prototypes",
+                    self.store.root / "visuals" / rid / "prototype" / identifier("check"), document.browser_actions)
+        except PrototypeBrowserError as exc:
+            results, error = exc.results, str(exc)
+        if self._prototype_hash(work) != fingerprint:
+            raise AA2Error("原型在检查期间被修改，需要重新检查")
+        report = {"version": PROTOTYPE_BROWSER_VERSION, "source_hash": fingerprint,
+                  "actions_hash": digest([a.model_dump() for a in document.browser_actions]),
+                  "results": results, "error": error}
+        artifact = self.artifacts.put(report, "prototype-browser")
+        self.store.event(rid, "artifact.created", {"stage": "prototype", "operation": "prototype-browser", "artifact": artifact})
+        # Keep the report across prototype replans, so the next proposal gets actual failures.
+        self.store.checkpoint(rid, "prototype_browser_report", artifact)
+        self._replan_evidence(rid, "prototype-browser", browser_criteria(document.browser_actions, results),
+                              source_hash=fingerprint)
+        return report
+
     async def _prepare_prototype(self, rid, work, specification, assessment, context, original):
         key = "prototype/pending"
         identity = digest([assessment, self.store.get(rid, "baseline"), self.store.get(rid, "replan_feedback")])
         pending = self.store.get(rid, key, {})
+        report_ref = self.store.get(rid, "prototype_browser_report")
+        if report_ref:
+            context["controller_browser_report"] = self.artifacts.json(report_ref)
         if pending and pending["identity"] != identity:
             # Keep the old candidate in immutable artifacts/history; do not apply it.
             pending = {}
@@ -315,9 +348,37 @@ class WorkflowEngine:
             if document is None:
                 document = await self._invoke("prototype", context, DocumentResult, work, rid, "prototype")
             pending = {"identity": identity, "document": document.model_dump(),
-                       "design_candidates": context.get("design_candidates", [])}
+                       "design_candidates": context.get("design_candidates", []),
+                       "question_refresh_version": PROTOTYPE_BROWSER_VERSION}
             self.store.checkpoint(rid, key, pending)
         document = DocumentResult.model_validate(pending["document"])
+        # Re-evaluate legacy unanswered questions with real controller evidence.
+        # No candidate changes are applied before resolving genuine user decisions.
+        if (pending.get("question_refresh_version", 0) < PROTOTYPE_BROWSER_VERSION
+                and not document.files and document.browser_actions and "prepared" not in pending
+                and any(q["key"].startswith("prototype-clarification/") for q in self.store.pending(rid))):
+            context["controller_browser_report"] = await self._prototype_browser_report(rid, work, document)
+            context["previous_prototype"] = document.model_dump()
+            with self.store.connect() as db:
+                context["prototype_answer"] = [dict(row) for row in db.execute(
+                    "SELECT prompt AS question,answer FROM questions WHERE run_id=? "
+                    "AND key LIKE 'prototype-clarification/%' AND artifact_hash=? AND answer IS NOT NULL",
+                    (rid, digest(document.model_dump())))]
+            context["controller_feedback"] = (
+                "The controller browser executor has been repaired. Its actual report is attached. "
+                "Resolve internal evidence requests from that report; do not ask the user to supply controller logs. "
+                "Preserve genuine product questions and all existing acceptance obligations.")
+            refreshed = await self._invoke("prototype", context, DocumentResult, work, rid, "prototype", fresh=True)
+            self.artifacts.put(pending, "prototype-recovery")
+            pending.update(document=refreshed.model_dump(), question_refresh_version=PROTOTYPE_BROWSER_VERSION,
+                           refreshed_question_hash=digest(document.model_dump()))
+            self.store.checkpoint(rid, key, pending)
+            document = refreshed
+        if pending.get("refreshed_question_hash"):
+            for question in self.store.pending(rid):
+                if (question["key"].startswith("prototype-clarification/")
+                        and question["artifact_hash"] == pending["refreshed_question_hash"]):
+                    self.store.supersede_questions(rid, question["key"])
         if pending["design_candidates"]:
             context["design_candidates"] = pending["design_candidates"]
         self.store.supersede_questions(rid, "prototype")
@@ -360,10 +421,17 @@ class WorkflowEngine:
         fingerprint = self._prototype_hash(work)
         if fingerprint != pending["fingerprint"]:
             raise AA2Error("待审核原型已被修改，已保留现场；请核对修改后再续跑")
-        await self._ensure_browser(rid, work)
+        if "visuals" in pending and pending.get("browser_version") != PROTOTYPE_BROWSER_VERSION:
+            self.artifacts.put(pending, "prototype-recovery")
+            pending.pop("visuals")
+            pending.pop("review", None)
+            self.store.checkpoint(rid, key, pending)
         if "visuals" not in pending:
-            with observe_activity(self.store, rid, "原型浏览器检查"):
-                pending["visuals"] = await inspect_prototype(work / "design/prototypes", self.store.root / "visuals" / rid / "prototype", document.browser_actions)
+            report = await self._prototype_browser_report(rid, work, document)
+            if report["error"]:
+                raise Replan("prototype", report["error"])
+            pending["visuals"] = report["results"]
+            pending["browser_version"] = PROTOTYPE_BROWSER_VERSION
             self.store.checkpoint(rid, key, pending)
         if self._prototype_hash(work) != fingerprint:
             raise AA2Error("原型在检查期间被修改，需要重新检查")

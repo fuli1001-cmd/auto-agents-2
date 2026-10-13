@@ -7,7 +7,14 @@ from test_workflow import CodingAgent, engine
 
 from auto_agents_2.engine import Replan
 from auto_agents_2.errors import AA2Error
-from auto_agents_2.models import Change, DocumentResult, IntakeResult, ReviewResult, SourceEvidence
+from auto_agents_2.models import (
+    BrowserAction,
+    Change,
+    DocumentResult,
+    IntakeResult,
+    ReviewResult,
+    SourceEvidence,
+)
 from auto_agents_2.util import digest
 from auto_agents_2.workspace import git
 
@@ -135,3 +142,100 @@ async def test_interrupted_application_recovers_prepared_candidate_without_overw
         await workflow._prepare_prototype(rid, tmp_path, spec, spec.model_dump(), {}, "UI")
     assert user_file.read_text() == "user edits after interrupt"
     assert workflow.store.get(rid, "prototype_approval") is None
+
+
+@pytest.mark.parametrize("genuine_question", [False, True])
+@pytest.mark.parametrize("interrupted", [False, True])
+async def test_resume_refreshes_legacy_internal_question_with_actual_browser_report(
+        tmp_path, monkeypatch, genuine_question, interrupted):
+    workflow, rid, original, _, calls = prototype_fixture(tmp_path, monkeypatch)
+    spec = IntakeResult(summary="ui", document="UI", frontend=True)
+    page = tmp_path / "design/prototypes/task/index.html"
+    page.parent.mkdir(parents=True)
+    page.write_text("<h1>Preview</h1>")
+    document = original.model_copy(update={"files": [], "questions": ["界面语言？", "请提供控制器侧浏览器交互检查的实际报告"],
+        "browser_actions": [BrowserAction(route="/index.html", action="expect_visible", selector="h1")]})
+    identity = digest([spec.model_dump(), workflow.store.get(rid, "baseline"), None])
+    workflow.store.checkpoint(rid, "prototype/pending", {"identity": identity,
+        "document": document.model_dump(), "design_candidates": []})
+    answered = workflow.store.request(rid, "prototype-clarification/0", document.questions[0], digest(document.model_dump()))
+    workflow.store.answer(answered["id"], "中文")
+    old = workflow.store.request(rid, "prototype-clarification/1", document.questions[1], digest(document.model_dump()))
+
+    class Agent:
+        async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
+            if stage == "prototype":
+                if fresh:
+                    assert context["prototype_answer"] == [{"question": "界面语言？", "answer": "中文"}]
+                else:
+                    assert context["prototype_answer"] == [{"question": "是否需要导出？", "answer": "需要"}]
+                report = context["controller_browser_report"]
+                assert report["results"] == [{"status": 200}]
+                assert report["source_hash"] == workflow._prototype_hash(tmp_path)
+                return document.model_copy(update={"questions": ["是否需要导出？"] if genuine_question and fresh else []})
+            return ReviewResult(approved=True, summary="verified")
+
+    workflow.agent = Agent()
+
+    async def approve(question):
+        if question["key"].startswith("prototype-clarification/"):
+            assert genuine_question and question["prompt"] == "是否需要导出？"
+            return "需要"
+        assert question["key"] == "prototype-approval"
+        return "1"
+
+    workflow.question_handler = approve
+    if interrupted:
+        supersede = workflow.store.supersede_questions
+
+        def stop_before_superseding(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(workflow.store, "supersede_questions", stop_before_superseding)
+        with pytest.raises(asyncio.CancelledError):
+            await workflow._prepare_prototype(rid, tmp_path, spec, spec.model_dump(), {}, "UI")
+        monkeypatch.setattr(workflow.store, "supersede_questions", supersede)
+    await workflow._prepare_prototype(rid, tmp_path, spec, spec.model_dump(), {}, "UI")
+    assert page.read_text() == "<h1>Preview</h1>"
+    assert calls.count("browser") == 2
+    with workflow.store.connect() as db:
+        assert db.execute("SELECT answer,superseded FROM questions WHERE id=?", (old["id"],)).fetchone()[:] == (None, 1)
+        assert db.execute("SELECT answer FROM questions WHERE id=?", (answered["id"],)).fetchone()[0] == "中文"
+    assert workflow.artifacts.json(workflow.store.get(rid, "prototype_browser_report"))["results"]
+
+
+async def test_browser_failure_is_archived_and_returned_to_prototype_replan(tmp_path, monkeypatch):
+    from auto_agents_2.errors import PrototypeBrowserError
+    workflow, rid, _, _, _ = prototype_fixture(tmp_path, monkeypatch)
+    rows = [{"route": "/task/index.html", "viewport": 1440, "status": 200, "actions": [],
+             "errors": ["Missing button"], "failed_action": {"selector": "#add"}}]
+
+    async def failed(*args):
+        raise PrototypeBrowserError("Missing button", rows)
+
+    monkeypatch.setattr("auto_agents_2.engine.inspect_prototype", failed)
+    spec = IntakeResult(summary="ui", document="UI", frontend=True)
+    with pytest.raises(Replan, match="Missing button"):
+        await workflow._prepare_prototype(rid, tmp_path, spec, spec.model_dump(), {}, "UI")
+    report = workflow.artifacts.json(workflow.store.get(rid, "prototype_browser_report"))
+    assert report["results"] == rows and report["error"] == "Missing button"
+    assert "visuals" not in workflow.store.get(rid, "prototype/pending")
+    assert workflow.store.get(rid, "prototype_approval") is None
+
+
+async def test_resume_rechecks_old_screenshot_only_evidence(tmp_path, monkeypatch):
+    workflow, rid, _, _, calls = prototype_fixture(tmp_path, monkeypatch)
+    spec = IntakeResult(summary="ui", document="UI", frontend=True)
+
+    async def interrupt(question):
+        raise asyncio.CancelledError()
+
+    workflow.question_handler = interrupt
+    with pytest.raises(asyncio.CancelledError):
+        await workflow._prepare_prototype(rid, tmp_path, spec, spec.model_dump(), {}, "UI")
+    pending = workflow.store.get(rid, "prototype/pending")
+    pending.pop("browser_version")
+    workflow.store.checkpoint(rid, "prototype/pending", pending)
+    with pytest.raises(asyncio.CancelledError):
+        await workflow._prepare_prototype(rid, tmp_path, spec, spec.model_dump(), {}, "UI")
+    assert calls.count("browser") == 2 and calls.count("review") == 2

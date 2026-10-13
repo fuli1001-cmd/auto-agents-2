@@ -10,7 +10,7 @@ from test_runtime import configured
 from auto_agents_2 import cli
 from auto_agents_2.display import ProgressDisplay
 from auto_agents_2.models import ReviewResult
-from auto_agents_2.providers import ProviderRouter
+from auto_agents_2.providers import ProviderRouter, diagnostic_summary
 from auto_agents_2.sandbox import SandboxRunner
 from auto_agents_2.transports import CodexTransport
 from auto_agents_2.util import write_json
@@ -112,6 +112,7 @@ sys.stdout.flush()
 time.sleep(1.3)
 print('"thread_id":"fixture"}',flush=True)
 sys.stderr.write('API_KEY=never-log-this\\n')
+sys.stderr.write('internal worker timed out; timeout=5\\n')
 sys.stderr.flush()
 time.sleep(0.1)
 result={"approved":True,"summary":"done","findings":[]}
@@ -142,10 +143,16 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":1,"output_toke
             assert (await asyncio.wait_for(task, 5)).approved
         events = store.events(rid)
         assert "never-log-this" not in json.dumps(events)
+        assert "provider 报告等待超时" not in json.dumps(events, ensure_ascii=False)
         finished = next(e["data"] for e in events if e["kind"] == "agent.finished")
         assert finished["outcome"] == ("interrupted" if interrupt else "success")
         assert finished["last_output"]
+        assert not finished["diagnostic"]
         assert not list((store.root / "processes").glob("*.json"))
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+def test_timeout_keyword_is_not_a_provider_timeout_verdict():
+    assert diagnostic_summary("internal worker timed out; timeout=5") == "provider 诊断输出"

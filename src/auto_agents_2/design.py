@@ -9,14 +9,16 @@ import shutil
 import socket
 import threading
 from pathlib import Path
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 import httpx
 
-from .errors import AA2Error
+from .errors import AA2Error, PrototypeBrowserError
 from .progress import capture_output, current_activity
 from .sandbox import SandboxRunner
-from .util import atomic_write, digest
+from .util import atomic_write, digest, scrub_text
+
+PROTOTYPE_BROWSER_VERSION = 2
 
 
 class DesignCatalog:
@@ -86,8 +88,9 @@ class PreviewServer:
         self.server.server_close()
 
 
-async def exercise(page, actions, route):
-    completed = []
+async def exercise(page, actions, route, completed=None):
+    if completed is None:
+        completed = []
     for step in actions:
         if step.route != route:
             continue
@@ -105,29 +108,67 @@ async def exercise(page, actions, route):
     return completed
 
 
+def prototype_routes(directory: Path, actions) -> list[tuple[str, str]]:
+    """Pair declared routes with local URLs; retain declarations as evidence identities."""
+    pages = {"/" + p.relative_to(directory).as_posix(): p for p in sorted(directory.rglob("*.html"))}
+    routes = {}
+    for action in actions:
+        route = action.route
+        parsed = urlsplit(route)
+        path = unquote(parsed.path)
+        if (parsed.scheme or parsed.netloc or not path.startswith("/") or path.startswith("//")
+                or "\\" in path or any(p in {".", ".."} for p in path.split("/"))):
+            raise AA2Error(f"Prototype route must be a local path: {route}")
+        if path.endswith("/"):
+            path += "index.html"
+        target = path
+        if target not in pages:
+            # Support old proposals rooted at a single nested prototype directory.
+            matches = [p for p in pages if p.endswith(path)] if path.count("/") == 1 else []
+            if len(matches) != 1:
+                raise AA2Error(f"Prototype route is missing or ambiguous: {route}; use a path relative to design/prototypes")
+            target = matches[0]
+        if not pages[target].resolve().is_relative_to(directory.resolve()):
+            raise AA2Error(f"Prototype route escapes its directory: {route}")
+        routes[route] = urlunsplit(("", "", quote(target, safe="/"), parsed.query, parsed.fragment))
+    for path in pages:
+        if not pages[path].resolve().is_relative_to(directory.resolve()):
+            raise AA2Error(f"Prototype page escapes its directory: {path}")
+        resolved = quote(path, safe="/")
+        if resolved not in routes.values():
+            routes.setdefault(path, resolved)
+    if not routes:
+        raise AA2Error("Prototype has no HTML pages")
+    return list(routes.items())
+
+
 async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[dict]:
     """Render static pages in a real browser; save screenshots before human approval."""
     try:
         from playwright.async_api import async_playwright
     except ImportError as exc:
         raise AA2Error("Install aa2[browser] in the aa2 environment for prototype verification") from exc
-    pages = list(directory.rglob("*.html"))
-    if not pages:
-        raise AA2Error("Prototype has no HTML pages")
+    try:
+        routes = prototype_routes(directory, actions)
+    except (AA2Error, ValueError) as exc:
+        raise PrototypeBrowserError(str(exc), []) from exc
     output.mkdir(parents=True, exist_ok=True)
     results = []
     activity = current_activity.get()
     if activity:
-        activity.progress(0, len(pages) * 2)
+        activity.progress(0, len(routes) * 2)
     with PreviewServer(directory) as server:
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch()
             try:
-                for file in pages:
+                browser = await playwright.chromium.launch()
+            except Exception as exc:
+                raise PrototypeBrowserError("Prototype browser startup failed: " + scrub_text(str(exc)), []) from exc
+            try:
+                for route, resolved in routes:
                     for width, height in ((1440, 900), (390, 844)):
                         page = await browser.new_page(viewport={"width": width, "height": height})
                         errors = []
-                        page.on("pageerror", lambda error: errors.append(str(error)))
+                        page.on("pageerror", lambda error: errors.append(scrub_text(str(error))))
                         async def local_only(request):
                             if urlsplit(request.request.url).netloc == urlsplit(server.url).netloc:
                                 await request.continue_()
@@ -135,22 +176,34 @@ async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[d
                                 errors.append("Prototype attempted external request: " + request.request.url)
                                 await request.abort()
                         await page.route("**/*", local_only)
-                        route = "/" + file.relative_to(directory).as_posix()
-                        response = await page.goto(server.url.rstrip("/") + route, wait_until="networkidle")
-                        completed = await exercise(page, actions, route)
-                        image = output / f"{file.stem}-{digest(route)[:8]}-{width}.png"
-                        await page.screenshot(path=str(image), full_page=True)
-                        results.append({"page": str(file.relative_to(directory)), "viewport": width,
-                                        "status": response.status if response else 0, "errors": errors,
-                                        "screenshot": str(image), "actions": completed})
+                        completed = []
+                        row = {"page": unquote(urlsplit(resolved).path).lstrip("/"), "route": route,
+                               "resolved_route": resolved, "viewport": width, "status": 0,
+                               "errors": errors, "actions": completed}
+                        results.append(row)
+                        try:
+                            response = await page.goto(server.url.rstrip("/") + resolved, wait_until="networkidle")
+                            row["status"] = response.status if response else 0
+                            await exercise(page, actions, route, completed)
+                        except Exception as exc:
+                            errors.append(scrub_text(str(exc)))
+                            sequence = [a for a in actions if a.route == route]
+                            if row["status"] and len(completed) < len(sequence):
+                                row["failed_action"] = sequence[len(completed)].model_dump()
+                        image = output / f"route-{digest(route)[:16]}-{width}.png"
+                        try:
+                            await page.screenshot(path=str(image), full_page=True)
+                            row["screenshot"] = str(image)
+                        except Exception as exc:
+                            errors.append(scrub_text(str(exc)))
                         if activity:
                             activity.output()
-                            activity.progress(len(results), len(pages) * 2)
+                            activity.progress(len(results), len(routes) * 2)
                         await page.close()
+                        if errors or not 200 <= row["status"] < 400:
+                            raise PrototypeBrowserError("Prototype browser checks failed: " + json.dumps(row), results)
             finally:
                 await browser.close()
-    if any(r["errors"] or r["status"] >= 400 for r in results):
-        raise AA2Error("Prototype browser checks failed: " + json.dumps(results))
     return results
 
 

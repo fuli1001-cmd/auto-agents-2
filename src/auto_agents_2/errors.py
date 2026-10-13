@@ -22,6 +22,14 @@ class ProviderError(AA2Error):
         self.retryable = retryable
 
 
+class PrototypeBrowserError(AA2Error):
+    """Controller browser failure with the actual completed steps attached."""
+
+    def __init__(self, message: str, results: list[dict]):
+        super().__init__(message)
+        self.results = results
+
+
 class BusyProject(AA2Error):
     code = "PROJECT_BUSY"
 
