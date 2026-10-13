@@ -99,6 +99,8 @@ args=sys.argv[1:]
 result={"approved": True, "summary": "fixture verified", "findings": []}
 if "exec" in args:
     assert "read-only" in args
+    assert args[args.index("-m")+1] == "test"
+    assert args[args.index("-c")+1] == "model_reasoning_effort=low"
     assert sys.stdin.read()
     if "resume" in args: assert args.index("-s") < args.index("resume")
     if "-o" in args:
@@ -107,6 +109,8 @@ if "exec" in args:
     print(json.dumps({"type":"turn.completed","usage":{"input_tokens":11,"output_tokens":3}}))
 else:
     assert "--json-schema" in args and "--input-format" in args
+    assert args[args.index("--model")+1] == "test"
+    assert args[args.index("--effort")+1] == "low"
     assert json.loads(sys.stdin.readline())["event"] == "user"
     print(json.dumps({"event":"result","result":{"status":"SUCCESS","conversation_id":"fixture-session","structured_output":result,"usage":{"input_tokens":11,"output_tokens":3,"total_tokens":14}}}))
 ''')
@@ -117,6 +121,10 @@ else:
     body["active_provider"] = kind
     body["providers"] = {kind: body["providers"][kind]}
     body["providers"][kind].update(binary=str(binary), environment={"CODEX_HOME": str(native)})
+    body["providers"][kind]["profile_map"]["balanced"]["effort"] = "high"
+    body["providers"][kind]["extra_args"] = (
+        ["-c", "model_reasoning_effort=low"] if kind == "codex" else ["--effort", "low"]
+    )
     write_json(config.path, body)
     rid = store.admit("idea", {})["id"]
     from auto_agents_2.transports import AntigravityTransport, CodexTransport
@@ -127,6 +135,9 @@ else:
         result = await router.invoke("review", {}, ReviewResult, tmp_path, rid, "operation", fresh)
         assert result.approved
     assert store.usage_summary(rid)["total_tokens"] == 42
+    starts = [event["data"] for event in store.events(rid) if event["kind"] == "agent.started"]
+    assert len(starts) == 3
+    assert all(event["model"] == "test" and event["effort"] == "low" for event in starts)
     assert not list((store.root / "processes").glob("*.json"))
     assert not list((store.root / "attempts" / rid).iterdir())
 

@@ -200,18 +200,29 @@ class ConfigStore:
         extra = profile.extra_args + spec.extra_args
         validate_extra_args(extra)
         model = profile.model
-        for i, arg in enumerate(extra):
-            if arg in {"-m", "--model"} and i + 1 < len(extra):
-                model = extra[i + 1]
-            if arg.startswith("--model="):
-                model = arg.partition("=")[2]
-            if arg.startswith("model="):
-                model = arg.partition("=")[2].strip('"')
+        effort = profile.effort
+        i = 0
+        while i < len(extra):
+            key, separator, value = extra[i].partition("=")
+            if not separator:
+                i += 1
+                value = extra[i]
+            if key in {"-m", "--model"}:
+                model = value
+            elif key == "--effort":
+                effort = value
+            elif key in {"-c", "--config"}:
+                setting, _, value = value.partition("=")
+                if setting == "model":
+                    model = value.strip().strip("\"'")
+                elif setting == "model_reasoning_effort":
+                    effort = value.strip().strip("\"'")
+            i += 1
         binary = shutil.which(os.path.expanduser(spec.binary), path=environment.get("PATH"))
         if not binary:
             raise ConfigurationError(f"Provider executable not found: {spec.binary}")
         public = {"provider": name, "kind": spec.kind, "level": level, "model": model,
-                  "effort": profile.effort, "native_profile": native_profile,
+                  "effort": effort, "native_profile": native_profile,
                   "extra_args": redact(extra), "profile_hashes": fingerprints,
                   "prompt_profile": profile.prompt_profile}
         public["fingerprint"] = digest(public)

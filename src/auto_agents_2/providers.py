@@ -169,6 +169,7 @@ class ProviderRouter:
         secret_values = [v for k, v in env.items() if any(s in k.upper() for s in ("TOKEN", "SECRET", "API_KEY", "PASSWORD"))]
         self.store.event(run_id, "agent.started", {"attempt": aid, "operation": operation, "stage": stage,
                          "provider": eff["provider"], "level": eff["level"], "model": eff["model"],
+                         "effort": eff["effort"],
                          "config_hash": eff["fingerprint"], "prompt_version": PROMPT_VERSION, "prompt_family": family})
         decoder, errors = self.decoders.get(eff["kind"], EventDecoder)(eff["kind"]), []
         process = None

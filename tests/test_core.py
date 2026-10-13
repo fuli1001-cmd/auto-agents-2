@@ -139,6 +139,7 @@ def test_config_profiles_environment_and_overrides(project, monkeypatch):
     assert "REMOVE_ME" not in effective["environment"]
     assert effective["environment"]["EMPTY"] == ""
     assert effective["model"] == "explicit-model"
+    assert effective["effort"] == "high"
     config.activate("antigravity")
     assert config.load().active_provider == "antigravity"
     with pytest.raises(ConfigurationError):
@@ -146,6 +147,28 @@ def test_config_profiles_environment_and_overrides(project, monkeypatch):
     for args in (["--dangerously-bypass-approvals-and-sandbox"], ["-c", "sandbox_mode=unsafe"], ["--output-format", "text"]):
         with pytest.raises(ConfigurationError):
             validate_extra_args(args)
+
+
+@pytest.mark.parametrize("extra, model, effort", [
+    ([], "profile-model", "high"),
+    (["--effort", "low"], "profile-model", "low"),
+    (["--model=override", "--effort=medium"], "override", "medium"),
+    (["-m=override", "-c", 'model_reasoning_effort="low"'], "override", "low"),
+    (["--config", "model='override'", "--config", "model_reasoning_effort='medium'"], "override", "medium"),
+    (["--model", "override", "-c", "model_reasoning_effort=low",
+      "-c", "model_reasoning_effort=medium"], "override", "medium"),
+])
+def test_call_settings_include_extra_argument_overrides(project, extra, model, effort):
+    config = ConfigStore(project)
+    body = config.load().model_dump(mode="json")
+    body["providers"]["codex"].update(
+        binary="python3", profile_map={"deep": {"model": "profile-model", "effort": "high"}},
+        extra_args=extra,
+    )
+    write_json(config.path, body)
+    effective = config.resolve("implement")
+    assert effective["model"] == model
+    assert effective["effort"] == effort
 
 
 def test_automatic_and_manual_gc_share_protection(project):

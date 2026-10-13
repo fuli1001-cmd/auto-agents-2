@@ -84,7 +84,9 @@ async def render(store: Store, stop: asyncio.Event, paused: asyncio.Event, last:
                 label = STAGE_LABELS.get(data["stage"], data["stage"])
                 if "test-change-review" in data.get("operation", ""):
                     label = "测试与配置变更审查"
-                operation = f"{label}｜{data['provider']}｜{data['level']}"
+                model = data.get("model") or "CLI 默认（未知）"
+                effort = data.get("effort") or "CLI 默认（未知）"
+                operation = f"{label}｜{data['provider']}｜模型：{model}｜推理：{effort}"
                 started = time.monotonic()
             elif kind == "task.integrated":
                 operation = f"任务验收 {data['done']}/{data['total']}"
