@@ -41,7 +41,7 @@ class Execution(Record):
     max_parallel_tasks: int = Field(default=2, ge=1, le=32)
     max_rounds: int = Field(default=4, ge=1)
     max_stalled_rounds: int = Field(default=2, ge=1)
-    max_replans: int = Field(default=2, ge=0)
+    max_stalled_replans: int = Field(default=2, ge=1)
     infra_retries: int = Field(default=3, ge=0, le=10)
     max_tokens: int | None = Field(default=None, ge=1)
     wait_poll_seconds: float = Field(default=1, gt=0)

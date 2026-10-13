@@ -30,6 +30,7 @@ from .planning import ready_batch, validate_plan
 from .profiles import ProjectProfile
 from .progress import capture_output, observe_activity
 from .providers import Agent, ProviderRouter
+from .replanning import browser_criteria, check_criteria
 from .requirements import capture, validate_coverage
 from .research import ResearchService
 from .resources import ResourceManager
@@ -97,22 +98,17 @@ class WorkflowEngine:
             if self.store.get(rid, "control/cancel"):
                 self.store.checkpoint(rid, "control/cancel", False)
             self.store.update(rid, status="RUNNING")
+            if self.store.get(rid, "replanning/evidence/contracts") is None:
+                self._replan_evidence(rid, "contracts", {"coverage": False, "prototype_scope": False, "plan": False})
             collector = asyncio.create_task(self._collect_periodically(rid, asyncio.current_task()))
             try:
                 while True:
                     try:
+                        if self.store.get(rid, "replanning/pending"):
+                            await self._resume_replan(rid)
                         return await self._execute(rid)
                     except Replan as exc:
-                        count = self.store.run(rid)["data"].get("replans", 0)
-                        while count >= self.config.load().execution.max_replans:
-                            incident = self.store.get(rid, "budget_requests", 0) + 1
-                            self.store.checkpoint(rid, "budget_requests", incident)
-                            await self._ask(rid, f"replan-budget/{incident}", "重规划预算已耗尽。请调整配置后回复 continue，或取消迭代。", digest(count))
-                        self.store.update(rid, replans=count + 1)
-                        archived = self.archive_workers(rid, count)
-                        index = STAGES.index(exc.stage)
-                        self.store.invalidate(rid, STAGES[index:])
-                        self.store.checkpoint(rid, "replan_feedback", {"reason": exc.reason, "stage": exc.stage, "recovery_refs": archived})
+                        self.store.prepare_replan(rid, exc.stage, exc.reason)
                     except Exception as exc:
                         incidents = self.store.get(rid, "incidents", 0) + 1
                         self.store.checkpoint(rid, "incidents", incidents)
@@ -137,6 +133,38 @@ class WorkflowEngine:
                     self.resources.release_run(rid)
                 self.resources.collect()
 
+    def _replan_evidence(self, rid, scope, criteria, **identity):
+        self.store.checkpoint(rid, f"replanning/evidence/{scope}", {"criteria": criteria, **identity})
+
+    def _replan_contract(self, rid, name, valid):
+        saved = self.store.get(rid, "replanning/evidence/contracts", {})
+        criteria = {"coverage": False, "prototype_scope": False, "plan": False, **saved.get("criteria", {})}
+        criteria[name] = valid
+        self._replan_evidence(rid, "contracts", criteria)
+
+    def _replan_checks(self, rid, scope, commands, results, work, environment):
+        source = tree_hash(work)
+        self._replan_evidence(rid, scope, check_criteria(commands, results, source, environment.fingerprint),
+                              source_hash=source, environment_hash=environment.fingerprint)
+
+    async def _resume_replan(self, rid):
+        pending = self.store.get(rid, "replanning/pending")
+        decision = pending["decision"]
+        if decision["stalled"] >= self.config.load().execution.max_stalled_replans and not pending["granted"]:
+            interaction = choice_spec(["已处理，再尝试一次", "暂停，稍后续跑"], ["continue", "pause"], yes_no=True)
+            interaction["pause_on"] = "n"
+            await self._ask(rid, f"replan-stalled/{pending['evaluation']}",
+                            f"连续 {decision['stalled']} 次回退未检测到可验证改进，已停止自动执行并保留现场。\n"
+                            f"回退目标：{pending['stage']}\n原因：{pending['reason']}\n"
+                            "请处理阻塞后确认再尝试一次，或暂停。确认不会清零历史计数。",
+                            digest(pending), interaction)
+            pending["granted"] = True
+            self.store.checkpoint(rid, "replanning/pending", pending)
+        # Include already archived refs when recovering an interruption mid-archive.
+        archived = self.archive_workers(rid, pending["generation"])
+        self.store.supersede_questions(rid, f"replan-stalled/{pending['evaluation']}")
+        self.store.complete_replan(rid, STAGES[STAGES.index(pending["stage"]):], archived)
+
     async def _collect_periodically(self, rid, owner):
         elapsed = 0
         while True:
@@ -150,7 +178,7 @@ class WorkflowEngine:
                 elapsed = 0
 
     async def _ask(self, rid, key, prompt, artifact_hash="", interaction=None) -> str:
-        if interaction is None and (key.startswith(("incident/", "provider/", "replan-budget/", "round-budget/"))
+        if interaction is None and (key.startswith(("incident/", "provider/", "round-budget/"))
                                     or key in {"token-budget", "coverage-evidence", "disk-space"}):
             prompt = prompt.replace("回复 retry", "确认重试").replace("回复 continue", "确认继续")
             interaction = choice_spec(["已处理，继续", "暂停，稍后续跑"], ["continue", "pause"], yes_no=True)
@@ -309,6 +337,7 @@ class WorkflowEngine:
             raise AA2Error("原型尚有未解决的问题，未进入人工审核")
         document = document.model_copy(update={"questions": []})
         if "prepared" not in pending:
+            self._replan_contract(rid, "prototype_scope", False)
             candidates = {item["url"] for item in pending["design_candidates"]}
             selected = [source for source in document.sources if source.url in candidates]
             if candidates and not selected:
@@ -323,6 +352,7 @@ class WorkflowEngine:
             pending.update(document=document.model_dump(), retrieved=retrieved,
                            prepared=prepare_changes(work, document.files, scopes, protected=False, contracts=True))
             self.store.checkpoint(rid, key, pending)
+        self._replan_contract(rid, "prototype_scope", True)
         if "fingerprint" not in pending:
             apply_prepared(work, pending["prepared"])
             pending["fingerprint"] = self._prototype_hash(work)
@@ -335,6 +365,10 @@ class WorkflowEngine:
             with observe_activity(self.store, rid, "原型浏览器检查"):
                 pending["visuals"] = await inspect_prototype(work / "design/prototypes", self.store.root / "visuals" / rid / "prototype", document.browser_actions)
             self.store.checkpoint(rid, key, pending)
+        if self._prototype_hash(work) != fingerprint:
+            raise AA2Error("原型在检查期间被修改，需要重新检查")
+        self._replan_evidence(rid, "prototype-browser", browser_criteria(document.browser_actions, pending["visuals"]),
+                              source_hash=fingerprint)
         if "review" not in pending:
             review = await self._invoke("review", {"specification": assessment, "prototype": document.model_dump(),
                 "review_kind": "prototype", "design_evidence": pending["retrieved"], "browser_evidence": pending["visuals"],
@@ -434,12 +468,14 @@ class WorkflowEngine:
             assessment = result.model_dump()
             self.store.checkpoint(rid, "clarify", assessment)
         all_satisfied, problems = validate_coverage(result, work)
+        self._replan_contract(rid, "coverage", not problems and all(c.status != "unknown" for c in result.coverage))
         if problems:
             raise Replan("clarify", "; ".join(problems))
         if any(c.status == "unknown" for c in result.coverage):
             if result.verification:
                 environment = await self._environment(work, rid)
                 evidence = await self.verifier.run(result.verification, work, environment)
+                self._replan_checks(rid, "coverage", result.verification, evidence, work, environment)
                 self.store.checkpoint(rid, "clarify_context", {**context, "coverage_verification": [r.model_dump() for r in evidence]})
                 raise Replan("clarify", "Resolve unknown coverage using the persisted verification evidence before planning changes")
             answer = await self._ask(rid, "unknown-coverage", "部分需求证据不足，不能确认已实现或直接重复开发。请补充可验证行为或现有实现的位置。", digest(assessment))
@@ -455,6 +491,7 @@ class WorkflowEngine:
                     raise AA2Error("不能仅凭语义判断宣称需求已经实现")
             environment = await self._environment(work, rid)
             evidence = await self.verifier.run(checks, work, environment)
+            self._replan_checks(rid, "coverage", checks, evidence, work, environment)
             self.store.checkpoint(rid, "coverage_checks", [r.model_dump() for r in evidence])
             if passed(evidence):
                 return await self._finish_no_changes(rid, work, "current-baseline")
@@ -507,6 +544,7 @@ class WorkflowEngine:
                 if not review.approved:
                     raise Replan(stage, review.summary)
             if stage == "plan":
+                self._replan_contract(rid, "plan", False)
                 unmet = {c.requirement_id for c in result.coverage if c.status != "satisfied"} or {r.id for r in result.requirements}
                 validate_plan(document, unmet)
                 if not document.runtime_probes:
@@ -523,6 +561,7 @@ class WorkflowEngine:
                 self.store.checkpoint(rid, "task_origins", prior)
                 if result.frontend and document.preview is None:
                     raise Replan("plan", "Frontend plan requires a runnable preview and route mapping")
+                self._replan_contract(rid, "plan", True)
                 review = await self._invoke("review", {**context, "plan": document.model_dump(), "review_kind": "plan"}, ReviewResult,
                                             work, rid, "plan-review", fresh=True)
                 if not review.approved:
@@ -560,6 +599,7 @@ class WorkflowEngine:
             evidence = await self.verifier.run(self._candidate_checks(plan), work, environment)
         self.store.checkpoint(rid, "verify/identity", verify_key)
         self.store.checkpoint(rid, "verify/checks", [r.model_dump() for r in evidence])
+        self._replan_checks(rid, "final-checks", self._candidate_checks(plan), evidence, work, environment)
         if not passed(evidence):
             raise Replan("plan", "Final verification failed: " + json.dumps([r.model_dump() for r in evidence]))
         visuals = []
@@ -573,6 +613,8 @@ class WorkflowEngine:
                 visuals = await inspect_application(plan.preview, work, self.store.root / "visuals" / rid / "implemented",
                                                     environment, self.sandbox, self.store.root)
             self.store.checkpoint(rid, "verify/visuals", visuals)
+            self._replan_evidence(rid, "application-browser", browser_criteria(plan.preview.actions, visuals),
+                                  source_hash=tree_hash(work))
         cached_review = self.store.get(rid, "verify/review") if self.store.get(rid, "verify/review_identity") == verify_key else None
         review = ReviewResult.model_validate(cached_review) if cached_review else await self._invoke("verify", {**context, "project": self.contexts.build(work),
                                                "evidence": [r.model_dump() for r in evidence],
@@ -701,6 +743,7 @@ class WorkflowEngine:
                 checks = await self.verifier.run(task.checks, work, environment)
                 saved.update(phase="tested", checks=[c.model_dump() for c in checks], source_hash=tree_hash(work))
                 self.store.checkpoint(rid, key, saved)
+            self._replan_checks(rid, f"task/{task.origin_id or task.id}", task.checks, checks, work, environment)
             if passed(checks):
                 review = await self._invoke("review", {**task_context, "implementation": change.model_dump(),
                                                        "project": self.contexts.build(work, scopes=task.allowed_paths),
@@ -777,7 +820,8 @@ class WorkflowEngine:
                     self.workspaces.checkpoint(workspace, f"refs/aa2/{rid}/cancelled/{workspace.name}", "aa2: cancelled iteration checkpoint")
 
     def archive_workers(self, rid, generation):
-        archived = []
+        prefix = f"refs/aa2/{rid}/replans/{generation}/"
+        archived = git(self.project, "for-each-ref", "--format=%(refname)", prefix).splitlines()
         root = self.store.root / "worktrees" / rid
         for workspace in root.iterdir() if root.exists() else []:
             if workspace.name == "integration" or not workspace.is_dir() or workspace.is_symlink():
@@ -785,7 +829,8 @@ class WorkflowEngine:
             ref = f"refs/aa2/{rid}/replans/{generation}/{workspace.name}"
             self.workspaces.checkpoint(workspace, ref, "aa2: recovery snapshot before replanning")
             self.resources.retire_worktree(workspace, ref)
-            archived.append(ref)
+            if ref not in archived:
+                archived.append(ref)
         return archived
 
     async def _finish_no_changes(self, rid, work, evidence_run):

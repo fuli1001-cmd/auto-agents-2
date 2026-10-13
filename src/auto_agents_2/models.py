@@ -143,10 +143,12 @@ class CheckResult(Record):
     duration: float
     source_hash: str
     environment_hash: str
+    command_hash: str = ""
     tests: int = 0
     skipped: int = 0
     timed_out: bool = False
     test_ids: list[str] = []
+    passed_test_ids: list[str] = []
     report: dict = {}
 
 

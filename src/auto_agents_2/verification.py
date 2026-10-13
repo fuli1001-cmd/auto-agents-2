@@ -16,7 +16,7 @@ from .progress import Activity
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
 from .store import Store
-from .util import contained
+from .util import contained, digest
 from .workspace import tree_hash
 
 
@@ -89,7 +89,7 @@ class VerificationService:
         output = b"".join(tails).decode(errors="replace")
         tests = sum(int(n) for n in re.findall(r"(\d+) passed", output))
         skipped = sum(int(n) for n in re.findall(r"(\d+) skipped", output))
-        test_ids, report, report_valid = [], {}, not pytest
+        test_ids, passed_test_ids, report, report_valid = [], [], {}, not pytest
         if pytest and report_file.is_file():
             try:
                 raw = report_file.read_text()
@@ -97,6 +97,8 @@ class VerificationService:
                 tests = sum(not any(case.find(k) is not None for k in ("failure", "error", "skipped")) for case in cases)
                 skipped = sum(case.find("skipped") is not None for case in cases)
                 test_ids = [case.get("classname", "") + "::" + case.get("name", "") for case in cases]
+                passed_test_ids = [name for name, case in zip(test_ids, cases)
+                                   if not any(case.find(k) is not None for k in ("failure", "error", "skipped"))]
                 report = self.artifacts.put(raw)
                 report_valid = bool(cases) and not any(case.find(k) is not None for case in cases for k in ("failure", "error"))
             except (ET.ParseError, UnicodeError):
@@ -107,7 +109,9 @@ class VerificationService:
         return CheckResult(argv=command.argv, cwd=command.cwd, exit_code=code, output=output,
                            duration=time.monotonic() - start, source_hash=baseline,
                            environment_hash=environment.fingerprint if environment else "host",
-                           tests=tests, skipped=skipped, timed_out=timed_out, test_ids=test_ids, report=report)
+                           command_hash=digest(command.model_dump()),
+                           tests=tests, skipped=skipped, timed_out=timed_out, test_ids=test_ids,
+                           passed_test_ids=passed_test_ids, report=report)
 
 
 def passed(results: list[CheckResult]) -> bool:

@@ -117,6 +117,13 @@ class ProgressDisplay:
             self.message(f"任务验收 {data['done']}/{data['total']}")
         elif kind == "provider.changed":
             self.message(f"provider 已切换：{data['to']}")
+        elif kind == "replan.assessed":
+            outcome = ("已建立验证基线" if data["baseline"] else
+                       f"新增通过 {len(data['gains'])} 项" if data["improved"] else
+                       f"连续 {data['stalled']} 次无可验证改进")
+            if data["regressions"]:
+                outcome += f"｜{len(data['regressions'])} 项退步或缺失"
+            self.message(f"回退评估｜{STAGE_LABELS.get(data['stage'], data['stage'])}｜{outcome}")
         elif kind == "run.updated" and data.get("delivery_phase"):
             self.message("交付｜" + {"ready": "核对目标分支", "reintegrating": "隔离集成与复测", "publishing": "更新主目录",
                 "published": "主目录已更新", "runtime": "准备主目录运行环境", "repairing_runtime": "隔离修复运行检查",

@@ -181,6 +181,7 @@ def status(project: Project = Path("."), run_id: Annotated[str | None, typer.Opt
         current = store.run(run_id) if run_id else store.current()
         console.print_json(data={"run": current, "questions": store.pending(current["id"]) if current else [],
                                 "tokens": store.usage_summary(current["id"]) if current else {},
+                                "replanning": store.get(current["id"], "replanning/pending", {}) if current else {},
                                 "delivery": store.get(current["id"], "delivery/journal", store.get(current["id"], "delivery/receipt", {})) if current else {}})
     except AA2Error as exc:
         fail(exc)
