@@ -97,6 +97,11 @@ async def render(store: Store, stop: asyncio.Event, paused: asyncio.Event, last:
             elif kind == "environment.preparing":
                 operation = f"准备项目环境｜{data['profile']}"
                 started = time.monotonic()
+            elif kind == "run.updated" and data.get("delivery_phase"):
+                operation = "交付｜" + {"ready": "核对目标分支", "reintegrating": "隔离集成与复测", "publishing": "更新主目录",
+                                      "published": "主目录已更新", "runtime": "准备主目录运行环境", "repairing_runtime": "隔离修复运行检查", "complete": "交付完成"}.get(data["delivery_phase"], data["delivery_phase"])
+            elif kind == "delivery.completed":
+                operation = f"交付完成｜{data['target']}｜{data['commit'][:12]}"
             elif kind == "environment.ready":
                 operation = "项目环境已就绪，执行验证"
             else:
@@ -136,6 +141,8 @@ async def execute(project, requirements=None, provider=None, run_id=None):
         try:
             result = await engine.start(requirements, provider, run_id)
         except BusyProject:
+            if requirements is not None:
+                raise IncompleteIteration(f"项目已有控制进程。请先执行：aa2 run --project {project}")
             if provider:
                 engine.config.resolve("clarify", provider)
                 old, new = engine.config.activate(provider)
@@ -193,7 +200,8 @@ def status(project: Project = Path("."), run_id: Annotated[str | None, typer.Opt
         store = Store(project)
         current = store.run(run_id) if run_id else store.current()
         console.print_json(data={"run": current, "questions": store.pending(current["id"]) if current else [],
-                                "tokens": store.usage_summary(current["id"]) if current else {}})
+                                "tokens": store.usage_summary(current["id"]) if current else {},
+                                "delivery": store.get(current["id"], "delivery/journal", store.get(current["id"], "delivery/receipt", {})) if current else {}})
     except AA2Error as exc:
         fail(exc)
 
@@ -236,7 +244,7 @@ def respond(answer: Annotated[str, typer.Option("--answer")], project: Project =
 
 @app.command()
 def cancel(project: Project = Path(".")):
-    """明确取消当前迭代，保留正式产物和历史记录。"""
+    """发布前取消迭代；发布开始后暂停收尾并保留恢复记录。"""
     try:
         cfg = configuration(project)
         store = Store(project)
@@ -247,14 +255,18 @@ def cancel(project: Project = Path(".")):
         try:
             with file_lock(store.root / "controller.lock", blocking=False):
                 SandboxRunner(store.root, cfg.load().sandbox_binary).reap_orphans()
-                WorkflowEngine(project).archive_workspaces(current["id"])
-                store.update(current["id"], status="CANCELLED")
-                resources = ResourceManager(store, cfg.load().cleanup)
-                resources.release_run(current["id"])
-                resources.collect()
+                published = store.get(current["id"], "delivery/journal", {}).get("publication_started", False)
+                if published:
+                    store.update(current["id"], status="PAUSED")
+                else:
+                    WorkflowEngine(project).archive_workspaces(current["id"])
+                    store.update(current["id"], status="CANCELLED")
+                    resources = ResourceManager(store, cfg.load().cleanup)
+                    resources.release_run(current["id"])
+                    resources.collect()
         except BusyProject:
             pass
-        console.print("取消请求已保存，执行中的进程将停止。")
+        console.print("停止请求已保存；若已开始发布则保留现场并暂停，使用 aa2 run 继续完成交付。")
     except AA2Error as exc:
         fail(exc)
 
@@ -263,7 +275,15 @@ def cancel(project: Project = Path(".")):
 def gc(project: Project = Path("."), dry_run: bool = False):
     try:
         cfg = configuration(project).load()
-        console.print_json(data=ResourceManager(Store(project), cfg.cleanup).collect(dry_run))
+        store = Store(project)
+        resources = ResourceManager(store, cfg.cleanup)
+        if not dry_run:
+            try:
+                with file_lock(store.root / "controller.lock", blocking=False):
+                    resources.finish_pending()
+            except BusyProject:
+                pass
+        console.print_json(data=resources.collect(dry_run))
     except AA2Error as exc:
         fail(exc)
 

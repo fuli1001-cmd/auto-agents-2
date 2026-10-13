@@ -98,6 +98,8 @@ class PlanResult(Record):
     environment_file: str = ""
     requirements_file: str = ""
     preview: PreviewSpec | None = None
+    runtime_prepare: list[Command] = []
+    runtime_probes: list[Command] = []
 
 
 class ImplementationResult(Record):

@@ -63,6 +63,11 @@ class EnvironmentConfig(Record):
     requirements_file: str = ""
 
 
+class DeliveryConfig(Record):
+    target_branch: str = ""
+    max_reintegrations: int = Field(default=2, ge=0)
+
+
 class Config(Record):
     schema_version: Literal[1] = 1
     config_revision: int = 0
@@ -72,6 +77,7 @@ class Config(Record):
     execution: Execution = Execution()
     cleanup: Cleanup = Cleanup()
     environment: EnvironmentConfig = EnvironmentConfig()
+    delivery: DeliveryConfig = DeliveryConfig()
     project_profile: Literal["auto", "python", "react", "next", "python-react", "python-next"] = "auto"
     verification: list[Command] = []
     sandbox_binary: str = "bwrap"
@@ -118,6 +124,14 @@ class ConfigStore:
             return Config.model_validate_json(self.path.read_text())
         except (OSError, ValueError) as exc:
             raise ConfigurationError(f"Cannot read {self.path}: {exc}") from exc
+
+    def select_target(self, branch: str):
+        with file_lock(self.path.with_suffix(".lock")):
+            body = json.loads(self.path.read_text())
+            body.setdefault("delivery", {})["target_branch"] = branch
+            body["config_revision"] = body.get("config_revision", 0) + 1
+            Config.model_validate(body)
+            write_json(self.path, body)
 
     def activate(self, provider: str, expected_revision: int | None = None) -> tuple[str, str]:
         with file_lock(self.path.with_suffix(".lock")):

@@ -48,7 +48,8 @@ class CodingAgent:
         if stage == "plan":
             return PlanResult(summary="one task", document="# Plan", tasks=[TaskSpec(
                 id="T1", title="addition", description="implement addition", requirement_ids=["R1"],
-                allowed_paths=["calc.py", "tests"], acceptance=["sum"], checks=[check])], final_checks=[check])
+                allowed_paths=["calc.py", "tests"], acceptance=["sum"], checks=[check])], final_checks=[check],
+                runtime_probes=[Command(argv=[sys.executable, "-c", "from calc import add; assert add(2,3)==5"])])
         if stage == "implement":
             return ImplementationResult(summary="implemented", changes=[
                 Change(path="calc.py", content="def add(a, b):\n    return a + b\n"),
@@ -77,6 +78,9 @@ def engine(project, agent):
         return Environment(Path(sys.prefix), "test-environment")
 
     result._environment = environment
+    async def unexpected_question(question):
+        raise AssertionError(question["prompt"])
+    result.question_handler = unexpected_question
     return result
 
 
@@ -163,7 +167,10 @@ async def test_reviewer_rejects_test_weakening_before_any_candidate_is_applied(t
             return await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
 
     agent = MisguidedAgent()
-    result = await engine(project, agent).start(str(requirements))
+    workflow = engine(project, agent)
+    git(project, "add", "tests")
+    git(project, "-c", "user.name=User", "-c", "user.email=user@example.test", "commit", "-m", "Existing acceptance test")
+    result = await workflow.start(str(requirements))
     assert result["data"]["outcome"] == "DELIVERED" and agent.attempts == 2
     assert git(project, "show", result["data"]["delivery_commit"] + ":tests/test_calc.py").strip() == test_content.strip()
     assert Store(project).get(result["id"], "rounds/T1")["round"] == 2
@@ -254,7 +261,8 @@ async def test_partial_iteration_only_plans_and_changes_the_gap(tmp_path):
                 check = Command(argv=[sys.executable, "-m", "pytest", "-q", "tests"], expected_tests=2)
                 return PlanResult(summary="delta", document="Only implement double", tasks=[TaskSpec(
                     id="T2", title="double", description="Double an input", requirement_ids=["R2"], allowed_paths=["double.py", "tests/test_double.py"],
-                    acceptance=["double(3)==6"], checks=[check])], final_checks=[check])
+                    acceptance=["double(3)==6"], checks=[check])], final_checks=[check],
+                    runtime_probes=[Command(argv=[sys.executable, "-c", "from double import double; assert double(3)==6"])])
             if stage == "implement":
                 assert context["task"]["requirement_ids"] == ["R2"]
                 return ImplementationResult(summary="double", changes=[Change(path="double.py", content="def double(x): return x * 2\n"),

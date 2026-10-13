@@ -1,0 +1,335 @@
+{
+  "date": "2026-10-13",
+  "fixture": "/tmp/aa2-delivery-smoke-nw3as15b",
+  "results": {
+    "python": {
+      "commit": "f97cd80d0e256671c58cbe5f485c507bb1e04ff5",
+      "receipt_digest": "46638e4390bde14cb6fabf95f3ba9f4e7d5bfa4276a5c37106904577171abc2b",
+      "candidate_checks": [
+        {
+          "argv": [
+            "python",
+            "-m",
+            "pytest",
+            "-q"
+          ],
+          "cwd": ".",
+          "exit_code": 0,
+          "output": ".                                                                        [100%]\n1 passed in 0.01s\n",
+          "duration": 0.22422759799519554,
+          "source_hash": "a7a4f1d1fda6633b778f00d6bc8b4ef6fe3f3a07e17d2878e3aae0c42755fa68",
+          "environment_hash": "1903a746aa4ebf502a39586bd8d332f60443b81c32f2b875f7ebada1dec09c04",
+          "tests": 1,
+          "skipped": 0,
+          "timed_out": false,
+          "test_ids": [
+            "test_app::test_add"
+          ],
+          "report": {
+            "hash": "6f383065b6ed1b5b80e654236a2bd307447656d7e73fcb324c502c1f8018ae54",
+            "kind": "document",
+            "bytes": 313
+          }
+        }
+      ],
+      "primary_runtime": {
+        "checks": [
+          {
+            "argv": [
+              "python",
+              "-c",
+              "from app import add; assert add(2,3)==5"
+            ],
+            "cwd": ".",
+            "exit_code": 0,
+            "output": "",
+            "duration": 0.018547593004768714,
+            "source_hash": "a7a4f1d1fda6633b778f00d6bc8b4ef6fe3f3a07e17d2878e3aae0c42755fa68",
+            "environment_hash": "1903a746aa4ebf502a39586bd8d332f60443b81c32f2b875f7ebada1dec09c04",
+            "tests": 0,
+            "skipped": 0,
+            "timed_out": false,
+            "test_ids": [],
+            "report": {}
+          }
+        ]
+      },
+      "after_gc": [
+        {
+          "argv": [
+            "python",
+            "-c",
+            "from app import add; assert add(2,3)==5"
+          ],
+          "cwd": ".",
+          "exit_code": 0,
+          "output": "",
+          "duration": 0.018676822000998072,
+          "source_hash": "a7a4f1d1fda6633b778f00d6bc8b4ef6fe3f3a07e17d2878e3aae0c42755fa68",
+          "environment_hash": "1903a746aa4ebf502a39586bd8d332f60443b81c32f2b875f7ebada1dec09c04",
+          "tests": 0,
+          "skipped": 0,
+          "timed_out": false,
+          "test_ids": [],
+          "report": {}
+        }
+      ]
+    },
+    "react": {
+      "commit": "309edfacee0829c86f38161cb1304f5dda3ee290",
+      "receipt_digest": "bd905a7b062cab70adffefd6a7cac04c99e2c694d9766f26930df8c0a9b732f1",
+      "candidate_checks": [
+        {
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "cwd": ".",
+          "exit_code": 0,
+          "output": "\n> aa2-react-fixture@0.0.0 build\n> tsc --noEmit && vite build\n\nvite v8.3.4 building client environment for production...\ntransforming...\n✓ 15 modules transformed.\nrendering chunks...\ncomputing gzip size...\ndist/index.html                  0.22 kB │ gzip:  0.18 kB\ndist/assets/index-BMQIV8T4.js  220.21 kB │ gzip: 68.92 kB\n\n✓ built in 178ms\n",
+          "duration": 1.9308864869963145,
+          "source_hash": "a130b5156f7f01aebe9a1eda90f101582f9d96b2c6536e7bb77b623c46d2c09b",
+          "environment_hash": "85f8e1991f55c3f3e6441ba956a264f7525bcdeee931ef68a12336bea0eed5be",
+          "tests": 0,
+          "skipped": 0,
+          "timed_out": false,
+          "test_ids": [],
+          "report": {}
+        }
+      ],
+      "primary_runtime": {
+        "checks": [
+          {
+            "argv": [
+              "npm",
+              "run",
+              "build"
+            ],
+            "cwd": ".",
+            "exit_code": 0,
+            "output": "\n> aa2-react-fixture@0.0.0 build\n> tsc --noEmit && vite build\n\nvite v8.3.4 building client environment for production...\ntransforming...\n✓ 15 modules transformed.\nrendering chunks...\ncomputing gzip size...\ndist/index.html                  0.22 kB │ gzip:  0.18 kB\ndist/assets/index-BMQIV8T4.js  220.21 kB │ gzip: 68.92 kB\n\n✓ built in 172ms\n",
+            "duration": 1.8435224370041396,
+            "source_hash": "a130b5156f7f01aebe9a1eda90f101582f9d96b2c6536e7bb77b623c46d2c09b",
+            "environment_hash": "85f8e1991f55c3f3e6441ba956a264f7525bcdeee931ef68a12336bea0eed5be",
+            "tests": 0,
+            "skipped": 0,
+            "timed_out": false,
+            "test_ids": [],
+            "report": {}
+          },
+          {
+            "argv": [
+              "node",
+              "-e",
+              "require('react'); console.log('runtime ready')"
+            ],
+            "cwd": ".",
+            "exit_code": 0,
+            "output": "runtime ready\n",
+            "duration": 0.13986770900373813,
+            "source_hash": "a130b5156f7f01aebe9a1eda90f101582f9d96b2c6536e7bb77b623c46d2c09b",
+            "environment_hash": "85f8e1991f55c3f3e6441ba956a264f7525bcdeee931ef68a12336bea0eed5be",
+            "tests": 0,
+            "skipped": 0,
+            "timed_out": false,
+            "test_ids": [],
+            "report": {}
+          }
+        ],
+        "visuals": [
+          {
+            "route": "/",
+            "viewport": 1440,
+            "errors": [],
+            "status": 200,
+            "screenshot": "/tmp/aa2-delivery-smoke-nw3as15b/react/.aa2/visuals/run_6df6efa33ee34ed7/runtime/route-0-1440.png",
+            "actions": [
+              {
+                "route": "/",
+                "action": "click",
+                "selector": "#increment",
+                "value": ""
+              },
+              {
+                "route": "/",
+                "action": "expect_text",
+                "selector": "#count",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "route": "/",
+            "viewport": 390,
+            "errors": [],
+            "status": 200,
+            "screenshot": "/tmp/aa2-delivery-smoke-nw3as15b/react/.aa2/visuals/run_6df6efa33ee34ed7/runtime/route-0-390.png",
+            "actions": [
+              {
+                "route": "/",
+                "action": "click",
+                "selector": "#increment",
+                "value": ""
+              },
+              {
+                "route": "/",
+                "action": "expect_text",
+                "selector": "#count",
+                "value": "1"
+              }
+            ]
+          }
+        ]
+      },
+      "after_gc": [
+        {
+          "argv": [
+            "node",
+            "-e",
+            "require('react'); console.log('runtime ready')"
+          ],
+          "cwd": ".",
+          "exit_code": 0,
+          "output": "runtime ready\n",
+          "duration": 0.15581439599918667,
+          "source_hash": "a130b5156f7f01aebe9a1eda90f101582f9d96b2c6536e7bb77b623c46d2c09b",
+          "environment_hash": "85f8e1991f55c3f3e6441ba956a264f7525bcdeee931ef68a12336bea0eed5be",
+          "tests": 0,
+          "skipped": 0,
+          "timed_out": false,
+          "test_ids": [],
+          "report": {}
+        }
+      ]
+    },
+    "next": {
+      "commit": "d07495ff1e2782be453e673bc8b60b4f5a5da093",
+      "receipt_digest": "33a6421cd43c0490c4eb4f128d3dbc12cae3be2b6f14cdb95d05428c5c8d8007",
+      "candidate_checks": [
+        {
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "cwd": ".",
+          "exit_code": 0,
+          "output": "\n> aa2-next-fixture@0.0.0 build\n> next build --webpack\n\n▲ Next.js 16.4.0 (webpack)\n✓ Running next.config.mjs took 22ms\n- Experiments (use with caution):\n  · cpus: 2\n\n  Creating an optimized production build ...\n✓ Compiled successfully in 5.5s\n  Running TypeScript ...\n  Finished TypeScript in 1745ms ...\n  Collecting page data using 2 workers ...\n  Generating static pages using 2 workers (0/3) ...\n✓ Generating static pages using 2 workers (3/3) in 290ms\n  Finalizing page optimization ...\n  Collecting build traces ...\n\nRoute (app)\n┌ ○ /\n└ ○ /_not-found\n\n\n○  (Static)  prerendered as static content\n\n",
+          "duration": 23.59266195699456,
+          "source_hash": "e70230e601c8f7be52c2b98f7dc2b9f1ca37f5d7fd6c92d21b81fb1998b5b731",
+          "environment_hash": "910722aede6a85e3d168f8a05d0e42e12e9ab1263f991d7fd7e0070d7273fe82",
+          "tests": 0,
+          "skipped": 0,
+          "timed_out": false,
+          "test_ids": [],
+          "report": {}
+        }
+      ],
+      "primary_runtime": {
+        "checks": [
+          {
+            "argv": [
+              "npm",
+              "run",
+              "build"
+            ],
+            "cwd": ".",
+            "exit_code": 0,
+            "output": "\n> aa2-next-fixture@0.0.0 build\n> next build --webpack\n\n▲ Next.js 16.4.0 (webpack)\n✓ Running next.config.mjs took 18ms\n- Experiments (use with caution):\n  · cpus: 2\n\n  Creating an optimized production build ...\n✓ Compiled successfully in 5.5s\n  Running TypeScript ...\n  Finished TypeScript in 1766ms ...\n  Collecting page data using 2 workers ...\n  Generating static pages using 2 workers (0/3) ...\n✓ Generating static pages using 2 workers (3/3) in 301ms\n  Finalizing page optimization ...\n  Collecting build traces ...\n\nRoute (app)\n┌ ○ /\n└ ○ /_not-found\n\n\n○  (Static)  prerendered as static content\n\n",
+            "duration": 23.497926914002164,
+            "source_hash": "e70230e601c8f7be52c2b98f7dc2b9f1ca37f5d7fd6c92d21b81fb1998b5b731",
+            "environment_hash": "910722aede6a85e3d168f8a05d0e42e12e9ab1263f991d7fd7e0070d7273fe82",
+            "tests": 0,
+            "skipped": 0,
+            "timed_out": false,
+            "test_ids": [],
+            "report": {}
+          },
+          {
+            "argv": [
+              "node",
+              "-e",
+              "require('react'); console.log('runtime ready')"
+            ],
+            "cwd": ".",
+            "exit_code": 0,
+            "output": "runtime ready\n",
+            "duration": 0.12406063699745573,
+            "source_hash": "e70230e601c8f7be52c2b98f7dc2b9f1ca37f5d7fd6c92d21b81fb1998b5b731",
+            "environment_hash": "910722aede6a85e3d168f8a05d0e42e12e9ab1263f991d7fd7e0070d7273fe82",
+            "tests": 0,
+            "skipped": 0,
+            "timed_out": false,
+            "test_ids": [],
+            "report": {}
+          }
+        ],
+        "visuals": [
+          {
+            "route": "/",
+            "viewport": 1440,
+            "errors": [],
+            "status": 200,
+            "screenshot": "/tmp/aa2-delivery-smoke-nw3as15b/next/.aa2/visuals/run_a661b6fe00114131/runtime/route-0-1440.png",
+            "actions": [
+              {
+                "route": "/",
+                "action": "click",
+                "selector": "#increment",
+                "value": ""
+              },
+              {
+                "route": "/",
+                "action": "expect_text",
+                "selector": "#count",
+                "value": "1"
+              }
+            ]
+          },
+          {
+            "route": "/",
+            "viewport": 390,
+            "errors": [],
+            "status": 200,
+            "screenshot": "/tmp/aa2-delivery-smoke-nw3as15b/next/.aa2/visuals/run_a661b6fe00114131/runtime/route-0-390.png",
+            "actions": [
+              {
+                "route": "/",
+                "action": "click",
+                "selector": "#increment",
+                "value": ""
+              },
+              {
+                "route": "/",
+                "action": "expect_text",
+                "selector": "#count",
+                "value": "1"
+              }
+            ]
+          }
+        ]
+      },
+      "after_gc": [
+        {
+          "argv": [
+            "node",
+            "-e",
+            "require('react'); console.log('runtime ready')"
+          ],
+          "cwd": ".",
+          "exit_code": 0,
+          "output": "runtime ready\n",
+          "duration": 0.13393761099723633,
+          "source_hash": "e70230e601c8f7be52c2b98f7dc2b9f1ca37f5d7fd6c92d21b81fb1998b5b731",
+          "environment_hash": "910722aede6a85e3d168f8a05d0e42e12e9ab1263f991d7fd7e0070d7273fe82",
+          "tests": 0,
+          "skipped": 0,
+          "timed_out": false,
+          "test_ids": [],
+          "report": {}
+        }
+      ]
+    }
+  }
+}

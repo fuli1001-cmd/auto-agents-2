@@ -45,6 +45,9 @@ class Store:
                 id TEXT PRIMARY KEY, run_id TEXT, kind TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
                 state TEXT NOT NULL, refs INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL,
                 touched REAL NOT NULL, data TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS delivery_pins(path TEXT PRIMARY KEY, run_id TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS artifact_owners(hash TEXT NOT NULL, run_id TEXT NOT NULL,
+                PRIMARY KEY(hash,run_id));
             """)
             if db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] != "1":
                 raise AA2Error("Unsupported state database version")
@@ -195,3 +198,33 @@ class Store:
     def successful(self):
         with self.connect() as db:
             return [self._run(r) for r in db.execute("SELECT * FROM runs WHERE status='SUCCEEDED' ORDER BY created DESC")]
+
+    def complete_delivery(self, rid, receipt):
+        """Receipt, current runtime ownership and success are one durable transaction."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT data FROM runs WHERE id=?", (rid,)).fetchone()
+            body = json.loads(row[0])
+            body.update(outcome=receipt["outcome"], branch=receipt["target"],
+                        delivery_commit=receipt["candidate"], verified_source_hash=receipt["source_hash"],
+                        cleanup_pending=True, delivery_phase="complete")
+            db.execute("INSERT OR REPLACE INTO checkpoints VALUES(?,?,?)", (rid, "delivery/receipt", json.dumps(receipt)))
+            db.execute("INSERT OR REPLACE INTO meta VALUES('current_delivery',?)", (rid,))
+            db.execute("DELETE FROM delivery_pins")
+            db.executemany("INSERT INTO delivery_pins VALUES(?,?)", [(p, rid) for p in receipt["runtime"]["resources"]])
+            db.execute("UPDATE runs SET status='SUCCEEDED',stage='deliver',updated=?,data=? WHERE id=?",
+                       (now(), json.dumps(body), rid))
+            self._event(db, rid, "delivery.completed", {"target": receipt["target"], "commit": receipt["candidate"]})
+
+    def delivery_evidence(self, rid):
+        result = {}
+        with self.connect() as db:
+            for row in db.execute("SELECT key,data FROM checkpoints WHERE run_id=?", (rid,)):
+                key, value = row["key"], json.loads(row["data"])
+                if key.startswith("develop/task/"):
+                    result[key] = {k: value[k] for k in ("commit", "checks", "review", "source_hash") if k in value}
+                elif key in {"capture", "clarify", "provider_research", "prototype", "prototype_approval", "design", "plan",
+                             "coverage_checks", "verify/identity", "verify/checks", "verify/review", "verify/visuals"} or key.startswith("rounds/"):
+                    result[key] = value
+            result["approvals"] = [dict(r) for r in db.execute("SELECT key,artifact_hash,answer FROM questions WHERE run_id=? AND answer IS NOT NULL", (rid,))]
+        return result

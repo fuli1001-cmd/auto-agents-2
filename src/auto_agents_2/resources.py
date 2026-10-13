@@ -47,6 +47,82 @@ class ResourceManager:
             db.execute("UPDATE resources SET refs=0 WHERE kind='temporary'")
         return self.collect()
 
+    def finish_delivery(self, rid: str):
+        """Called under the controller lock. A failed GC never revokes a delivery."""
+        from .workspace import git
+        receipt = self.store.get(rid, "delivery/receipt")
+        if not receipt or self.store.run(rid)["status"] != "SUCCEEDED":
+            return
+        from .util import digest
+        if digest({k: v for k, v in receipt.items() if k != "digest"}) != receipt["digest"]:
+            raise PolicyViolation("Delivery receipt integrity mismatch; preserving resources")
+        errors = []
+        self.release_run(rid)
+        errors.extend(self.collect()["errors"])
+        try:
+            with self.store.connect() as db:
+                remaining = db.execute("SELECT 1 FROM resources WHERE run_id=? AND kind='worktree' AND state!='removed'", (rid,)).fetchone()
+            if remaining:
+                raise AA2Error("Delivery worktree cleanup is still pending")
+            for ref, oid in receipt.get("owned_refs", {}).items():
+                if not ref.startswith(f"refs/aa2/{rid}/"):
+                    raise PolicyViolation("Invalid owned delivery ref")
+                found = git(self.store.root.parent, "for-each-ref", "--format=%(objectname)", ref)
+                if found:
+                    git(self.store.root.parent, "update-ref", "-d", ref, oid)
+            with self.store.connect() as db:
+                # Keep compact task verdicts; remove proposal bodies and duplicate contexts.
+                for key, value in receipt["evidence"].items():
+                    if key.startswith("develop/task/"):
+                        db.execute("UPDATE checkpoints SET data=? WHERE run_id=? AND key=?", (json.dumps(value), rid, key))
+                for prefix in ("clarify_context", "replan_feedback", "readme", "delivery/journal"):
+                    db.execute("DELETE FROM checkpoints WHERE run_id=? AND key=?", (rid, prefix))
+            self.collect_artifacts()
+        except (OSError, AA2Error) as exc:
+            errors.append(str(exc))
+        self.store.update(rid, cleanup_pending=bool(errors), cleanup_errors=errors)
+
+    def finish_pending(self):
+        for run in self.store.successful():
+            if run["data"].get("cleanup_pending"):
+                self.finish_delivery(run["id"])
+
+    def collect_artifacts(self):
+        """Mark references before sweeping only registered, terminal-owned objects."""
+        from .artifacts import ArtifactStore
+        artifacts = ArtifactStore(self.store.root)
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            roots = [json.loads(row[0]) for row in db.execute("SELECT data FROM checkpoints")]
+            live = set()
+
+            def mark(value):
+                if isinstance(value, dict):
+                    if isinstance(value.get("hash"), str):
+                        live.add(value["hash"])
+                    for child in value.values():
+                        mark(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        mark(child)
+
+            for root in roots:
+                mark(root)
+            owners = {}
+            for row in db.execute("SELECT hash,run_id FROM artifact_owners"):
+                owners.setdefault(row[0], set()).add(row[1])
+            terminal = {row[0] for row in db.execute("SELECT id FROM runs WHERE status='SUCCEEDED'")}
+            for sha, runs in owners.items():
+                if sha in live or not runs <= terminal:
+                    continue
+                if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
+                    continue
+                path = artifacts.root / sha[:2] / sha
+                if path.absolute() != path.resolve():
+                    continue
+                path.unlink(missing_ok=True)
+                db.execute("DELETE FROM artifact_owners WHERE hash=?", (sha,))
+
     def retire_worktree(self, path: Path, recovery_ref: str):
         from .workspace import git
         if not recovery_ref.startswith("refs/aa2/"):
@@ -80,6 +156,7 @@ class ResourceManager:
                                (SELECT id FROM runs WHERE status IN ('SUCCEEDED','CANCELLED'))""")
                 rows = [dict(r) for r in db.execute("""SELECT * FROM resources WHERE state!='removed' AND
                     (refs=0 OR run_id IN (SELECT id FROM runs WHERE status IN ('SUCCEEDED','CANCELLED')))
+                    AND path NOT IN (SELECT path FROM delivery_pins)
                     ORDER BY touched""")]
             cache_size = sum(tree_size(Path(r["path"])) for r in rows if r["kind"] in {"cache", "environment"})
             pressure = shutil.disk_usage(self.store.root).free < self.policy.min_free_bytes
@@ -105,7 +182,7 @@ class ResourceManager:
                     with self.store.connect() as db:
                         db.execute("BEGIN IMMEDIATE")
                         fresh = db.execute("SELECT refs FROM resources WHERE id=?", (row["id"],)).fetchone()
-                        if fresh[0] != 0:
+                        if fresh[0] != 0 or db.execute("SELECT 1 FROM delivery_pins WHERE path=?", (row["path"],)).fetchone():
                             continue
                         db.execute("UPDATE resources SET state='collecting' WHERE id=?", (row["id"],))
                         # Paths were created under controller-owned roots, never user directories.

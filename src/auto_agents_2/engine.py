@@ -11,10 +11,19 @@ from typing import Awaitable, Callable
 from .artifacts import ArtifactStore
 from .config import ConfigStore
 from .context import ContextBuilder
+from .delivery import DeliveryCoordinator, RuntimeVerificationError
 from .design import DesignCatalog, PreviewServer, browser_environment, inspect_application, inspect_prototype
 from .environment import EnvironmentManager
 from .errors import AA2Error, PolicyViolation, ProviderError
-from .models import CheckResult, DocumentResult, ImplementationResult, IntakeResult, PlanResult, ReviewResult
+from .models import (
+    CheckResult,
+    Command,
+    DocumentResult,
+    ImplementationResult,
+    IntakeResult,
+    PlanResult,
+    ReviewResult,
+)
 from .planning import ready_batch, validate_plan
 from .profiles import ProjectProfile
 from .providers import Agent, ProviderRouter
@@ -52,6 +61,8 @@ class WorkflowEngine:
         self.resources = ResourceManager(self.store, cfg.cleanup)
         self.environments = EnvironmentManager(self.config, self.sandbox)
         self.verifier = VerificationService(self.store.root, self.sandbox, self.resources)
+        self.delivery = DeliveryCoordinator(self.store, self.workspaces, self.resources, self.environments,
+                                            self._reintegrate_delivery, self._runtime_checks)
         self.question_handler = question_handler
         self.question_lock = asyncio.Lock()
         browser_environment(self.store.root / "cache/browsers")
@@ -64,6 +75,7 @@ class WorkflowEngine:
         with file_lock(self.store.root / "controller.lock", blocking=False):
             self.sandbox.reap_orphans()
             self.resources.recover_disposable()
+            self.resources.finish_pending()
             if provider:
                 self.config.resolve("clarify", provider)
                 old, new = self.config.activate(provider)
@@ -79,6 +91,8 @@ class WorkflowEngine:
                 if run["status"] in {"SUCCEEDED", "CANCELLED"}:
                     return run
             rid = run["id"]
+            if self.store.get(rid, "control/cancel"):
+                self.store.checkpoint(rid, "control/cancel", False)
             self.store.update(rid, status="RUNNING")
             collector = asyncio.create_task(self._collect_periodically(rid, asyncio.current_task()))
             try:
@@ -102,7 +116,9 @@ class WorkflowEngine:
                         await self._ask(rid, f"incident/{incidents}", f"执行遇到阻塞：{exc}\n修复配置或环境后回复 retry；也可以通过 aa2 cancel 取消本轮。", digest(str(exc)))
             except asyncio.CancelledError:
                 if self.store.get(rid, "control/cancel"):
-                    self.store.update(rid, status="CANCELLED")
+                    journal = self.store.get(rid, "delivery/journal", {})
+                    published = journal.get("publication_started", False)
+                    self.store.update(rid, status="PAUSED" if published else "CANCELLED")
                     return self.store.run(rid)
                 self.store.update(rid, status="PAUSED")
                 raise
@@ -183,6 +199,11 @@ class WorkflowEngine:
         return result
 
     async def _execute(self, rid):
+        if self.store.run(rid)["status"] == "SUCCEEDED":
+            self.resources.finish_delivery(rid)
+            return self.store.run(rid)
+        if self.store.get(rid, "delivery/journal"):
+            return await self.delivery.finish(rid)
         run = self.store.run(rid)
         raw = self.store.get(rid, "capture")
         if not raw:
@@ -190,23 +211,21 @@ class WorkflowEngine:
             self.store.checkpoint(rid, "capture", raw)
         if not self.store.get(rid, "baseline"):
             self.workspaces.initialize()
-            base = self.workspaces.baseline(rid)
-            project_hash = tree_hash(self.project)
-            for previous in self.store.successful():
-                delivery = previous["data"].get("delivery_commit")
-                if not delivery:
-                    continue
-                if project_hash in {previous["data"].get("project_source_hash"), previous["data"].get("verified_source_hash")}:
-                    base = delivery
-                elif base != delivery:
-                    choice = await self._ask(rid, "baseline-choice", "当前工作区与上轮交付版本不同。回复 current 使用当前工作区，或 delivery 沿用上轮交付版本。", digest([base, delivery]))
-                    if choice.strip() == "delivery":
-                        base = delivery
-                    elif choice.strip() != "current":
-                        raise AA2Error("Baseline selection must be current or delivery")
-                break
+            target = run["data"].get("target_branch") or self.config.load().delivery.target_branch
+            if not target:
+                choices = self.workspaces.target_candidates()
+                if len(choices) == 1:
+                    target = choices[0]
+                else:
+                    target = (await self._ask(rid, "delivery-target", "请选择交付目标分支：" + ", ".join(choices), digest(choices))).strip()
+                    if target not in choices:
+                        raise AA2Error("请选择已存在的本地分支，或在 delivery.target_branch 中明确配置")
+                self.config.select_target(target)
+            self.store.update(rid, target_branch=target)
+            base = self.workspaces.committed_baseline(rid, target)
+            self.store.checkpoint(rid, "target_base", self.workspaces.head(target))
             self.store.checkpoint(rid, "baseline", base)
-            self.store.update(rid, project_source_hash=project_hash)
+            self.store.update(rid, project_source_hash=tree_hash(self.project))
         base = self.store.get(rid, "baseline")
         work = self.workspaces.allocate(rid, "integration", base)
         self.resources.register(work, "worktree", rid)
@@ -226,7 +245,7 @@ class WorkflowEngine:
             # Only a byte-identical input AND verified current source/lockfiles can take the fast path.
             if previous_raw and previous_raw["hash"] == raw["hash"] and previous["data"].get("verified_source_hash") == source_hash and not previous["data"].get("external_dependencies"):
                 self.store.checkpoint(rid, "clarify", assessment)
-                return self._finish_no_changes(rid, source_hash, previous["id"])
+                return await self._finish_no_changes(rid, work, previous["id"])
         context = {**self.store.get(rid, "clarify_context", {}), "raw_requirements": original[:24000],
                    "context_files": [str(self.artifacts.root / raw_hash[:2] / raw_hash)],
                    "raw_requirements_truncated": len(original) > 24000, "history": history[:3],
@@ -281,7 +300,7 @@ class WorkflowEngine:
             evidence = await self.verifier.run(checks, work, environment)
             self.store.checkpoint(rid, "coverage_checks", [r.model_dump() for r in evidence])
             if passed(evidence):
-                return self._finish_no_changes(rid, source_hash, "current-baseline")
+                return await self._finish_no_changes(rid, work, "current-baseline")
             self.store.checkpoint(rid, "clarify_context", {**context, "regression_evidence": [r.model_dump() for r in evidence]})
             raise Replan("clarify", "Coverage verification failed. Distinguish actual regressions from missing test infrastructure; do not reimplement satisfied behaviour.")
         spec_dir = work / "docs/requirements"
@@ -368,6 +387,8 @@ class WorkflowEngine:
             if stage == "plan":
                 unmet = {c.requirement_id for c in result.coverage if c.status != "satisfied"} or {r.id for r in result.requirements}
                 validate_plan(document, unmet)
+                if not document.runtime_probes:
+                    raise Replan("plan", "Declare lightweight runtime_probes that exercise the implemented application without user/production data writes")
                 prior = self.store.get(rid, "task_origins", {})
                 for task in document.tasks:
                     if task.id in prior:
@@ -402,6 +423,9 @@ class WorkflowEngine:
             apply_changes(work, docs.files, ["README.md", "docs", ".env.example"], protected=False)
             self.store.checkpoint(rid, "readme", docs.model_dump())
         self._agent_instructions(work, plan)
+        self._runtime_instructions(work)
+        if ProjectProfile.detect(work, self.config.load().project_profile).has_frontend and not plan.runtime_prepare:
+            raise Replan("plan", "Frontend delivery requires runtime_prepare commands to rebuild primary-workdir outputs after frozen dependency installation")
         environment = await self._environment(work, rid, plan)
         self._export_environment(work, environment)
         candidate = self.workspaces.checkpoint(work, f"refs/aa2/{rid}/candidate", "aa2: delivery candidate")
@@ -411,7 +435,7 @@ class WorkflowEngine:
         previous_checks = self.store.get(rid, "verify/checks", []) if self.store.get(rid, "verify/identity") == verify_key else []
         evidence = [CheckResult.model_validate(c) for c in previous_checks]
         if not passed(evidence):
-            evidence = await self.verifier.run(plan.final_checks, work, environment)
+            evidence = await self.verifier.run(self._candidate_checks(plan), work, environment)
         self.store.checkpoint(rid, "verify/identity", verify_key)
         self.store.checkpoint(rid, "verify/checks", [r.model_dump() for r in evidence])
         if not passed(evidence):
@@ -436,13 +460,11 @@ class WorkflowEngine:
             raise Replan("plan", review.summary)
         self.store.checkpoint(rid, "verify/review", review.model_dump())
         self.store.checkpoint(rid, "verify/review_identity", verify_key)
-        if git(work, "rev-parse", "HEAD") != candidate or tree_hash(work) != candidate_hash:
+        if (git(work, "rev-parse", "HEAD") != candidate or tree_hash(work) != candidate_hash
+                or git(work, "diff", "--name-only", "HEAD")):
             raise AA2Error("Candidate changed during verification")
-        branch = self.workspaces.deliver(rid, candidate)
-        self.store.update(rid, status="SUCCEEDED", stage="deliver", outcome="DELIVERED", branch=branch,
-                          delivery_commit=candidate, verified_source_hash=tree_hash(work),
-                          external_dependencies=bool(context.get("provider_research", {}).get("sources")))
-        return self.store.run(rid)
+        self.store.update(rid, external_dependencies=bool(context.get("provider_research", {}).get("sources")))
+        return await self.delivery.finish(rid, candidate=candidate, work=work, environment=environment, plan=plan)
 
     async def _environment(self, work, rid, plan=None):
         profile = ProjectProfile.detect(work, self.config.load().project_profile)
@@ -642,15 +664,163 @@ class WorkflowEngine:
             archived.append(ref)
         return archived
 
-    def _finish_no_changes(self, rid, source_hash, evidence_run):
-        inherited = self.store.run(evidence_run)["data"] if evidence_run != "current-baseline" else {"external_dependencies": True}
-        if evidence_run == "current-baseline":
-            for previous in self.store.successful():
-                if previous["data"].get("verified_source_hash") == source_hash:
-                    inherited = previous["data"]
-                    break
-        self.store.update(rid, status="SUCCEEDED", stage="coverage", outcome="NO_CHANGES",
-                          verified_source_hash=source_hash, coverage_evidence=evidence_run,
-                          delivery_commit=inherited.get("delivery_commit", self.store.get(rid, "baseline")),
-                          external_dependencies=inherited.get("external_dependencies", False))
-        return self.store.run(rid)
+    async def _finish_no_changes(self, rid, work, evidence_run):
+        source_hash = tree_hash(work)
+        source_run = evidence_run
+        if source_run == "current-baseline":
+            source_run = next((r["id"] for r in self.store.successful()
+                               if r["data"].get("verified_source_hash") == source_hash), None)
+        inherited = self.store.run(source_run)["data"] if source_run else {"external_dependencies": True}
+        plan_data = self.store.get(source_run, "plan") if source_run else None
+        if source_run:
+            for key in ("plan", "prototype", "prototype_approval", "provider_research", "verify/identity", "verify/checks", "verify/review"):
+                value = self.store.get(source_run, key)
+                if value is not None:
+                    self.store.checkpoint(rid, key, value)
+        plan = PlanResult.model_validate(plan_data) if plan_data else None
+        environment = await self._environment(work, rid, plan)
+        # Lock generation is an engineering delta, not a reimplementation of satisfied behaviour.
+        if tree_hash(work) != source_hash:
+            self.store.checkpoint(rid, "clarify_context", {"engineering_delta": "Generated dependency locks require independent verification"})
+            checks = plan.final_checks if plan else IntakeResult.model_validate(self.store.get(rid, "clarify")).verification
+            evidence = await self.verifier.run(checks, work, environment)
+            if not passed(evidence):
+                raise AA2Error("新依赖锁未通过验收")
+            review = await self._invoke("verify", {"project": self.contexts.build(work), "evidence": [c.model_dump() for c in evidence]},
+                                        ReviewResult, work, rid, "lock-delta-review", fresh=True)
+            if not review.approved:
+                raise AA2Error(review.summary)
+            self.store.checkpoint(rid, "verify/checks", [c.model_dump() for c in evidence])
+            self.store.checkpoint(rid, "verify/review", review.model_dump())
+        candidate = self.workspaces.checkpoint(work, f"refs/aa2/{rid}/candidate", "aa2: dependency lock verification")
+        self.store.update(rid, coverage_evidence=evidence_run, external_dependencies=inherited.get("external_dependencies", False))
+        return await self.delivery.finish(rid, candidate=candidate, work=work, environment=environment, plan=plan, outcome="NO_CHANGES")
+
+    async def _runtime_checks(self, rid, journal, environment):
+        plan = PlanResult.model_validate(journal["plan"]) if journal["plan"] else None
+        commands = (plan.runtime_prepare + plan.runtime_probes) if plan else []
+        if not commands:
+            commands = [Command(argv=[str(environment.prefix / "bin/python"), "-c", "import sys; assert sys.prefix == " + repr(str(environment.prefix))])]
+        checks = []
+        for index, command in enumerate(commands):
+            identity = digest([journal["candidate"], environment.fingerprint, command.model_dump()])
+            key = f"delivery/runtime/{index}"
+            saved = self.store.get(rid, key, {})
+            # Only probes can be reused: build outputs might have been removed externally.
+            reusable = plan and index >= len(plan.runtime_prepare) and saved.get("identity") == identity
+            results = [CheckResult.model_validate(c) for c in saved["checks"]] if reusable else await self.verifier.run([command], self.project, environment)
+            if not passed(results):
+                raise RuntimeVerificationError([c.model_dump() for c in results])
+            checks.extend(results)
+            self.store.checkpoint(rid, key, {"identity": identity, "checks": [c.model_dump() for c in results]})
+        evidence = {"checks": [c.model_dump() for c in checks]}
+        if plan and plan.preview:
+            await self._ensure_browser(rid, self.project)
+            evidence["visuals"] = await inspect_application(plan.preview, self.project,
+                self.store.root / "visuals" / rid / "runtime", environment, self.sandbox, self.store.root)
+        return evidence
+
+    def _runtime_instructions(self, work):
+        path = work / "README.md"
+        text = path.read_text() if path.exists() else "# Project\n"
+        start, end = "<!-- aa2:runtime:begin -->", "<!-- aa2:runtime:end -->"
+        if start in text and end in text:
+            before, rest = text.split(start, 1)
+            text = before + rest.split(end, 1)[1]
+        block = (f"\n{start}\n## aa2 已准备的运行环境\n\n交付成功后在项目根目录执行：\n\n"
+                 "```bash\nsource .aa2/runtime.sh\n```\n\n随后执行本文的启动命令。依赖位于本项目内；"
+                 "新克隆目录没有 `.aa2` 时，请按本文独立安装说明创建项目内环境。\n"
+                 f"{end}\n")
+        atomic_write(path, text.rstrip() + "\n" + block, 0o644)
+
+    async def _reintegrate_delivery(self, rid, journal):
+        work = Path(journal["work"])
+        incoming = journal["incoming"]
+        if journal.get("runtime_failure"):
+            failure = digest(journal["runtime_failure"])
+            if self.store.get(rid, "delivery/runtime_repaired") != failure:
+                await self._delivery_repair(rid, work, {"runtime_failure": journal["runtime_failure"]},
+                                            [p for p in git(work, "ls-files", "-z").split("\0") if p])
+                self.store.checkpoint(rid, "delivery/runtime_repaired", failure)
+        # A cancelled merge remains isolated and can be continued using its conflict index.
+        if not self.workspaces.is_ancestor(incoming, git(work, "rev-parse", "HEAD")):
+            unmerged = git(work, "diff", "--name-only", "--diff-filter=U").splitlines()
+            if not unmerged:
+                try:
+                    git(work, "-c", "user.name=aa2", "-c", "user.email=aa2@localhost", "merge", "--no-edit", "--no-ff", incoming)
+                except AA2Error:
+                    unmerged = git(work, "diff", "--name-only", "--diff-filter=U").splitlines()
+                    if not unmerged:
+                        raise
+            if unmerged:
+                await self._delivery_repair(rid, work, {"conflicts": unmerged, "incoming": incoming}, unmerged)
+        plan = PlanResult.model_validate(journal["plan"]) if journal["plan"] else None
+        checks = self._candidate_checks(plan) if plan else IntakeResult.model_validate(self.store.get(rid, "clarify")).verification
+        if not checks:
+            checks = self.config.load().verification
+        while True:
+            environment = await self._environment(work, rid, plan)
+            candidate = self.workspaces.checkpoint(work, f"refs/aa2/{rid}/candidate", "aa2: reintegrated delivery")
+            before = tree_hash(work)
+            evidence = await self.verifier.run(checks, work, environment)
+            if not passed(evidence):
+                await self._delivery_repair(rid, work, {"checks": [c.model_dump() for c in evidence]},
+                                            [p for p in git(work, "ls-files", "-z").split("\0") if p])
+                continue
+            visuals = []
+            if plan and plan.preview:
+                prototype_hash = self._prototype_hash(work)
+                if self.store.get(rid, "prototype_approval", {}).get("hash") != prototype_hash:
+                    await self._ensure_browser(rid, work)
+                    prototype = await inspect_prototype(work / "design/prototypes", self.store.root / "visuals" / rid / "reintegration-prototype", [])
+                    review = await self._invoke("review", {"review_kind": "prototype", "project": self.contexts.build(work), "visuals": prototype},
+                                                ReviewResult, work, rid, "reintegration-prototype", fresh=True)
+                    if not review.approved:
+                        raise AA2Error(review.summary)
+                    answer = await self._ask(rid, "prototype-approval", "主分支集成改变了原型，请审查后回复 approve。", prototype_hash)
+                    if answer.strip().lower() != "approve":
+                        raise AA2Error("原型未批准")
+                    self.store.checkpoint(rid, "prototype_approval", {"hash": prototype_hash})
+                visuals = await inspect_application(plan.preview, work, self.store.root / "visuals" / rid / "reintegrated",
+                                                    environment, self.sandbox, self.store.root)
+            review = await self._invoke("verify", {"project": self.contexts.build(work), "specification": self.store.get(rid, "clarify"),
+                "evidence": [c.model_dump() for c in evidence], "implemented_visuals": visuals, "incoming": incoming},
+                ReviewResult, work, rid, f"reintegration-review/{journal['reintegrations']}", fresh=True)
+            if not review.approved:
+                await self._delivery_repair(rid, work, {"review": review.model_dump()},
+                                            [p for p in git(work, "ls-files", "-z").split("\0") if p])
+                continue
+            if (tree_hash(work) != before or git(work, "rev-parse", "HEAD") != candidate
+                    or git(work, "diff", "--name-only", "HEAD")):
+                raise AA2Error("Reintegrated candidate changed during verification")
+            identity = digest([candidate, before, environment.fingerprint, [c.model_dump() for c in evidence], review.model_dump()])
+            self.store.checkpoint(rid, "verify/identity", identity)
+            self.store.checkpoint(rid, "verify/checks", [c.model_dump() for c in evidence])
+            self.store.checkpoint(rid, "verify/review", review.model_dump())
+            self.store.checkpoint(rid, "verify/visuals", visuals)
+            return {"candidate": candidate, "candidate_tree": git(work, "rev-parse", f"{candidate}^{{tree}}"),
+                    "source_hash": before, "validation": identity,
+                    "environment": {"prefix": str(environment.prefix), "fingerprint": environment.fingerprint}}
+
+    async def _delivery_repair(self, rid, work, feedback, scopes):
+        key = "rounds/delivery"
+        count = self.store.get(rid, key, {"round": 0})["round"]
+        if count >= self.config.load().execution.max_rounds:
+            raise AA2Error("主分支集成修复预算耗尽，请人工核对或明确调整 max_rounds")
+        self.store.checkpoint(rid, key, {"round": count + 1})
+        context = {"task": {"description": "Repair the isolated reintegration without weakening accepted behaviour", "allowed_paths": scopes},
+                   "specification": self.store.get(rid, "clarify"), "project": self.contexts.build(work), "feedback": feedback}
+        proposal = await self._invoke("implement", context, ImplementationResult, work, rid, f"delivery-repair/{count}")
+        if proposal.replan_stage or not proposal.changes:
+            raise AA2Error("集成修复需要人工核对规划：" + proposal.replan_reason)
+        review = await self._invoke("review", {**context, "review_kind": "test_changes", "candidate_changes": proposal.model_dump()},
+                                    ReviewResult, work, rid, f"delivery-repair-review/{count}", fresh=True)
+        if not review.approved:
+            raise AA2Error(review.summary)
+        apply_changes(work, proposal.changes, scopes, protected=False, contracts=False)
+        self.workspaces.checkpoint(work, f"refs/aa2/{rid}/candidate", "aa2: reviewed integration repair")
+
+    @staticmethod
+    def _candidate_checks(plan):
+        # Exercise the declared handoff contract before publishing; avoid identical duplicate builds.
+        return list({digest(c.model_dump()): c for c in [*plan.final_checks, *plan.runtime_prepare, *plan.runtime_probes]}.values())

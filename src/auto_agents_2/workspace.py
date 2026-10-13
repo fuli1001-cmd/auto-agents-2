@@ -123,42 +123,6 @@ class WorkspaceManager:
         if additions:
             atomic_write(exclude, old + "\n" + "\n".join(additions) + "\n")
 
-    def baseline(self, run_id: str) -> str:
-        """Snapshot user changes using a private index; leave their index and checkout alone."""
-        index = self.root / "tmp" / run_id / "baseline-index"
-        index.parent.mkdir(parents=True, exist_ok=True)
-        env = {**os.environ, "GIT_INDEX_FILE": str(index)}
-        try:
-            head = git(self.project, "rev-parse", "--verify", "HEAD")
-            git(self.project, "read-tree", head, env=env)
-        except AA2Error:
-            head = ""
-            git(self.project, "read-tree", "--empty", env=env)
-        git(self.project, "add", "-u", env=env)
-        excluded = [p for p in git(self.project, "ls-files", "-z", env=env).split("\0")
-                    if p and (any(part in EXCLUDED for part in Path(p).parts) or Path(p).name == ".env"
-                              or (Path(p).name.startswith(".env.") and Path(p).name != ".env.example"))]
-        for start in range(0, len(excluded), 100):
-            git(self.project, "rm", "--cached", "--ignore-unmatch", "--", *excluded[start:start + 100], env=env)
-        candidates = [p for p in git(self.project, "ls-files", "--cached", "--others", "--exclude-standard", "-z").split("\0")
-                      if p and not any(part in EXCLUDED for part in Path(p).parts)
-                      and Path(p).name != ".env" and (not Path(p).name.startswith(".env.") or Path(p).name == ".env.example")
-                      and (self.project / p).is_file() and not (self.project / p).is_symlink()]
-        if candidates:
-            for start in range(0, len(candidates), 100):
-                git(self.project, "add", "--", *candidates[start:start + 100], env=env)
-        tree = git(self.project, "write-tree", env=env)
-        if head and tree == git(self.project, "rev-parse", f"{head}^{{tree}}"):
-            commit = head
-        else:
-            args = ["-c", "user.name=aa2", "-c", "user.email=aa2@localhost", "commit-tree", tree]
-            if head:
-                args += ["-p", head]
-            commit = git(self.project, *args, input=f"aa2 baseline {run_id}\n", env=env)
-        git(self.project, "update-ref", f"refs/aa2/{run_id}/baseline", commit)
-        index.unlink(missing_ok=True)
-        return commit
-
     def allocate(self, run_id: str, name: str, base: str) -> Path:
         if not name.replace("-", "").replace("_", "").isalnum():
             raise PolicyViolation("Unsafe workspace name")
@@ -171,12 +135,13 @@ class WorkspaceManager:
         return path
 
     def checkpoint(self, path: Path, ref: str, message: str) -> str:
-        git(path, "add", "-A")
-        hidden = [p for p in git(path, "ls-files", "-z").split("\0")
-                  if p and (any(part in EXCLUDED for part in Path(p).parts) or Path(p).name == ".env"
-                            or (Path(p).name.startswith(".env.") and Path(p).name != ".env.example"))]
-        for start in range(0, len(hidden), 100):
-            git(path, "rm", "--cached", "--ignore-unmatch", "--", *hidden[start:start + 100])
+        # Preserve already tracked files, including user .env files; never add new secrets.
+        git(path, "add", "-u")
+        new_files = [p for p in git(path, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
+                     if p and not any(part in EXCLUDED for part in Path(p).parts)
+                     and Path(p).name != ".env" and (not Path(p).name.startswith(".env.") or Path(p).name == ".env.example")]
+        for start in range(0, len(new_files), 100):
+            git(path, "add", "--", *new_files[start:start + 100])
         if git(path, "diff", "--cached", "--name-only"):
             git(path, "-c", "user.name=aa2", "-c", "user.email=aa2@localhost", "commit", "-m", message)
         commit = git(path, "rev-parse", "HEAD")
@@ -200,7 +165,167 @@ class WorkspaceManager:
         if path.exists():
             git(self.project, "worktree", "remove", "--force", str(path))
 
-    def deliver(self, run_id: str, commit: str) -> str:
-        branch = f"aa2/{run_id}"
-        git(self.project, "update-ref", f"refs/heads/{branch}", commit)
-        return branch
+    def head(self, branch: str) -> str:
+        try:
+            return git(self.project, "rev-parse", "--verify", f"refs/heads/{branch}")
+        except AA2Error:
+            return ""
+
+    def target_candidates(self) -> list[str]:
+        branches = git(self.project, "for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines()
+        if not branches:
+            return ["main"]
+        try:
+            default = git(self.project, "symbolic-ref", "refs/remotes/origin/HEAD").removeprefix("refs/remotes/origin/")
+            if default in branches:
+                return [default]
+        except AA2Error:
+            pass
+        conventional = [b for b in branches if b in {"main", "master"}]
+        return conventional if len(conventional) == 1 else branches
+
+    def clean_target(self, branch: str, *, switch: bool = False):
+        git(self.project, "check-ref-format", "--branch", branch)
+        if branch.startswith("-"):
+            raise AA2Error("Invalid target branch")
+        if git(self.project, "status", "--porcelain", "--untracked-files=all"):
+            raise AA2Error("项目主目录有未提交或未跟踪的修改。请自行提交或保存到其它目录，再回复 retry；aa2 不会自动暂存或覆盖。")
+        for record in git(self.project, "worktree", "list", "--porcelain").split("\n\n"):
+            lines = record.splitlines()
+            if f"branch refs/heads/{branch}" in lines and f"worktree {self.project}" not in lines:
+                raise AA2Error(f"目标分支 {branch} 被另一个 worktree 占用，请先释放该分支")
+        try:
+            current = git(self.project, "symbolic-ref", "-q", "HEAD")
+        except AA2Error:
+            current = ""
+        if current != f"refs/heads/{branch}":
+            if not switch:
+                raise AA2Error(f"主目录分支已变化，请切回 {branch} 后继续")
+            if not self.head(branch):
+                raise AA2Error(f"目标分支不存在：{branch}")
+            git(self.project, "switch", "--no-overwrite-ignore", branch)
+
+    def committed_baseline(self, rid: str, target: str) -> str:
+        self.clean_target(target, switch=True)
+        base = self.head(target)
+        if not base:
+            # Detached empty baseline; the unborn target is not advanced until delivery.
+            tree = git(self.project, "hash-object", "-w", "-t", "tree", "--stdin", input="")
+            base = git(self.project, "-c", "user.name=aa2", "-c", "user.email=aa2@localhost",
+                       "commit-tree", tree, input=f"aa2 empty baseline {rid}\n")
+        git(self.project, "update-ref", f"refs/aa2/{rid}/baseline", base)
+        return base
+
+    def is_ancestor(self, older: str, newer: str) -> bool:
+        if not older:
+            return True
+        try:
+            git(self.project, "merge-base", "--is-ancestor", older, newer)
+            return True
+        except AA2Error:
+            return False
+
+    def entries(self, commit: str) -> dict:
+        if not commit:
+            return {}
+        result = {}
+        for entry in git(self.project, "ls-tree", "-rz", commit).split("\0"):
+            if entry:
+                meta, path = entry.split("\t", 1)
+                mode, kind, oid = meta.split()
+                if kind != "blob":
+                    raise AA2Error("Automatic delivery does not support submodule entries")
+                result[path] = {"mode": mode, "oid": oid}
+        return result
+
+    def publication_manifest(self, old: str, new: str) -> dict:
+        before, after = self.entries(old), self.entries(new)
+        return {p: {"before": before.get(p), "after": after.get(p)}
+                for p in before.keys() | after.keys() if before.get(p) != after.get(p)}
+
+    def file_entry(self, name: str):
+        path = self.project / name
+        # Never inspect through a symlinked parent.
+        for parent in path.parents:
+            if parent == self.project:
+                break
+            if parent.is_symlink():
+                raise AA2Error(f"Symlinked publication parent: {name}")
+        if path.is_symlink():
+            content = os.readlink(path).encode()
+            mode = "120000"
+        elif path.is_file():
+            content = path.read_bytes()
+            mode = "100755" if path.stat().st_mode & 0o111 else "100644"
+        elif path.exists():
+            return {"directory": True}
+        else:
+            return None
+        proc = subprocess.run(["git", "hash-object", "--stdin"], input=content, capture_output=True, check=True)
+        return {"mode": mode, "oid": proc.stdout.decode().strip()}
+
+    def check_publication_paths(self, manifest: dict):
+        for name, images in manifest.items():
+            if self.file_entry(name) != images["before"]:
+                raise AA2Error(f"发布路径与基线不符（可能含被忽略的用户文件）：{name}")
+
+    def publish(self, target: str, old: str, candidate: str):
+        self.clean_target(target)
+        if self.head(target) != old:
+            raise AA2Error("Target advanced before publication; reintegration required")
+        git(self.project, "merge", "--ff-only", "--no-overwrite-ignore", candidate)
+
+    def recover_publication(self, journal: dict):
+        """Repair only journal-attributable pre/post images; never reset a user's tree."""
+        target, old, new = journal["target"], journal["old"], journal["candidate"]
+        current = self.head(target)
+        if current not in {old, new}:
+            if self.is_ancestor(new, current):
+                raise AA2Error("交付后目标分支又有新提交，请恢复交付版本或人工核对后继续；不会重置用户提交")
+            raise AA2Error("发布中目标分支发生未知变化，需要人工核对")
+        if git(self.project, "symbolic-ref", "-q", "HEAD") != f"refs/heads/{target}":
+            raise AA2Error("发布恢复需要主目录位于目标分支")
+        lock = Path(git(self.project, "rev-parse", "--git-path", "index.lock"))
+        if not lock.is_absolute():
+            lock = self.project / lock
+        if lock.exists():
+            raise AA2Error("Git index.lock 存在，请确认没有其它 Git 进程后处理；aa2 不会删除未知锁")
+        tree = git(self.project, "write-tree")
+        empty = git(self.project, "hash-object", "-t", "tree", "--stdin", input="")
+        old_tree = git(self.project, "rev-parse", f"{old}^{{tree}}") if old else empty
+        new_tree = git(self.project, "rev-parse", f"{new}^{{tree}}")
+        if tree not in {old_tree, new_tree}:
+            raise AA2Error("发布恢复发现未知暂存区修改，保留现场等待处理")
+        manifest = journal["manifest"]
+        for name, images in manifest.items():
+            if self.file_entry(name) not in (images["before"], images["after"]):
+                raise AA2Error(f"发布恢复发现用户修改：{name}")
+        # Unchanged tracked files must remain clean; nonignored untracked files also block.
+        changed = set(git(self.project, "diff", "--name-only", "-z").split("\0")) - {""}
+        untracked = set(git(self.project, "ls-files", "--others", "--exclude-standard", "-z").split("\0")) - {""}
+        if (changed | untracked) - manifest.keys():
+            raise AA2Error("发布恢复发现无关用户修改，保留现场等待处理")
+        for name, images in manifest.items():
+            actual = self.file_entry(name)
+            if actual == images["after"]:
+                continue
+            if actual != images["before"]:
+                raise AA2Error(f"发布恢复期间文件变化：{name}")
+            path = self.project / name
+            after = images["after"]
+            if after is None:
+                path.unlink(missing_ok=True)
+            else:
+                content = subprocess.run(["git", "-C", str(self.project), "cat-file", "blob", after["oid"]],
+                                         capture_output=True, check=True).stdout
+                if after["mode"] == "120000":
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.unlink(missing_ok=True)
+                    path.symlink_to(os.fsdecode(content))
+                else:
+                    if path.is_symlink():
+                        path.unlink()
+                    atomic_write(path, content, 0o755 if after["mode"] == "100755" else 0o644)
+        git(self.project, "read-tree", new)
+        git(self.project, "update-ref", f"refs/heads/{target}", new, current or "0" * len(new))
+        self.clean_target(target)

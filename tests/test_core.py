@@ -103,8 +103,12 @@ def test_worktrees_preserve_user_index_and_uncommitted_changes(project):
     (project / "app.py").write_text("user change")
     manager = WorkspaceManager(project)
     before = git(project, "status", "--porcelain")
-    base = manager.baseline("run_test")
+    with pytest.raises(AA2Error, match="未提交"):
+        manager.committed_baseline("run_test", "main")
     assert git(project, "status", "--porcelain") == before
+    git(project, "add", "app.py")
+    git(project, "-c", "user.name=User", "-c", "user.email=user@example.test", "commit", "-m", "User baseline")
+    base = manager.committed_baseline("run_test", "main")
     a = manager.allocate("run_test", "task-a", base)
     b = manager.allocate("run_test", "task-b", base)
     (a / "app.py").write_text("A")
