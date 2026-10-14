@@ -253,6 +253,7 @@ def cancel(project: Project = Path(".")):
                     resources = ResourceManager(store, cfg.load().cleanup)
                     resources.release_run(current["id"])
                     resources.collect()
+                    resources.collect_artifacts_safely()
         except BusyProject:
             pass
         console.print("停止请求已保存；若已开始发布则保留现场并暂停，使用 aa2 run 继续完成交付。")
@@ -270,6 +271,7 @@ def gc(project: Project = Path("."), dry_run: bool = False):
             try:
                 with file_lock(store.root / "controller.lock", blocking=False):
                     resources.finish_pending()
+                    resources.collect_artifacts_safely()
             except BusyProject:
                 pass
         console.print_json(data=resources.collect(dry_run))

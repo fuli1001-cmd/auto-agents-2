@@ -17,14 +17,24 @@ class TextExtractor(HTMLParser):
     def __init__(self):
         super().__init__()
         self.parts, self.hidden = [], 0
+        self.links = []
 
     def handle_starttag(self, tag, attrs):
         if tag in {"script", "style"}:
             self.hidden += 1
-        if tag in {"p", "div", "br", "li", "h1", "h2", "h3"}:
+        if tag in {"p", "div", "br", "li", "h1", "h2", "h3", "h4", "pre", "tr", "table"}:
             self.parts.append("\n")
+        if tag in {"td", "th"}:
+            self.parts.append(" | ")
+        if tag == "a":
+            self.links.append(dict(attrs).get("href", ""))
+        anchor = dict(attrs).get("id")
+        if anchor:
+            self.parts.append(f" [#{anchor}] ")
 
     def handle_endtag(self, tag):
+        if tag == "a" and self.links:
+            self.parts.append(" (" + self.links.pop() + ") ")
         if tag in {"script", "style"}:
             self.hidden = max(0, self.hidden - 1)
 

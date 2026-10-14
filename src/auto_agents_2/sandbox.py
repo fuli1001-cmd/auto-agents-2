@@ -23,7 +23,7 @@ class SandboxRunner:
         self.test_unconfined = _test_unconfined
 
     def command(self, argv: list[str], cwd: Path, writable: list[Path],
-                readable: list[Path] | None = None, overlays: list[tuple[Path, Path]] | None = None) -> list[str]:
+                readable: list[Path] | None = None, overlays: list[tuple[Path, Path]] | None = None, hidden: list[Path] | None = None) -> list[str]:
         if self.test_unconfined:
             return argv
         if not Path(self.binary).is_file():
@@ -32,6 +32,9 @@ class SandboxRunner:
                "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
         user_home = Path.home()
         cmd += ["--tmpfs", str(user_home)]
+        for path in hidden or []:
+            if path.exists():
+                cmd += ["--tmpfs", str(path.resolve())]
         mounts = [Path(sys.prefix), cwd.resolve(), *(p.resolve() for p in readable or [])]
         executable = Path(argv[0])
         if executable.is_absolute() and executable.is_file():
@@ -48,6 +51,8 @@ class SandboxRunner:
         if metadata.returncode == 0:
             mounts.append(Path(metadata.stdout.strip()))
         for path in mounts:
+            if hidden and any(h.resolve() == path or h.resolve().is_relative_to(path) for h in hidden):
+                raise PolicyViolation("Provider runtime mount would expose a protected project root")
             if path.is_relative_to(self.root):
                 continue
             if path.exists():
@@ -90,13 +95,13 @@ class SandboxRunner:
         finally:
             shutil.rmtree(scratch)
 
-    async def spawn(self, argv, cwd, env, writable, readable=None, overlays=None):
+    async def spawn(self, argv, cwd, env, writable, readable=None, overlays=None, hidden=None):
         executable = shutil.which(argv[0], path=env.get("PATH"))
         if not executable:
             raise PolicyViolation(f"Executable unavailable in selected environment: {argv[0]}")
         argv = [executable, *argv[1:]]
         env = {**env, "GIT_OPTIONAL_LOCKS": "0"}
-        command = self.command(argv, cwd, writable, readable, overlays)
+        command = self.command(argv, cwd, writable, readable, overlays, hidden)
         process = await asyncio.create_subprocess_exec(
             *command, cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,

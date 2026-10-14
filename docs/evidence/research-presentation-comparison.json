@@ -1,0 +1,389 @@
+{
+  "scope": "inline exact-snapshot body deduplication only; not end-to-end workflow equivalence",
+  "model": "gpt-6.1-sol",
+  "effort": "medium",
+  "provider": "codex",
+  "fixture_hash": "0760a86f4543835f0ef0b7e40f48a87af14654fa44bb7035835be1117540e481",
+  "expected": {
+    "C1": true,
+    "C2": false,
+    "C3": false,
+    "C4": false,
+    "C5": true,
+    "C6": false,
+    "C7": true,
+    "C8": false
+  },
+  "observations": [
+    {
+      "repetition": 0,
+      "variant": "A",
+      "correct": true,
+      "prompt_characters": 38752,
+      "seconds": 42.682859674008796,
+      "usage": {
+        "input_tokens": 21564,
+        "output_tokens": 314,
+        "cached_tokens": 0,
+        "reasoning_tokens": 19,
+        "total_tokens": 21878
+      },
+      "usage_complete": true,
+      "answer": {
+        "verdicts": [
+          {
+            "claim_id": "C1",
+            "supported": true,
+            "evidence": "The v1 fixture explicitly states: \"Maximum page size: 100.\""
+          },
+          {
+            "claim_id": "C2",
+            "supported": false,
+            "evidence": "The v1 fixture contradicts this claim: \"MANDATORY: exports require scope export:read.\""
+          },
+          {
+            "claim_id": "C3",
+            "supported": false,
+            "evidence": "The v1 fixture explicitly states: \"Streaming exports are not supported.\""
+          },
+          {
+            "claim_id": "C4",
+            "supported": false,
+            "evidence": "The v1 fixture explicitly states: \"Live service availability has not been tested.\" No live test evidence is supplied."
+          },
+          {
+            "claim_id": "C5",
+            "supported": true,
+            "evidence": "The v2 fixture explicitly states: \"Maximum page size: 200.\""
+          },
+          {
+            "claim_id": "C6",
+            "supported": false,
+            "evidence": "The v2 fixture requires an additional permission: \"MANDATORY: exports require BOTH export:read and project:member.\""
+          },
+          {
+            "claim_id": "C7",
+            "supported": true,
+            "evidence": "The v2 fixture explicitly states: \"MANDATORY: exports require BOTH export:read and project:member.\""
+          },
+          {
+            "claim_id": "C8",
+            "supported": false,
+            "evidence": "The cited v2 fixture states: \"Maximum page size: 200.\" The v1 limit of 100 does not support a claim about v2."
+          }
+        ]
+      }
+    },
+    {
+      "repetition": 0,
+      "variant": "B",
+      "correct": true,
+      "prompt_characters": 17178,
+      "seconds": 24.973155227984535,
+      "usage": {
+        "input_tokens": 18296,
+        "output_tokens": 311,
+        "cached_tokens": 0,
+        "reasoning_tokens": 26,
+        "total_tokens": 18607
+      },
+      "usage_complete": true,
+      "answer": {
+        "verdicts": [
+          {
+            "claim_id": "C1",
+            "supported": true,
+            "evidence": "The v1 fixture states: \"Maximum page size: 100.\""
+          },
+          {
+            "claim_id": "C2",
+            "supported": false,
+            "evidence": "The v1 fixture states: \"MANDATORY: exports require scope export:read.\""
+          },
+          {
+            "claim_id": "C3",
+            "supported": false,
+            "evidence": "The v1 fixture states: \"Streaming exports are not supported.\""
+          },
+          {
+            "claim_id": "C4",
+            "supported": false,
+            "evidence": "The v1 fixture states: \"Live service availability has not been tested.\" No live test evidence is supplied."
+          },
+          {
+            "claim_id": "C5",
+            "supported": true,
+            "evidence": "The v2 fixture states: \"Maximum page size: 200.\""
+          },
+          {
+            "claim_id": "C6",
+            "supported": false,
+            "evidence": "The v2 fixture states: \"MANDATORY: exports require BOTH export:read and project:member.\" export:read alone is insufficient."
+          },
+          {
+            "claim_id": "C7",
+            "supported": true,
+            "evidence": "The v2 fixture states: \"MANDATORY: exports require BOTH export:read and project:member.\""
+          },
+          {
+            "claim_id": "C8",
+            "supported": false,
+            "evidence": "The v2 fixture states: \"Maximum page size: 200.\" The v1 limit does not apply to v2."
+          }
+        ]
+      }
+    },
+    {
+      "repetition": 1,
+      "variant": "B",
+      "correct": true,
+      "prompt_characters": 17178,
+      "seconds": 34.58181340500596,
+      "usage": {
+        "input_tokens": 18298,
+        "output_tokens": 316,
+        "cached_tokens": 0,
+        "reasoning_tokens": 28,
+        "total_tokens": 18614
+      },
+      "usage_complete": true,
+      "answer": {
+        "verdicts": [
+          {
+            "claim_id": "C1",
+            "supported": true,
+            "evidence": "Version 1 explicitly states: \"Maximum page size: 100.\""
+          },
+          {
+            "claim_id": "C2",
+            "supported": false,
+            "evidence": "Version 1 requires permission: \"MANDATORY: exports require scope export:read.\""
+          },
+          {
+            "claim_id": "C3",
+            "supported": false,
+            "evidence": "Version 1 explicitly states: \"Streaming exports are not supported.\""
+          },
+          {
+            "claim_id": "C4",
+            "supported": false,
+            "evidence": "Version 1 explicitly states: \"Live service availability has not been tested.\" The fixture provides no successful live-test evidence."
+          },
+          {
+            "claim_id": "C5",
+            "supported": true,
+            "evidence": "Version 2 explicitly states: \"Maximum page size: 200.\""
+          },
+          {
+            "claim_id": "C6",
+            "supported": false,
+            "evidence": "Version 2 states: \"MANDATORY: exports require BOTH export:read and project:member.\" export:read alone is insufficient."
+          },
+          {
+            "claim_id": "C7",
+            "supported": true,
+            "evidence": "Version 2 explicitly states: \"MANDATORY: exports require BOTH export:read and project:member.\""
+          },
+          {
+            "claim_id": "C8",
+            "supported": false,
+            "evidence": "Version 2 explicitly states: \"Maximum page size: 200.\" Version 1's limit does not apply to version 2."
+          }
+        ]
+      }
+    },
+    {
+      "repetition": 1,
+      "variant": "A",
+      "correct": true,
+      "prompt_characters": 38752,
+      "seconds": 32.42975303300773,
+      "usage": {
+        "input_tokens": 21562,
+        "output_tokens": 354,
+        "cached_tokens": 0,
+        "reasoning_tokens": 26,
+        "total_tokens": 21916
+      },
+      "usage_complete": true,
+      "answer": {
+        "verdicts": [
+          {
+            "claim_id": "C1",
+            "supported": true,
+            "evidence": "fixture://api/v1#C1, v1: \"Maximum page size: 100.\""
+          },
+          {
+            "claim_id": "C2",
+            "supported": false,
+            "evidence": "fixture://api/v1#C2, v1: \"MANDATORY: exports require scope export:read.\""
+          },
+          {
+            "claim_id": "C3",
+            "supported": false,
+            "evidence": "fixture://api/v1#C3, v1: \"Streaming exports are not supported.\""
+          },
+          {
+            "claim_id": "C4",
+            "supported": false,
+            "evidence": "fixture://api/v1#C4, v1: \"Live service availability has not been tested.\" The fixture provides no successful live-test evidence."
+          },
+          {
+            "claim_id": "C5",
+            "supported": true,
+            "evidence": "fixture://api/v2#C5, v2: \"Maximum page size: 200.\""
+          },
+          {
+            "claim_id": "C6",
+            "supported": false,
+            "evidence": "fixture://api/v2#C6, v2: \"MANDATORY: exports require BOTH export:read and project:member.\""
+          },
+          {
+            "claim_id": "C7",
+            "supported": true,
+            "evidence": "fixture://api/v2#C7, v2: \"MANDATORY: exports require BOTH export:read and project:member.\""
+          },
+          {
+            "claim_id": "C8",
+            "supported": false,
+            "evidence": "fixture://api/v2#C8, v2: \"Maximum page size: 200.\" The v1 limit does not apply to v2."
+          }
+        ]
+      }
+    },
+    {
+      "repetition": 2,
+      "variant": "A",
+      "correct": true,
+      "prompt_characters": 38752,
+      "seconds": 35.04200528401998,
+      "usage": {
+        "input_tokens": 21566,
+        "output_tokens": 383,
+        "cached_tokens": 0,
+        "reasoning_tokens": 32,
+        "total_tokens": 21949
+      },
+      "usage_complete": true,
+      "answer": {
+        "verdicts": [
+          {
+            "claim_id": "C1",
+            "supported": true,
+            "evidence": "fixture://api/v1#C1, version v1: \"Maximum page size: 100.\""
+          },
+          {
+            "claim_id": "C2",
+            "supported": false,
+            "evidence": "fixture://api/v1#C2, version v1 contradicts the claim: \"MANDATORY: exports require scope export:read.\""
+          },
+          {
+            "claim_id": "C3",
+            "supported": false,
+            "evidence": "fixture://api/v1#C3, version v1: \"Streaming exports are not supported.\""
+          },
+          {
+            "claim_id": "C4",
+            "supported": false,
+            "evidence": "fixture://api/v1#C4, version v1: \"Live service availability has not been tested.\" The frozen specification provides no successful live-test evidence."
+          },
+          {
+            "claim_id": "C5",
+            "supported": true,
+            "evidence": "fixture://api/v2#C5, version v2: \"Maximum page size: 200.\""
+          },
+          {
+            "claim_id": "C6",
+            "supported": false,
+            "evidence": "fixture://api/v2#C6, version v2: \"MANDATORY: exports require BOTH export:read and project:member.\" export:read alone is insufficient."
+          },
+          {
+            "claim_id": "C7",
+            "supported": true,
+            "evidence": "fixture://api/v2#C7, version v2: \"MANDATORY: exports require BOTH export:read and project:member.\""
+          },
+          {
+            "claim_id": "C8",
+            "supported": false,
+            "evidence": "fixture://api/v2#C8, version v2: \"Maximum page size: 200.\" The v1 limit of 100 does not apply to v2."
+          }
+        ]
+      }
+    },
+    {
+      "repetition": 2,
+      "variant": "B",
+      "correct": true,
+      "prompt_characters": 17178,
+      "seconds": 26.993645974987885,
+      "usage": {
+        "input_tokens": 18300,
+        "output_tokens": 288,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 18588
+      },
+      "usage_complete": true,
+      "answer": {
+        "verdicts": [
+          {
+            "claim_id": "C1",
+            "supported": true,
+            "evidence": "The v1 fixture states: \"Maximum page size: 100.\""
+          },
+          {
+            "claim_id": "C2",
+            "supported": false,
+            "evidence": "The v1 fixture states: \"MANDATORY: exports require scope export:read.\""
+          },
+          {
+            "claim_id": "C3",
+            "supported": false,
+            "evidence": "The v1 fixture states: \"Streaming exports are not supported.\""
+          },
+          {
+            "claim_id": "C4",
+            "supported": false,
+            "evidence": "The v1 fixture states: \"Live service availability has not been tested.\" It provides no evidence of a successful live test."
+          },
+          {
+            "claim_id": "C5",
+            "supported": true,
+            "evidence": "The v2 fixture states: \"Maximum page size: 200.\""
+          },
+          {
+            "claim_id": "C6",
+            "supported": false,
+            "evidence": "The v2 fixture states: \"MANDATORY: exports require BOTH export:read and project:member.\" export:read alone is insufficient."
+          },
+          {
+            "claim_id": "C7",
+            "supported": true,
+            "evidence": "The v2 fixture states: \"MANDATORY: exports require BOTH export:read and project:member.\""
+          },
+          {
+            "claim_id": "C8",
+            "supported": false,
+            "evidence": "The v2 fixture states: \"Maximum page size: 200.\" The v1 limit does not support a claim about v2."
+          }
+        ]
+      }
+    }
+  ],
+  "isolated_sessions": true,
+  "repetitions": 3,
+  "passed": true,
+  "total_usage": {
+    "input_tokens": 119586,
+    "output_tokens": 1966,
+    "cached_tokens": 0,
+    "reasoning_tokens": 131,
+    "total_tokens": 121552,
+    "complete": true
+  },
+  "profile_fingerprint": "491aa721b6dc3bec0167e1a2600ee4aaec48d3fd1ccef290d799cc0878963a93",
+  "binary_hash": "61b0194f3bb6534439c8d26a3ed57d0805f84b884588b761795323eeb92fcf70",
+  "prompt_version": "2026-10-14.2",
+  "schema_hash": "faee74b8c34fb230addc0c4dc5479b7d17d5d4c81d3b0f2bc14a5f70775ef9ed",
+  "cli_version": "codex-cli 0.162.1"
+}

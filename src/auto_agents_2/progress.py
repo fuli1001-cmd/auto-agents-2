@@ -6,22 +6,25 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 
+from .errors import AA2Error
 from .util import identifier
 
 current_activity = ContextVar("aa2_activity", default=None)
 
 
-async def capture_output(process):
+async def capture_output(process, *, machine_limit=32 * 1024 * 1024):
     """Drain both streams, observing bytes without publishing their contents."""
     activity = current_activity.get()
 
     async def drain(stream):
-        chunks = []
+        data = bytearray()
         while chunk := await stream.read(65536):
-            chunks.append(chunk)
+            data.extend(chunk)
+            if len(data) > machine_limit:
+                raise AA2Error("Machine output exceeds supported parsing capacity; capture is incomplete")
             if activity:
                 activity.output()
-        return b"".join(chunks)
+        return bytes(data)
 
     readers = [asyncio.create_task(drain(process.stdout)), asyncio.create_task(drain(process.stderr))]
     try:

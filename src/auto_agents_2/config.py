@@ -7,7 +7,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from .errors import ConfigurationError
 from .models import Command, Record
@@ -43,7 +43,13 @@ class Execution(Record):
     max_stalled_rounds: int = Field(default=2, ge=1)
     max_stalled_replans: int = Field(default=2, ge=1)
     infra_retries: int = Field(default=3, ge=0, le=10)
-    max_tokens: int | None = Field(default=None, ge=1)
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_token_budget(cls, value):
+        if isinstance(value, dict):
+            value = {k: v for k, v in value.items() if k != "max_tokens"}
+        return value
+
     wait_poll_seconds: float = Field(default=1, gt=0)
 
 
@@ -80,6 +86,7 @@ class Config(Record):
     project_profile: Literal["auto", "python", "react", "next", "python-react", "python-next"] = "auto"
     verification: list[Command] = []
     sandbox_binary: str = "bwrap"
+    sensitive_paths: list[str] = []
     prompting: dict[str, str] = {"model_adaptation": "auto"}
 
     @model_validator(mode="after")
@@ -121,8 +128,16 @@ class ConfigStore:
     def load(self) -> Config:
         try:
             return Config.model_validate_json(self.path.read_text())
-        except (OSError, ValueError) as exc:
-            raise ConfigurationError(f"Cannot read {self.path}: {exc}") from exc
+        except ValidationError as exc:
+            schema = Config.model_json_schema()
+            known = {"agent_timeout", *schema.get("properties", {})}
+            for definition in schema.get("$defs", {}).values():
+                known.update(definition.get("properties", {}))
+            locations = [".".join(str(part) if part in known else "<key>" for part in e["loc"])
+                         for e in exc.errors(include_input=False, include_context=False)]
+            raise ConfigurationError("Invalid configuration fields: " + ", ".join(locations)) from None
+        except (OSError, ValueError):
+            raise ConfigurationError("Cannot read or validate configuration") from None
 
     def select_target(self, branch: str):
         with file_lock(self.path.with_suffix(".lock")):
@@ -237,12 +252,12 @@ def validate_extra_args(args: list[str]) -> None:
         if key in permitted_values:
             i += 1 if "=" in arg else 2
             if i > len(args):
-                raise ConfigurationError(f"Missing value for {arg}")
+                raise ConfigurationError("Unsupported provider argument or setting (value omitted)")
             continue
         if arg in {"-c", "--config"} and i + 1 < len(args):
             setting = args[i + 1].split("=", 1)[0]
             if setting not in {"model", "model_provider", "model_reasoning_effort", "service_tier"}:
-                raise ConfigurationError(f"Protected runtime setting: {setting}")
+                raise ConfigurationError("Unsupported provider argument or setting (value omitted)")
             i += 2
             continue
-        raise ConfigurationError(f"Unsupported/protected extra argument: {arg}")
+        raise ConfigurationError("Unsupported provider argument or setting (value omitted)")

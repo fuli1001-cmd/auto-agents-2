@@ -49,7 +49,7 @@ async def test_delivers_root_and_reuses_target_without_run_branches(tmp_path, br
     second = await workflow.start(str(requirements))
     assert second["data"]["outcome"] == "NO_CHANGES"
     assert git(project, "rev-parse", "HEAD") == head
-    assert len(workflow.agent.calls) == calls
+    assert [stage for stage, _ in workflow.agent.calls[calls:]] == ["verify"]
     assert (project / ".aa2/runtime.sh").exists()
 
 

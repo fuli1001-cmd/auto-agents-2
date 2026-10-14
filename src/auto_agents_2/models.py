@@ -14,6 +14,7 @@ class Command(Record):
     cwd: str = "."
     timeout: int = Field(default=300, ge=1, le=1800)
     expected_tests: int = Field(default=0, ge=0)
+    inputs: list[str] = []
 
 
 class Change(Record):
@@ -144,6 +145,11 @@ class CheckResult(Record):
     source_hash: str
     environment_hash: str
     command_hash: str = ""
+    effective_argv: list[str] = []
+    checker_version: str = ""
+    input_hash: str = ""
+    runtime_config_hash: str = ""
+    logs: list[dict] = []
     tests: int = 0
     skipped: int = 0
     timed_out: bool = False

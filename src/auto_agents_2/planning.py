@@ -38,8 +38,20 @@ def validate_plan(plan: PlanResult, requirement_ids: set[str]):
 
 
 def conflict(a: TaskSpec, b: TaskSpec) -> bool:
-    return any(path_allowed(x, [y]) or path_allowed(y, [x]) or "*" in x or "*" in y
-               for x in a.allowed_paths for y in b.allowed_paths)
+    def overlaps(x, y):
+        # Distinct literal directory prefixes prove disjointness even for glob scopes.
+        def prefix(value):
+            parts = []
+            for part in value.split("/"):
+                if any(c in part for c in "*?["):
+                    break
+                parts.append(part)
+            return parts
+        px, py = prefix(x), prefix(y)
+        if px and py and px[:min(len(px), len(py))] != py[:min(len(px), len(py))]:
+            return False
+        return path_allowed(x, [y]) or path_allowed(y, [x]) or any(c in x + y for c in "*?[")
+    return any(overlaps(x, y) for x in a.allowed_paths for y in b.allowed_paths)
 
 
 def ready_batch(tasks: list[TaskSpec], done: set[str], concurrency: int) -> list[TaskSpec]:

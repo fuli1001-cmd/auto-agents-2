@@ -14,6 +14,10 @@ class PolicyViolation(AA2Error):
     code = "POLICY_VIOLATION"
 
 
+class ProtectedChange(PolicyViolation):
+    """A valid candidate requiring independent protected-file authorization."""
+
+
 class ProviderError(AA2Error):
     code = "PROVIDER_ERROR"
 

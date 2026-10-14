@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import os
+import stat
 import subprocess
 from pathlib import Path
 
-from .errors import AA2Error, PolicyViolation
+from .errors import AA2Error, PolicyViolation, ProtectedChange
 from .models import Change
 from .util import atomic_write, contained, digest
 
@@ -34,8 +36,63 @@ def files(root: Path):
                 yield path
 
 
+def file_digest(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def input_entry(path: Path, root: Path, seen=frozenset(), excluded=None):
+    """Execution identity, deliberately independent of the model's read policy."""
+    excluded = EXCLUDED if excluded is None else excluded
+    if path in seen:
+        return ["cycle", str(path)]
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return ["missing"]
+    if stat.S_ISLNK(info.st_mode):
+        target = os.readlink(path)
+        resolved = path.parent / target
+        resolved = Path(os.path.abspath(resolved))
+        return ["link", target, input_entry(resolved, root, seen | {path}, excluded)]
+    if stat.S_ISREG(info.st_mode):
+        return ["file", bool(info.st_mode & 0o111), file_digest(path)]
+    if stat.S_ISDIR(info.st_mode):
+        return ["directory", [(p.name, input_entry(p, root, seen | {path}, excluded))
+                              for p in sorted(path.iterdir()) if p.name not in excluded]]
+    raise PolicyViolation(f"Unsupported execution input type: {path.name}")
+
+
+def legacy_tree_hash(root: Path) -> str:
+    """Read-only v1 compatibility proof; never used for new acceptance evidence."""
+    return digest([(str(p.relative_to(root)), file_digest(p)) for p in sorted(files(root))])
+
+
 def tree_hash(root: Path) -> str:
-    return digest([(str(p.relative_to(root)), digest(p.read_bytes())) for p in sorted(files(root))])
+    paths = set()
+    for directory, folders, names in os.walk(root, followlinks=False):
+        for name in folders + names:
+            path = Path(directory, name)
+            if name not in EXCLUDED and (path.is_symlink() or path.is_file()):
+                paths.add(path.relative_to(root).as_posix())
+        folders[:] = [f for f in folders if f not in EXCLUDED and not Path(directory, f).is_symlink()]
+    # Tracked inputs remain relevant even when hidden from model material or normally generated.
+    try:
+        paths.update(p for p in git(root, "ls-files", "-z").split("\0") if p)
+    except AA2Error:
+        pass
+    return digest(["execution-v2", [(p, input_entry(root / p, root)) for p in sorted(paths)]])
+
+
+def write_path(root: Path, relative: str) -> tuple[Path, str]:
+    path = contained(root, relative)
+    canonical = path.relative_to(root).as_posix()
+    current = root
+    for part in Path(canonical).parts:
+        current /= part
+        if current.is_symlink():
+            raise PolicyViolation(f"Symlink write path: {canonical}")
+    return path, canonical
 
 
 def path_allowed(path: str, scopes: list[str]) -> bool:
@@ -44,32 +101,40 @@ def path_allowed(path: str, scopes: list[str]) -> bool:
 
 
 def prepare_changes(root: Path, changes: list[Change], scopes: list[str], *, protected: bool = True, contracts: bool = False):
+    # Validate all non-reviewable errors before requesting test/rule authorization.
+    if protected:
+        prepare_changes(root, changes, scopes, protected=False, contracts=contracts)
     prepared = []
     by_path = {}
     for change in changes:
-        path = contained(root, change.path)
+        path, canonical = write_path(root, change.path)
         previous = by_path.get(path)
         if previous is not None and (previous["operation"] != "replace" or change.operation != "replace"):
             raise PolicyViolation(f"Duplicate change: {change.path}; only sequential replacements may share a path")
-        parts = Path(change.path).parts
+        parts = Path(canonical).parts
         if any(p in EXCLUDED for p in parts) or path.name == ".env" or (path.name.startswith(".env.") and path.name != ".env.example"):
             raise PolicyViolation(f"Protected path: {change.path}")
-        if not path_allowed(change.path, scopes):
+        if not path_allowed(canonical, scopes):
             raise PolicyViolation(f"Out-of-scope change: {change.path}")
-        if not contracts and (change.path == "DESIGN.md" or change.path.startswith(("docs/aa2/", "docs/requirements/", "design/prototypes/"))):
+        if not contracts and path_allowed(canonical, ["DESIGN.md", "docs/aa2", "docs/requirements", "design/prototypes"]):
             raise PolicyViolation(f"Accepted contracts require a stage replan: {change.path}")
         if protected and (path.name in PROTECTED_NAMES or any(p in {"tests", "test", "__tests__", "__snapshots__", "fixtures", "scripts", ".github"} for p in parts)
                           or path.name.startswith("test_") or path.name.endswith(("_test.py", ".snap"))
                           or ".test." in path.name or ".spec." in path.name):
-            raise PolicyViolation(f"Test/rule change requires independent authorization: {change.path}")
+            raise ProtectedChange(f"Test/rule change requires independent authorization: {change.path}")
         # An existing package manifest's scripts are part of the verification boundary.
         if protected and path.name == "package.json" and path.exists():
             import json
             if change.operation != "write" or json.loads(path.read_text()).get("scripts") != json.loads(change.content).get("scripts"):
-                raise PolicyViolation("package.json script changes require independent authorization")
+                raise ProtectedChange("package.json script changes require independent authorization")
+        if path.exists() and not path.is_file():
+            raise PolicyViolation(f"Expected regular file: {canonical}")
         original = path.read_bytes() if previous is None and path.is_file() else None
         if change.operation == "replace":
-            source = previous["content"] if previous is not None else (original.decode() if original is not None else None)
+            try:
+                source = previous["content"] if previous is not None else (original.decode("utf-8") if original is not None else None)
+            except UnicodeError as exc:
+                raise PolicyViolation(f"Replacement requires supported UTF-8 text: {canonical}") from exc
             if source is None or not change.old_text or source.count(change.old_text) != 1:
                 raise PolicyViolation(f"Replacement must match exactly once: {change.path}")
             content = source.replace(change.old_text, change.content, 1)
@@ -79,7 +144,7 @@ def prepare_changes(root: Path, changes: list[Change], scopes: list[str], *, pro
             # One before/after pair per file makes partially applied batches replayable.
             previous.update(content=content, after=digest(content))
         else:
-            item = {"path": change.path, "operation": change.operation, "content": content,
+            item = {"path": canonical, "mode": stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644, "operation": change.operation, "content": content,
                     "before": digest(original) if original is not None else None,
                     "after": None if change.operation == "delete" else digest(content)}
             by_path[path] = item
@@ -89,12 +154,15 @@ def prepare_changes(root: Path, changes: list[Change], scopes: list[str], *, pro
 
 def apply_prepared(root: Path, prepared: list[dict]):
     for item in prepared:
-        path = contained(root, item["path"])
+        path, _ = write_path(root, item["path"])
+        if path.exists() and (not path.is_file() or stat.S_IMODE(path.stat().st_mode) != item.get("mode", 0o644)):
+            raise PolicyViolation(f"File type or mode changed after candidate preparation: {item['path']}")
         current = digest(path.read_bytes()) if path.is_file() else None
         if current not in {item["before"], item["after"]}:
             raise PolicyViolation(f"File changed after candidate preparation: {item['path']}")
     for item in prepared:
-        path, op, content = contained(root, item["path"]), item["operation"], item["content"]
+        path, _ = write_path(root, item["path"])
+        op, content = item["operation"], item["content"]
         current = digest(path.read_bytes()) if path.is_file() else None
         if current == item["after"]:
             continue
@@ -102,7 +170,7 @@ def apply_prepared(root: Path, prepared: list[dict]):
             if path.is_file():
                 path.unlink()
         else:
-            atomic_write(path, content, 0o644)
+            atomic_write(path, content, item.get("mode", 0o644))
 
 
 def apply_changes(root: Path, changes: list[Change], scopes: list[str], *, protected: bool = True, contracts: bool = False):
@@ -246,10 +314,30 @@ class WorkspaceManager:
                 result[path] = {"mode": mode, "oid": oid}
         return result
 
-    def publication_manifest(self, old: str, new: str) -> dict:
+    @staticmethod
+    def raw_file_hash(path):
+        if path.is_symlink():
+            return digest(os.readlink(path).encode())
+        return file_digest(path) if path.is_file() else None
+
+    def publication_manifest(self, old: str, new: str, work: Path | None = None) -> dict:
         before, after = self.entries(old), self.entries(new)
-        return {p: {"before": before.get(p), "after": after.get(p)}
-                for p in before.keys() | after.keys() if before.get(p) != after.get(p)}
+        view = work or self.project
+        self.checkout_policy(view, sorted(after))
+        manifest = {}
+        for name in before.keys() | after.keys():
+            entry = after.get(name)
+            content = None
+            if entry:
+                conversion = ["blob", entry["oid"]] if entry["mode"] == "120000" else ["--filters", f"{new}:{name}"]
+                content = subprocess.run(["git", "-C", str(view), "cat-file", *conversion],
+                                         capture_output=True, check=True).stdout
+            before_bytes = self.raw_file_hash(self.project / name)
+            after_bytes = digest(content) if content is not None else None
+            if before.get(name) != entry or before_bytes != after_bytes:
+                manifest[name] = {"before": before.get(name), "after": entry,
+                                  "before_bytes": before_bytes, "after_bytes": after_bytes}
+        return manifest
 
     def file_entry(self, name: str):
         path = self.project / name
@@ -269,13 +357,61 @@ class WorkspaceManager:
             return {"directory": True}
         else:
             return None
-        proc = subprocess.run(["git", "hash-object", "--stdin"], input=content, capture_output=True, check=True)
+        proc = subprocess.run(["git", "-C", str(self.project), "hash-object", "--stdin",
+                               *([] if mode == "120000" else ["--path", name])], input=content, capture_output=True, check=True)
         return {"mode": mode, "oid": proc.stdout.decode().strip()}
 
     def check_publication_paths(self, manifest: dict):
         for name, images in manifest.items():
-            if self.file_entry(name) != images["before"]:
+            actual = self.file_entry(name)
+            if actual == {"directory": True} and images["before"] is None:
+                self._attributable_directory(name, manifest)
+                continue
+            if actual != images["before"]:
                 raise AA2Error(f"发布路径与基线不符（可能含被忽略的用户文件）：{name}")
+
+    def _attributable_directory(self, name, manifest, recovery=False):
+        path = self.project / name
+        for child in path.rglob("*"):
+            relative = child.relative_to(self.project).as_posix()
+            if child.is_dir() and not child.is_symlink():
+                continue
+            if relative not in manifest or not recovery and manifest[relative]["after"] is not None:
+                raise AA2Error(f"Publication directory contains unrelated data: {relative}")
+            if self.file_entry(relative) not in (manifest[relative]["before"], manifest[relative]["after"] if recovery else None):
+                raise AA2Error(f"Publication directory contains modified data: {relative}")
+
+    @staticmethod
+    def checkout_policy(work, paths):
+        records = []
+        for start in range(0, len(paths), 100):
+            raw = git(work, "check-attr", "-z", "filter", "ident", "working-tree-encoding", "text", "eol", "--", *paths[start:start + 100])
+            fields = raw.split("\0")
+            for index in range(0, len(fields) - 2, 3):
+                path, attribute, value = fields[index:index + 3]
+                if attribute in {"filter", "ident", "working-tree-encoding"} and value not in {"unspecified", "unset"}:
+                    raise PolicyViolation(f"Unsupported publication conversion: {path} ({attribute})")
+                records.append([path, attribute, value])
+        for setting in ("core.autocrlf", "core.eol"):
+            try:
+                value = git(work, "config", "--get", setting)
+            except AA2Error:
+                value = ""
+            records.append([setting, value])
+        return digest(records)
+
+    def normalize_checkout(self, work: Path, commit: str) -> str:
+        entries = self.entries(commit)
+        policy = self.checkout_policy(work, sorted(entries))
+        for name, entry in entries.items():
+            if entry["mode"] == "120000":
+                continue
+            path, _ = write_path(work, name)
+            content = subprocess.run(["git", "-C", str(work), "cat-file", "--filters", f"{commit}:{name}"],
+                                     capture_output=True, check=True).stdout
+            if path.read_bytes() != content:
+                atomic_write(path, content, stat.S_IMODE(path.stat().st_mode))
+        return policy
 
     def publish(self, target: str, old: str, candidate: str):
         self.clean_target(target)
@@ -305,27 +441,54 @@ class WorkspaceManager:
         if tree not in {old_tree, new_tree}:
             raise AA2Error("发布恢复发现未知暂存区修改，保留现场等待处理")
         manifest = journal["manifest"]
+        if journal.get("checkout_policy"):
+            policy = self.checkout_policy(Path(journal["work"]), sorted(self.entries(new)))
+            if policy != journal["checkout_policy"]:
+                raise AA2Error("Publication conversion policy changed during recovery")
         for name, images in manifest.items():
-            if self.file_entry(name) not in (images["before"], images["after"]):
+            actual = self.file_entry(name)
+            if actual == {"directory": True} and (images["before"] is None or images["after"] is None):
+                self._attributable_directory(name, manifest, recovery=True)
+                continue
+            if actual not in (images["before"], images["after"]):
                 raise AA2Error(f"发布恢复发现用户修改：{name}")
+            if "before_bytes" in images and self.raw_file_hash(self.project / name) not in (images["before_bytes"], images["after_bytes"]):
+                raise AA2Error(f"Publication recovery found changed file bytes: {name}")
         # Unchanged tracked files must remain clean; nonignored untracked files also block.
         changed = set(git(self.project, "diff", "--name-only", "-z").split("\0")) - {""}
         untracked = set(git(self.project, "ls-files", "--others", "--exclude-standard", "-z").split("\0")) - {""}
         if (changed | untracked) - manifest.keys():
             raise AA2Error("发布恢复发现无关用户修改，保留现场等待处理")
-        for name, images in manifest.items():
+        # Remove old leaves before creating parents or replacing directories.
+        ordered = sorted(manifest, key=lambda n: (manifest[n]["after"] is not None,
+                                                  -len(Path(n).parts) if manifest[n]["after"] is None else len(Path(n).parts), n))
+        for name in ordered:
+            images = manifest[name]
             actual = self.file_entry(name)
-            if actual == images["after"]:
+            raw = self.raw_file_hash(self.project / name)
+            if actual == images["after"] and ("after_bytes" not in images or raw == images["after_bytes"]):
                 continue
-            if actual != images["before"]:
+            if actual == {"directory": True} and images["after"] is None:
+                continue
+            structural = actual == {"directory": True} and images["before"] is None
+            if actual != images["before"] and not structural:
                 raise AA2Error(f"发布恢复期间文件变化：{name}")
             path = self.project / name
             after = images["after"]
             if after is None:
+                if path.is_dir() and not path.is_symlink():
+                    continue  # A completed file-to-directory transition.
                 path.unlink(missing_ok=True)
             else:
-                content = subprocess.run(["git", "-C", str(self.project), "cat-file", "blob", after["oid"]],
+                if path.is_dir() and not path.is_symlink():
+                    for directory in sorted(path.rglob("*"), key=lambda p: -len(p.parts)):
+                        directory.rmdir()
+                    path.rmdir()
+                conversion = ["blob", after["oid"]] if after["mode"] == "120000" else ["--filters", f"{new}:{name}"]
+                content = subprocess.run(["git", "-C", str(self.project), "cat-file", *conversion],
                                          capture_output=True, check=True).stdout
+                if "after_bytes" in images and digest(content) != images["after_bytes"]:
+                    raise AA2Error("Checkout bytes changed during recovery")
                 if after["mode"] == "120000":
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.unlink(missing_ok=True)

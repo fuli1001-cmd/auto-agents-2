@@ -45,6 +45,9 @@ class ResourceManager:
         """Call after obtaining the controller lock and reaping previous children."""
         with self.store.connect() as db:
             db.execute("UPDATE resources SET refs=0 WHERE kind='temporary'")
+        from .artifact_gc import recover_diagnostic_holds
+        recover_diagnostic_holds(self.store)
+        self.collect_artifacts_safely()
         return self.collect()
 
     def finish_delivery(self, rid: str):
@@ -75,6 +78,8 @@ class ResourceManager:
                 for key, value in receipt["evidence"].items():
                     if key.startswith("develop/task/"):
                         db.execute("UPDATE checkpoints SET data=? WHERE run_id=? AND key=?", (json.dumps(value), rid, key))
+                for prefix in ("candidate/", "invocation/", "provider-result/", "materials/", "environment/logs/"):
+                    db.execute("DELETE FROM checkpoints WHERE run_id=? AND key LIKE ?", (rid, prefix + "%"))
                 for prefix in ("clarify_context", "replan_feedback", "readme", "delivery/journal"):
                     db.execute("DELETE FROM checkpoints WHERE run_id=? AND key=?", (rid, prefix))
             self.collect_artifacts()
@@ -88,40 +93,16 @@ class ResourceManager:
                 self.finish_delivery(run["id"])
 
     def collect_artifacts(self):
-        """Mark references before sweeping only registered, terminal-owned objects."""
-        from .artifacts import ArtifactStore
-        artifacts = ArtifactStore(self.store.root)
-        with self.store.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            roots = [json.loads(row[0]) for row in db.execute("SELECT data FROM checkpoints")]
-            live = set()
+        from .artifact_gc import collect_artifacts
+        return collect_artifacts(self.store)
 
-            def mark(value):
-                if isinstance(value, dict):
-                    if isinstance(value.get("hash"), str):
-                        live.add(value["hash"])
-                    for child in value.values():
-                        mark(child)
-                elif isinstance(value, list):
-                    for child in value:
-                        mark(child)
-
-            for root in roots:
-                mark(root)
-            owners = {}
-            for row in db.execute("SELECT hash,run_id FROM artifact_owners"):
-                owners.setdefault(row[0], set()).add(row[1])
-            terminal = {row[0] for row in db.execute("SELECT id FROM runs WHERE status='SUCCEEDED'")}
-            for sha, runs in owners.items():
-                if sha in live or not runs <= terminal:
-                    continue
-                if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
-                    continue
-                path = artifacts.root / sha[:2] / sha
-                if path.absolute() != path.resolve():
-                    continue
-                path.unlink(missing_ok=True)
-                db.execute("DELETE FROM artifact_owners WHERE hash=?", (sha,))
+    def collect_artifacts_safely(self):
+        try:
+            return self.collect_artifacts()
+        except (OSError, AA2Error) as exc:
+            result = {"removed": 0, "bytes": 0, "errors": [str(exc)]}
+            self.store.event(None, "artifacts.cleanup_failed", result)
+            return result
 
     def retire_worktree(self, path: Path, recovery_ref: str):
         from .workspace import git
@@ -158,7 +139,8 @@ class ResourceManager:
                     (refs=0 OR run_id IN (SELECT id FROM runs WHERE status IN ('SUCCEEDED','CANCELLED')))
                     AND path NOT IN (SELECT path FROM delivery_pins)
                     ORDER BY touched""")]
-            cache_size = sum(tree_size(Path(r["path"])) for r in rows if r["kind"] in {"cache", "environment"})
+            sizes = {r["path"]: tree_size(Path(r["path"])) for r in rows}
+            cache_size = sum(sizes[r["path"]] for r in rows if r["kind"] in {"cache", "environment"})
             pressure = shutil.disk_usage(self.store.root).free < self.policy.min_free_bytes
             for row in rows:
                 path = Path(row["path"])
@@ -174,7 +156,7 @@ class ResourceManager:
                 if path.is_symlink() or not path.resolve().is_relative_to(self.store.root.resolve()):
                     result["errors"].append(f"Unsafe resource: {path}")
                     continue
-                size = tree_size(path)
+                size = sizes[row["path"]]
                 result["candidates"].append(str(path))
                 if dry_run:
                     continue

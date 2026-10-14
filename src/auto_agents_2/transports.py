@@ -36,7 +36,7 @@ class CodexTransport:
             if effective["effort"]:
                 args += ["-c", f"model_reasoning_effort={effective['effort']}"]
         args += ["-s", "read-only", "-C", str(workspace)]
-        for asset in images[:8]:
+        for asset in images:
             args += ["-i", str(asset)]
         args += effective["args"] + ["--json", "--output-schema", str(schema), "-o", str(output)]
         if previous:

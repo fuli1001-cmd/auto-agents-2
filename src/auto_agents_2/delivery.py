@@ -6,7 +6,7 @@ from .config import ConfigStore
 from .environment import Environment
 from .errors import AA2Error
 from .util import digest, write_json
-from .workspace import git, tree_hash
+from .workspace import git, legacy_tree_hash, tree_hash
 
 
 class RuntimeVerificationError(AA2Error):
@@ -32,7 +32,7 @@ class DeliveryCoordinator:
         journal = self.store.get(rid, "delivery/journal")
         if not journal:
             run = self.store.run(rid)
-            journal = {"phase": "ready", "target": run["data"]["target_branch"],
+            journal = {"identity_version": 2, "phase": "ready", "target": run["data"]["target_branch"],
                        "old": self.store.get(rid, "target_base", ""), "candidate": candidate,
                        "work": str(work), "plan": plan.model_dump() if plan else None,
                        "environment": {"prefix": str(environment.prefix), "fingerprint": environment.fingerprint},
@@ -41,6 +41,26 @@ class DeliveryCoordinator:
                        "candidate_tree": git(work, "rev-parse", f"{candidate}^{{tree}}")}
             self.save(rid, journal)
         project = self.workspaces.project
+        saved_environment = journal["environment"]
+        prefix = Path(saved_environment["prefix"])
+        if (journal.get("identity_version") == 2 and journal["phase"] in {"ready", "published", "runtime"}
+                and prefix.is_relative_to(self.store.root / "environments")
+                and not self.environments.valid(prefix, saved_environment["fingerprint"])):
+            if tree_hash(Path(journal["work"])) != journal["source_hash"]:
+                raise AA2Error("Candidate changed while its environment was unavailable; preserving recovery data")
+            was_published = journal["phase"] in {"published", "runtime"}
+            old_candidate = journal["candidate"]
+            if was_published and self.workspaces.head(journal["target"]) != old_candidate:
+                raise AA2Error("Target advanced after publication; preserving user commits")
+            self.store.checkpoint(rid, "delivery/environment-recovery", dict(journal))
+            journal["incoming"] = old_candidate
+            journal.update(await self.verify(rid, journal))
+            if was_published:
+                journal["old"] = old_candidate
+                journal["phase"] = "published" if journal["candidate"] == old_candidate else "ready"
+            self.save(rid, journal)
+        if journal.get("identity_version") != 2 and journal["phase"] != "publishing":
+            await self.upgrade_legacy(rid, journal)
         if journal["phase"] == "repairing_runtime":
             self.workspaces.clean_target(journal["target"])
             if self.workspaces.head(journal["target"]) != journal["old"]:
@@ -70,13 +90,20 @@ class DeliveryCoordinator:
                     or git(Path(journal["work"]), "rev-parse", "HEAD") != journal["candidate"]
                     or git(Path(journal["work"]), "diff", "--name-only", "HEAD")):
                 raise AA2Error("已验证候选工作区发生变化，不能发布")
-            journal["manifest"] = self.workspaces.publication_manifest(journal["old"], journal["candidate"])
+            policy = self.workspaces.checkout_policy(Path(journal["work"]), sorted(self.workspaces.entries(journal["candidate"])))
+            expected = self.store.get(rid, "verify/checkout_policy")
+            if expected is not None and policy != expected:
+                raise AA2Error("Publication conversion policy changed after verification")
+            journal["checkout_policy"] = policy
+            journal["manifest"] = self.workspaces.publication_manifest(journal["old"], journal["candidate"], Path(journal["work"]))
             self.workspaces.check_publication_paths(journal["manifest"])
             journal["index_before"] = git(project, "write-tree")
             journal["publication_started"] = True
             self.save(rid, journal, "publishing")
             try:
                 self.workspaces.publish(journal["target"], journal["old"], journal["candidate"])
+                # Git may leave canonical-equal files untouched after an attribute change.
+                self.workspaces.recover_publication(journal)
             except AA2Error:
                 # A clean external commit won the race before Git touched our candidate.
                 current = self.workspaces.head(journal["target"])
@@ -90,6 +117,10 @@ class DeliveryCoordinator:
             self.workspaces.recover_publication(journal)
             self.save(rid, journal, "published")
         if journal["phase"] in {"published", "runtime"}:
+            if journal.get("identity_version") != 2:
+                await self.upgrade_legacy(rid, journal)
+                if journal["phase"] == "ready":
+                    return await self.finish(rid)
             self.workspaces.clean_target(journal["target"])
             if self.workspaces.head(journal["target"]) != journal["candidate"]:
                 raise AA2Error("发布后的目标提交发生变化；保留用户提交，需人工核对后继续完成环境交接")
@@ -127,3 +158,20 @@ class DeliveryCoordinator:
             self.store.complete_delivery(rid, receipt)
         self.resources.finish_delivery(rid)
         return self.store.run(rid)
+
+    async def upgrade_legacy(self, rid, journal):
+        """Interpret legacy side effects first; append v2 proof without rewriting history."""
+        published = journal["phase"] in {"published", "runtime"}
+        source = self.workspaces.project if published else Path(journal["work"])
+        if (journal["source_hash"] not in {legacy_tree_hash(source), tree_hash(source)}
+                or git(source, "rev-parse", "HEAD") != journal["candidate"]):
+            raise AA2Error("Legacy delivery cannot be reconstructed safely; preserving user and recovery data")
+        self.store.checkpoint(rid, "delivery/legacy-journal", dict(journal))
+        original = journal["candidate"]
+        journal.setdefault("incoming", original)
+        result = await self.verify(rid, journal)
+        journal.update(result, identity_version=2)
+        if published:
+            journal["old"] = original
+            journal["phase"] = "published" if result["candidate"] == original else "ready"
+        self.save(rid, journal)

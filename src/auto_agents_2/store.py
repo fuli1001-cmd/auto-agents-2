@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
+from .diagnostics import adopt_logs
 from .errors import AA2Error, IncompleteIteration
 from .interaction import validate_answer
 from .replanning import assess
@@ -50,6 +51,12 @@ class Store:
             CREATE TABLE IF NOT EXISTS delivery_pins(path TEXT PRIMARY KEY, run_id TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS artifact_owners(hash TEXT NOT NULL, run_id TEXT NOT NULL,
                 PRIMARY KEY(hash,run_id));
+            CREATE TABLE IF NOT EXISTS artifact_edges(parent TEXT, child TEXT, PRIMARY KEY(parent,child));
+            CREATE TABLE IF NOT EXISTS artifact_kinds(hash TEXT, kind TEXT, PRIMARY KEY(hash,kind));
+            CREATE TABLE IF NOT EXISTS diagnostic_holds(
+                id TEXT PRIMARY KEY, hash TEXT NOT NULL, run_id TEXT, purpose TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS retired_diagnostics(
+                hash TEXT PRIMARY KEY, retired REAL NOT NULL, reason TEXT NOT NULL);
             """)
             if db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] != "1":
                 raise AA2Error("Unsupported state database version")
@@ -125,15 +132,25 @@ class Store:
             self._event(db, rid, "run.updated", {"status": status, "stage": stage, **data})
 
     def checkpoint(self, rid, key, data):
+        self.checkpoints(rid, {key: data})
+
+    def checkpoints(self, rid, values, *, usage=None):
+        """Publish related phases, round counters and evidence references atomically."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            if key.startswith("rounds/"):
-                existing = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
-                if existing:
-                    data = {**data, "round": max(data.get("round", 0), json.loads(existing[0]).get("round", 0))}
-            db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
-                       (rid, key, json.dumps(data, ensure_ascii=False)))
-            self._event(db, rid, "checkpoint.saved", {"key": key})
+            if usage:
+                provider, attempt, body = usage
+                db.execute("INSERT OR IGNORE INTO usage VALUES(?,?,?,?,?)",
+                           (digest([provider, attempt, "invocation"]), rid, provider, attempt, json.dumps(body)))
+            for key, data in values.items():
+                if key.startswith("rounds/"):
+                    existing = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                    if existing:
+                        data = {**data, "round": max(data.get("round", 0), json.loads(existing[0]).get("round", 0))}
+                db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
+                           (rid, key, json.dumps(data, ensure_ascii=False)))
+                adopt_logs(db, self.root, data)
+                self._event(db, rid, "checkpoint.saved", {"key": key})
 
     def get(self, rid, key, default=None):
         with self.connect() as db:
@@ -178,6 +195,9 @@ class Store:
             body = json.loads(db.execute("SELECT data FROM runs WHERE id=?", (rid,)).fetchone()[0])
             body["replans"] = pending["generation"] + 1
             for stage in stages:
+                for prefix in ("candidate/", "invocation/", "provider-result/"):
+                    db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR key LIKE ?)",
+                               (rid, prefix + stage, prefix + stage + "/%"))
                 db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR key LIKE ?)",
                            (rid, stage, stage + "/%"))
             feedback = {"stage": pending["stage"], "reason": pending["reason"], "recovery_refs": recovery_refs}

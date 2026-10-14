@@ -1,0 +1,68 @@
+{
+  "project": "/tmp/aa2-real-environment-mipy2y3q",
+  "environment": "/tmp/aa2-real-environment-mipy2y3q/.aa2/environments/6ca6d30741f9645f50e9d84a2605afa7f61f003f982294129a26f6118869f315",
+  "environment_identity": "1bf84d6166262092331df562bd6de3acfe3fe81d1542b0ace9f663581e8b56b4",
+  "ready_reused": true,
+  "checks": [
+    {
+      "argv": [
+        "pytest",
+        "-q",
+        "tests"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "output": ".                                                                        [100%]\n1 passed in 0.01s\n",
+      "duration": 0.24926770399906673,
+      "source_hash": "7ba34957072cd4e7705c083391b4172c1ef050629b1599c5fdfb6595508bd621",
+      "environment_hash": "1bf84d6166262092331df562bd6de3acfe3fe81d1542b0ace9f663581e8b56b4",
+      "command_hash": "95872b2b89f021e0a2910d155bc6a32d8c817ab756fb567b3669359b22bc7d0b",
+      "effective_argv": [
+        "/tmp/aa2-real-environment-mipy2y3q/.aa2/environments/6ca6d30741f9645f50e9d84a2605afa7f61f003f982294129a26f6118869f315/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests",
+        "--junitxml=/tmp/aa2-real-environment-mipy2y3q/.aa2/tmp/check_8dd9763de92a401f/junit.xml",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "checker_version": "verification-v2",
+      "input_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "runtime_config_hash": "9eb6164705085d35145d864dcf0e128b09109f864f497d64d2aeff0e4533a3bb",
+      "logs": [
+        {
+          "hash": "4bcefcc9f6c645923b9993ccf73ad92e6b400ca25458ea14e095857fc2131342",
+          "kind": "check_log",
+          "bytes": 98,
+          "capture_complete": true,
+          "archived_path": "docs/evidence/quality-first/4bcefcc9f6c645923b9993ccf73ad92e6b400ca25458ea14e095857fc2131342"
+        },
+        {
+          "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "kind": "check_log",
+          "bytes": 0,
+          "capture_complete": true,
+          "archived_path": "docs/evidence/quality-first/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "tests": 1,
+      "skipped": 0,
+      "timed_out": false,
+      "test_ids": [
+        "tests.test_smoke::test_package"
+      ],
+      "passed_test_ids": [
+        "tests.test_smoke::test_package"
+      ],
+      "report": {
+        "hash": "ec5c88a8177fedc150db78202d6ead2c52038422a1d14baa0f4d27b232ee559d",
+        "kind": "document",
+        "bytes": 325,
+        "archived_path": "docs/evidence/quality-first/ec5c88a8177fedc150db78202d6ead2c52038422a1d14baa0f4d27b232ee559d"
+      }
+    }
+  ],
+  "passed": true,
+  "ready_reused_after_controller_restart": true
+}

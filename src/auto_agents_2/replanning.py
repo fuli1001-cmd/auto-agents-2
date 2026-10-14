@@ -38,12 +38,15 @@ def assess(previous: dict, observations: dict) -> tuple[dict, dict]:
 
 def check_criteria(commands, results, source_hash: str, environment_hash: str) -> dict[str, bool]:
     """Use actual exits and controller-owned JUnit cases, never stdout pass counts."""
-    actual = {(tuple(r.argv), r.cwd): r for r in results}
+    actual = {(tuple(r.argv), r.cwd, r.command_hash): r for r in results}
     criteria = {}
     for command in commands:
-        key = digest(command.model_dump())
-        result = actual.get((tuple(command.argv), command.cwd))
-        valid = bool(result and result.command_hash == key and not result.timed_out and result.source_hash == source_hash
+        data = command.model_dump()
+        # Explicit compatibility mapping: the new empty declaration is the old obligation.
+        obligation = {k: v for k, v in data.items() if k != "inputs" or v}
+        key = digest(obligation)
+        result = actual.get((tuple(command.argv), command.cwd, digest(data)))
+        valid = bool(result and result.command_hash == digest(data) and not result.timed_out and result.source_hash == source_hash
                      and result.environment_hash == environment_hash)
         criteria["command/" + key] = bool(valid and result.exit_code == 0)
         if result:

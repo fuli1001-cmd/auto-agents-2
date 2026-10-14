@@ -7,18 +7,24 @@ import platform
 import re
 import shlex
 import shutil
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
+from .artifacts import ArtifactStore
 from .config import ConfigStore
+from .dependencies import copy_execution_source, pip_inputs
+from .diagnostics import DiagnosticOperation, current_diagnostics
 from .errors import AA2Error
+from .evidence import RUNTIME_CACHES
+from .logs import capture_diagnostics
 from .progress import capture_output
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
 from .store import Store
-from .util import SECRET, async_file_lock, atomic_write, contained, digest, write_json
-from .workspace import files, tree_hash
+from .util import SECRET, async_file_lock, atomic_write, contained, digest, identifier, scrub_text, write_json
+from .workspace import files, input_entry, tree_hash
 
 
 @dataclass(frozen=True)
@@ -48,56 +54,108 @@ class EnvironmentManager:
         cfg = self.config.load().environment
         conda_name, pip_name = environment_file or cfg.environment_file, requirements_file or cfg.requirements_file
         conda_file = workspace / conda_name if conda_name else None
-        pip_file = workspace / pip_name if pip_name else None
         if conda_file is None and (workspace / "environment.yml").exists():
             conda_file = workspace / "environment.yml"
-        if pip_file is None:
-            for name in ("requirements.lock", "requirements.txt", "backend/requirements.lock", "backend/requirements.txt"):
-                if (workspace / name).is_file():
-                    pip_file = workspace / name
-                    break
-        dependencies = []
-        if pip_file is None:
-            for name in ("pyproject.toml", "backend/pyproject.toml"):
-                file = workspace / name
-                if file.is_file():
-                    project = tomllib.loads(file.read_text()).get("project", {})
-                    dependencies += project.get("dependencies", [])
-                    extras = project.get("optional-dependencies", {})
-                    dependencies += extras.get("test", []) + extras.get("dev", [])
-        for file in (conda_file, pip_file):
-            if file and (not file.resolve().is_relative_to(workspace.resolve()) or not file.is_file()):
-                raise AA2Error(f"Invalid environment manifest: {file}")
-        manifests = {str(p.relative_to(workspace)): p.read_text() for p in files(workspace)
-                     if not str(p.relative_to(workspace)).startswith(("docs/", "design/", "tests/"))
-                     and (p.name in {"pyproject.toml", "setup.cfg", "setup.py", "environment.yml", "environment.yaml"}
-                          or (p.name.startswith(("requirements", "constraints")) and p.suffix in {".txt", ".in", ".lock"}))}
-        manifest_text = "\n".join(manifests.values())
-        local = bool(re.search(r"(?m)(?:^|\s)(?:-e |--editable |\./|\.\./)|file:| @ (?:\.|/)", manifest_text))
-        if local and conda_file:
-            raise AA2Error("Local/editable pip dependencies must be declared in requirements_file, separately from the Conda manifest")
-        fingerprint = digest({"format": 2, "platform": platform.platform(), "python": cfg.python_version,
-                              "node": cfg.node_version, "profile": profile, "manifests": manifests,
+        if conda_file and (not conda_file.resolve().is_relative_to(workspace.resolve()) or not conda_file.is_file()):
+            raise AA2Error("Invalid environment manifest")
+        conda_document, extra_pip = None, []
+        if conda_file:
+            try:
+                conda_document = yaml.safe_load(conda_file.read_text())
+                dependencies = conda_document.get("dependencies", [])
+                for dependency in dependencies:
+                    if isinstance(dependency, dict):
+                        if set(dependency) != {"pip"} or not isinstance(dependency["pip"], list):
+                            raise ValueError("Unsupported Conda dependency section")
+                        extra_pip.extend(dependency["pip"])
+                if not all(isinstance(line, str) for line in extra_pip):
+                    raise ValueError("Invalid pip entries")
+                conda_document["dependencies"] = [d for d in dependencies if isinstance(d, str)]
+            except (ValueError, AttributeError, yaml.YAMLError) as exc:
+                raise AA2Error("Invalid Conda environment document") from exc
+        inputs = pip_inputs(workspace, pip_name, extra_pip)
+        local = inputs.local
+        fingerprint = digest({"format": 3, "platform": platform.platform(), "python": cfg.python_version,
+                              "node": cfg.node_version, "profile": profile, "manifests": inputs.manifests,
+                              "resolver_configuration": digest({k: v for k, v in os.environ.items()
+                                                                  if k.startswith(("PIP_", "CONDA_"))}),
                               "conda": conda_file.read_text() if conda_file else "",
-                              "pip": pip_file.read_text() if pip_file else "", "dependencies": dependencies,
+                              "requirements": inputs.requirements, "constraints": inputs.constraints,
                               "private_source": [str(workspace), tree_hash(workspace)] if local else None})
-        prefix = self.root / "environments" / fingerprint
-        ready = prefix / "aa2-ready.json"
+        location = self.root / "environment-records" / fingerprint / "instance.json"
         run = self.store.current(unfinished=True)
-        self.resources.register(prefix, "environment", run["id"] if run else None)
         async with async_file_lock(self.root / "environment-locks" / f"{fingerprint}.lock"):
-            if ready.is_file() and (prefix / "bin/python").is_file():
-                return Environment(prefix, fingerprint)
-            await self._prepare(prefix, ready, fingerprint, profile, conda_file, pip_file, workspace, dependencies, local)
-        return Environment(prefix, fingerprint)
+            prefix = self.root / "environments" / fingerprint
+            if location.is_file():
+                try:
+                    selected = Path(json.loads(location.read_text())["prefix"])
+                    if selected.parent == prefix.parent:
+                        prefix = selected
+                except (ValueError, KeyError):
+                    pass
+            if self.valid(prefix, fingerprint):
+                self.resources.register(prefix, "environment", run["id"] if run else None)
+                return Environment(prefix, self.installed_identity(prefix))
+            # A corrupt or interrupted instance can still be referenced by recovery records.
+            if prefix.exists():
+                prefix = prefix.with_name(fingerprint + "-" + identifier("instance"))
+            ready = prefix / "aa2-ready.json"
+            self.resources.register(prefix, "environment", run["id"] if run else None)
+            with self.resources.temporary("pip-inputs") as scratch:
+                source = prefix / "aa2-source" if local else workspace
+                requirements, constraints = inputs.rendered(source)
+                constraint_file = scratch / "constraints.txt"
+                atomic_write(constraint_file, constraints)
+                pip_file = scratch / "requirements.txt" if inputs.requirements else None
+                if pip_file:
+                    atomic_write(pip_file, f"-c {constraint_file}\n" + requirements)
+                selected_conda = conda_file
+                if conda_document is not None:
+                    selected_conda = scratch / "environment.yml"
+                    atomic_write(selected_conda, yaml.safe_dump(conda_document))
+                await self._prepare(prefix, ready, fingerprint, profile, selected_conda, pip_file, workspace, [], local)
+            write_json(location, {"prefix": str(prefix)})
+        return Environment(prefix, self.installed_identity(prefix))
+
+    @staticmethod
+    def integrity(prefix: Path) -> str:
+        # Interpreter, packages, copied source and resolved locks; writable caches are excluded.
+        names = ("bin", "lib", "lib64", "conda-meta", "aa2-source", "aa2-pip.lock", "aa2-conda.lock")
+        return digest([(name, input_entry(prefix / name, prefix, excluded=RUNTIME_CACHES)) for name in names])
+
+    @staticmethod
+    def installed_identity(prefix: Path) -> str:
+        ready = json.loads((prefix / "aa2-ready.json").read_text())
+        return digest(["installed-v2", ready["fingerprint"], ready["integrity"]])
+
+    @classmethod
+    def valid(cls, prefix: Path, fingerprint: str) -> bool:
+        try:
+            ready = json.loads((prefix / "aa2-ready.json").read_text())
+            return (fingerprint in {ready.get("fingerprint"), cls.installed_identity(prefix)} and (prefix / "bin/python").is_file()
+                    and ready.get("integrity") == cls.integrity(prefix))
+        except (OSError, ValueError, KeyError, RecursionError):
+            return False
 
     async def _command(self, argv, workspace, env, writes, reads=(), timeout=1800):
         process = await self.sandbox.spawn(argv, workspace, env, writes, list(reads))
         try:
             async with asyncio.timeout(timeout):
-                stdout, stderr = await capture_output(process)
+                machine = "--explicit" in argv or "freeze" in argv or "-c" in argv
+                if machine:
+                    stdout, stderr = await capture_output(process)
+                else:
+                    stdout, stderr, logs = await capture_diagnostics(process, self.resources, ArtifactStore(self.root),
+                                                                     [v for k, v in env.items() if SECRET.search(k)])
+                    run = self.store.current(unfinished=True)
+                    operation = current_diagnostics.get()
+                    if operation:
+                        operation.capture(logs)
+                    elif run:
+                        self.store.checkpoint(run["id"], "environment/logs/" + identifier("command"),
+                                              {"logs": logs, "exit_code": process.returncode})
             if process.returncode:
-                raise AA2Error("Dependency preparation failed: " + stderr.decode(errors="replace")[-2000:])
+                raise AA2Error("Dependency preparation failed: " + scrub_text(stderr.decode(errors="replace"), [v for k, v in env.items() if SECRET.search(k)])[-2000:])
             return stdout.decode(errors="replace")
         except TimeoutError as exc:
             raise AA2Error("Dependency preparation timed out") from exc
@@ -105,113 +163,120 @@ class EnvironmentManager:
             await self.sandbox.stop(process)
 
     async def _prepare(self, prefix, ready, fingerprint, profile, conda_file, pip_file, workspace, dependencies, local):
-        cfg = self.config.load().environment
-        if prefix.exists():
-            shutil.rmtree(prefix)
-        prefix.mkdir(parents=True)
-        cache = self.root / "cache/conda"
-        cache.mkdir(parents=True, exist_ok=True)
-        run = self.store.current(unfinished=True)
-        self.resources.register(cache, "cache", run["id"] if run else None)
-        conda = shutil.which(cfg.conda)
-        if not conda:
-            raise AA2Error("Conda not found")
-        records = self.root / "environment-records" / fingerprint
-        with self.resources.temporary("environment") as scratch:
-            environment = Environment(prefix, fingerprint)
-            env = environment.variables(scratch)
-            env.pop("CONDA_PREFIX", None)
-            env.update(CONDA_PKGS_DIRS=str(cache), PIP_CACHE_DIR=str(scratch / "pip"), CONDA_ALWAYS_COPY="true")
-            if (records / "conda.lock").is_file() and not local:
-                argv = [conda, "create", "-y", "--copy", "-p", str(prefix), "--file", str(records / "conda.lock")]
-            elif conda_file:
-                argv = [conda, "env", "create", "-p", str(prefix), "-f", str(conda_file)]
-            else:
-                argv = [conda, "create", "-y", "--copy", "-p", str(prefix), f"python={cfg.python_version}", "pip", "pytest"]
-                if profile in {"react", "next", "python-react", "python-next"}:
-                    argv += [f"nodejs={cfg.node_version}", "--channel", "conda-forge"]
-            reads = [Path(conda).resolve().parent.parent]
-            if records.exists():
-                reads.append(records)
-            await self._command(argv, workspace, env, [prefix, cache, scratch], reads)
-            install_workspace = workspace
-            if local:
-                # Editable bindings live in this private environment and never point into another task.
-                install_workspace = prefix / "aa2-source"
-                for file in files(workspace):
-                    target = install_workspace / file.relative_to(workspace)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(file, target)
+        with DiagnosticOperation(self.store, self.resources, "prepare/" + str(prefix)):
+            cfg = self.config.load().environment
+            if prefix.exists():
+                shutil.rmtree(prefix)
+            prefix.mkdir(parents=True)
+            cache = self.root / "cache/conda"
+            cache.mkdir(parents=True, exist_ok=True)
+            run = self.store.current(unfinished=True)
+            self.resources.register(cache, "cache", run["id"] if run else None)
+            conda = shutil.which(cfg.conda)
+            if not conda:
+                raise AA2Error("Conda not found")
+            records = self.root / "environment-records" / fingerprint
+            with self.resources.temporary("environment") as scratch:
+                environment = Environment(prefix, fingerprint)
+                env = environment.variables(scratch)
+                env.pop("CONDA_PREFIX", None)
+                env.update(CONDA_PKGS_DIRS=str(cache), PIP_CACHE_DIR=str(scratch / "pip"), CONDA_ALWAYS_COPY="true")
+                if (records / "conda.lock").is_file() and not local:
+                    argv = [conda, "create", "-y", "--copy", "-p", str(prefix), "--file", str(records / "conda.lock")]
+                elif conda_file:
+                    argv = [conda, "env", "create", "-p", str(prefix), "-f", str(conda_file)]
+                else:
+                    argv = [conda, "create", "-y", "--copy", "-p", str(prefix), f"python={cfg.python_version}", "pip", "pytest"]
+                    if profile in {"react", "next", "python-react", "python-next"}:
+                        argv += [f"nodejs={cfg.node_version}", "--channel", "conda-forge"]
+                reads = [Path(conda).resolve().parent.parent]
+                if conda_file:
+                    reads.append(conda_file.parent)
+                if records.exists():
+                    reads.append(records)
+                await self._command(argv, workspace, env, [prefix, cache, scratch], reads)
+                install_workspace = workspace
+                if local:
+                    # Editable bindings live in this private environment and never point into another task.
+                    install_workspace = prefix / "aa2-source"
+                    copy_execution_source(workspace, install_workspace)
+                if dependencies and pip_file is None:
+                    pip_file = scratch / "dependencies.txt"
+                    atomic_write(pip_file, "\n".join(dependencies) + "\n")
                 if pip_file:
-                    pip_file = install_workspace / pip_file.relative_to(workspace)
-            if (records / "pip.lock").is_file() and not local:
-                pip_file = records / "pip.lock"
-            elif dependencies and pip_file is None:
-                pip_file = scratch / "dependencies.txt"
-                atomic_write(pip_file, "\n".join(dependencies) + "\n")
-            if pip_file:
-                await self._command([str(prefix / "bin/python"), "-m", "pip", "install", "-r", str(pip_file)],
-                                    install_workspace, env, [prefix, scratch], [prefix, *reads])
-            identity = await self._command([str(prefix / "bin/python"), "-c", "import sys; print(sys.prefix)"],
-                                           workspace, env, [scratch], [prefix], timeout=30)
-            if Path(identity.strip()).resolve() != prefix.resolve():
-                raise AA2Error("Environment interpreter identity mismatch")
-            frozen = await self._command([str(prefix / "bin/python"), "-m", "pip", "freeze"], workspace, env, [scratch], [prefix], timeout=30)
-            explicit = await self._command([conda, "list", "--explicit", "-p", str(prefix)], workspace, env,
-                                           [scratch], [prefix, *reads], timeout=30)
-            atomic_write(prefix / "aa2-pip.lock", frozen)
-            atomic_write(prefix / "aa2-conda.lock", explicit)
-            if not local:
-                atomic_write(records / "pip.lock", frozen)
-                atomic_write(records / "conda.lock", explicit)
-            write_json(ready, {"fingerprint": fingerprint, "private": local,
-                               "pip_hash": digest(frozen), "conda_hash": digest(explicit)})
+                    await self._command([str(prefix / "bin/python"), "-m", "pip", "install", "-r", str(pip_file)],
+                                        install_workspace, env, [prefix, scratch], [prefix, pip_file.parent, *reads])
+                await self._command([str(prefix / "bin/python"), "-m", "pip", "check"],
+                                    workspace, env, [scratch], [prefix], timeout=60)
+                identity = await self._command([str(prefix / "bin/python"), "-c", "import sys; print(sys.prefix)"],
+                                               workspace, env, [scratch], [prefix], timeout=30)
+                if Path(identity.strip()).resolve() != prefix.resolve():
+                    raise AA2Error("Environment interpreter identity mismatch")
+                frozen = await self._command([str(prefix / "bin/python"), "-m", "pip", "freeze"], workspace, env, [scratch], [prefix], timeout=30)
+                explicit = await self._command([conda, "list", "--explicit", "-p", str(prefix)], workspace, env,
+                                               [scratch], [prefix, *reads], timeout=30)
+                atomic_write(prefix / "aa2-pip.lock", frozen)
+                atomic_write(prefix / "aa2-conda.lock", explicit)
+                if not local:
+                    atomic_write(records / "pip.lock", frozen)
+                    atomic_write(records / "conda.lock", explicit)
+                write_json(ready, {"fingerprint": fingerprint, "private": local,
+                                   "pip_hash": digest(frozen), "conda_hash": digest(explicit),
+                                   "integrity": self.integrity(prefix)})
 
     async def install_node(self, workspace: Path, environment: Environment, *, frozen: bool = False):
-        if not (workspace / "package.json").is_file():
-            return
-        if any((workspace / p).exists() for p in ("pnpm-lock.yaml", "yarn.lock")):
-            raise AA2Error("首期 Node 安装器使用 npm；已有 pnpm/yarn 锁文件需要对应安装器，不能自动改写包管理器")
-        package_cache = self.root / "cache/npm"
-        package_cache.mkdir(parents=True, exist_ok=True)
-        run = self.store.current(unfinished=True)
-        self.resources.register(package_cache, "cache", run["id"] if run else None)
-        npm = str(environment.prefix / "bin/npm")
-        if not Path(npm).exists():
-            raise AA2Error("Node runtime is missing from the selected project environment")
-        lock = workspace / "package-lock.json"
-        with self.resources.temporary("node") as scratch:
-            variables = environment.variables(scratch)
-            variables["npm_config_cache"] = str(package_cache)
-            if not lock.exists():
-                if frozen:
-                    raise AA2Error("发布版本缺少 package-lock.json，必须在隔离工作区补齐并重新验收")
-                staging = scratch / "resolve"
-                staging.mkdir()
-                for file in files(workspace):
-                    if file.name in {"package.json", ".npmrc"}:
-                        target = staging / file.relative_to(workspace)
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copyfile(file, target)
-                await self._command([npm, "install", "--package-lock-only", "--ignore-scripts"], staging,
-                                    variables, [scratch, package_cache], [environment.prefix], timeout=900)
-                atomic_write(lock, (staging / "package-lock.json").read_bytes(), 0o644)
-            modules = workspace / "node_modules"
-            marker = modules / ".aa2-install.json"
-            identity = digest([environment.fingerprint, (workspace / "package.json").read_text(), lock.read_text()])
-            if marker.is_file() and json.loads(marker.read_text()).get("fingerprint") == identity:
+        with DiagnosticOperation(self.store, self.resources, "node/" + str(workspace)):
+            if not (workspace / "package.json").is_file():
+                return
+            if any((workspace / p).exists() for p in ("pnpm-lock.yaml", "yarn.lock")):
+                raise AA2Error("首期 Node 安装器使用 npm；已有 pnpm/yarn 锁文件需要对应安装器，不能自动改写包管理器")
+            package_cache = self.root / "cache/npm"
+            package_cache.mkdir(parents=True, exist_ok=True)
+            run = self.store.current(unfinished=True)
+            self.resources.register(package_cache, "cache", run["id"] if run else None)
+            npm = str(environment.prefix / "bin/npm")
+            if not Path(npm).exists():
+                raise AA2Error("Node runtime is missing from the selected project environment")
+            lock = workspace / "package-lock.json"
+            with self.resources.temporary("node") as scratch:
+                variables = environment.variables(scratch)
+                variables["npm_config_cache"] = str(package_cache)
+                if not lock.exists():
+                    if frozen:
+                        raise AA2Error("发布版本缺少 package-lock.json，必须在隔离工作区补齐并重新验收")
+                    staging = scratch / "resolve"
+                    staging.mkdir()
+                    for file in files(workspace):
+                        if file.name in {"package.json", ".npmrc"}:
+                            target = staging / file.relative_to(workspace)
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copyfile(file, target)
+                    await self._command([npm, "install", "--package-lock-only", "--ignore-scripts"], staging,
+                                        variables, [scratch, package_cache], [environment.prefix], timeout=900)
+                    atomic_write(lock, (staging / "package-lock.json").read_bytes(), 0o644)
+                modules = workspace / "node_modules"
+                marker = self.root / "node-records" / (digest(str(workspace)) + ".json")
+                identity = digest([environment.fingerprint, (workspace / "package.json").read_text(), lock.read_text()])
+                try:
+                    installed = json.loads(marker.read_text())
+                except (OSError, ValueError):
+                    installed = {}
+                actual = digest(input_entry(modules, modules, excluded=RUNTIME_CACHES)) if modules.exists() else ""
+                if installed.get("fingerprint") == identity and installed.get("integrity") == actual:
+                    if not frozen:
+                        await self.prepare_generated_types(workspace, environment)
+                    return
+                await self._command([npm, "ci"], workspace, variables, [modules, scratch, package_cache], [environment.prefix], timeout=900)
+                write_json(marker, {"fingerprint": identity, "integrity": digest(input_entry(modules, modules, excluded=RUNTIME_CACHES))})
                 if not frozen:
                     await self.prepare_generated_types(workspace, environment)
-                return
-            await self._command([npm, "ci"], workspace, variables, [modules, scratch, package_cache], [environment.prefix], timeout=900)
-            write_json(marker, {"fingerprint": identity})
-            if not frozen:
-                await self.prepare_generated_types(workspace, environment)
 
     async def prepare_delivery(self, environment: Environment, command_directories=()):
         """Handoff the verified immutable environment, installing only frozen Node outputs."""
         from .profiles import ProjectProfile
         project = self.config.project
+        if environment.prefix.is_relative_to(self.root / "environments") and not self.valid(environment.prefix, environment.fingerprint):
+            raise AA2Error("Verified environment integrity changed; preserve it and reverify a new instance before handoff")
         if not (environment.prefix / "bin/python").is_file():
             raise AA2Error("已验证的运行环境缺失；保留发布记录，需恢复该环境后续跑")
         for root in ProjectProfile.detect(project, self.config.load().project_profile).node_roots:

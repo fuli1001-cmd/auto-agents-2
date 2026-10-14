@@ -213,7 +213,7 @@ async def test_environment_shares_equal_dependencies_and_separates_private_insta
         prepared.append(fingerprint)
         (prefix / "bin").mkdir(parents=True)
         (prefix / "bin/python").touch()
-        write_json(ready, {"fingerprint": fingerprint})
+        write_json(ready, {"fingerprint": fingerprint, "integrity": manager.integrity(prefix)})
 
     manager._prepare = prepare
     a, b = tmp_path / "a", tmp_path / "b"

@@ -1,5 +1,43 @@
 # 验证记录
 
+## 2026-10-14 质量优先修复验证
+
+本轮最终代码在项目 Conda 环境运行完整套件：**200 项通过，0 失败、0 跳过**（145.15 秒）。相对基线新增 56 项行为与故障注入用例，原有测试没有删除；少量旧断言更新为新契约，例如 NO_CHANGES 必须重新核验当前环境、环境夹具必须提供完整性证明。
+
+```bash
+.conda-env/bin/python -m pytest -q --junitxml=/tmp/aa2-final-suite.xml
+.conda-env/bin/python -m ruff check src tests
+git diff --check
+```
+
+ruff 与差异格式检查通过。完整 [JUnit 报告](evidence/quality-first-suite.xml) 已归档。新增回归覆盖路径和权限、CRLF/混合换行、敏感输入和实际 bwrap 隔离、依赖聚合与环境损坏、固定义务兼容、运行变量失效、日志脱敏、产物引用、材料原生协议读取、原型与交付恢复，以及不接受 stdout 自报测试数。
+
+另完成一次真实环境冒烟，并在新控制器进程复核：在 `/tmp` 独立项目创建 Conda 环境，使用实际安装器安装本地 wheel，检查就绪实例可复用，再由该环境的 `python -m pytest` 通过 1 项包行为测试；未向系统 Python 或 Conda base 安装包。[真实环境报告及日志/JUnit 引用](evidence/quality-first-smoke.json) 已归档，包含实际 argv、安装身份和运行配置身份。该冒烟不计入上面的 200 项，也不代表全部 Conda/Node 平台组合已验收。
+
+正文去重与诊断生命周期另覆盖精确重建、版本隔离、全部声明保留、暂停/等待/开放问题保护、安装后置条件失败、临时采集文件清理、读者占用、跨运行共享、删除失败恢复、回收期间新消费者、旧嵌套引用、主动释放与意外丢失区分、模型材料的释放标记，以及正式报告缺失时拒绝复用。针对性测试先通过，再执行上述完整套件。
+
+真实模型正文呈现对照使用已有用户原生 `balanced` profile：Codex CLI 0.162.1、`gpt-6.1-sol`、`medium`，固定两份虚构 API 版本快照，各有 4 项声明。A 使用测试脚本内的旧正文重复格式，B 使用当前请求内去重格式；角色指令和 schema 相同，每次独立会话，按 A/B、B/A、A/B 交错运行。六次调用均满足固定 oracle：全部 8 个声明 ID 恰好出现一次，支持/不支持判断全部正确，包括文末权限条件、版本冲突及不能凭文档证明实测成功。没有自动升级模型或降低推理设置。
+
+| 指标 | A：旧格式 | B：请求内正文去重 |
+|---|---:|---:|
+| 单次编译 prompt 字符数（不含 schema） | 38,752 | 17,178 |
+| 三次原生输入 token 合计 | 64,692 | 54,894 |
+| 三次原生输入与输出 token 合计 | 65,743 | 55,809 |
+| 固定判断检查通过 | 3/3 | 3/3 |
+
+该样例 prompt 字符数减少约 55.7%，输入 token 减少约 15.1%；六次调用合计 121,552 token，用量完整，缓存计数为 0。[完整对照结果](evidence/research-presentation-comparison.json) 包含每次回答、实际用量及身份摘要。成功后已清理临时会话与调用目录。测试脚本 [manual_research_presentation.py](../tests/manual_research_presentation.py) 独立于业务路径；重跑需指定已配置用户 profile 的专用测试工程，会产生真实模型用量：
+
+```bash
+.conda-env/bin/python tests/manual_research_presentation.py \
+  --project /path/to/configured-evaluation-project \
+  --output /tmp/aa2-research-presentation-comparison.json
+```
+
+这只验证固定样例中的内联正文呈现，不是完整业务任务质量等价测试，不验证其他模型、全部上下文长度或附件读取效果。原生附件链路另由子进程夹具及真实 bwrap 验证；可还原性、字符数下降和读取探针都不能代替质量门禁。目录分页、历史摘要等已移出当前范围，并非等待开启的另一套压缩逻辑。见 [实施与审核项对照](quality-first-implementation.md)。
+
+以下章节保留历史验证记录，不与本轮计数混算。
+
+
 本轮验证日期：2026-10-13；下方真实 provider 记录来自 2026-10-12。环境：WSL2 / Linux、项目内 Conda、Python 3.11.15。模拟 provider 用于检验编排语义，真实 CLI 与浏览器验证另外执行。
 
 本轮自动测试共 64 项通过，新增自动交付与故障注入覆盖。原有 36 项覆盖包含真实 Git、子进程、bubblewrap 权限探针和 Chromium。覆盖迭代准入、同文/同义需求去重、部分差异规划、实现/审查恢复、部分修改幂等应用、测试弱化拦截、原型版本审批、跨终端回复、并发 provider 切换、持久重试预算、任务改名计数与回退工作区回收、token 缺失与去重、依赖指纹共享/隔离、超时进程回收、临时资源与恢复资源区分，以及完成后清理中断的恢复。

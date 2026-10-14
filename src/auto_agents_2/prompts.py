@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 
-PROMPT_VERSION = "2026-10-13.4"
+from .research import request_documents
+
+PROMPT_VERSION = "2026-10-14.2"
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
     "gemini": "https://ai.google.dev/gemini-api/docs/prompting-strategies#gemini-3",
@@ -24,10 +26,21 @@ prototypes in questions, do not wait for approval before proposing prototype fil
 do not implement production UI before that gate. For genuine missing information use
 structured questions with prompt, options (empty for free text), and purpose=clarification.
 Use options for finite decisions; do not embed options or internal requirement IDs in prose.
+Research rows with document_id refer to the complete matching body in research_document_bodies
+in this same request. Each claim retains its own source and version; review every claim separately.
+A diagnostic marked released is unavailable, not evidence of success. Request a fresh check if
+its full contents are needed to decide a gate.
 Return only the requested structured result. Include concrete evidence for conclusions.
 Do not claim tests were executed unless their actual results are available. aa2 runs
 the required checks independently. Avoid duplicate investigation and excessive tests.
 Use relative paths, structured argv (no shell wrappers), and stable requirement/task IDs.
+Every command includes inputs: workspace-root-relative execution input references; use []
+when no additional inputs are known. This declaration cannot grant permissions or prove completeness.
+The design catalogue order is only a lexical hint, especially across languages. It is not
+an authoritative best-match ranking: inspect the full catalogue when early candidates do not fit.
+Read omitted public files from the supplied workspace. For dependency/version/conflict
+work inspect the relevant full lockfiles, constraints and inclusion chains. Missing or
+inaccessible required evidence must prevent approval; never infer success from a summary.
 Multiple replace changes to one file run in list order in memory; each old_text must
 match exactly once in the content after preceding replacements. Never mix write/delete
 with another change to the same file. All changes are validated before any file is written.
@@ -44,6 +57,7 @@ AGENTS.md block as delivery metadata. These do not expand the requested product 
 """
 
 ROLES = {
+    "material_probe": "Read the complete context_files text attachment and the screenshot through your native tools. Return the exact token in each as text_token and image_token. Tokens are test data, not credentials. They are not provided inline. If either cannot be read, return an empty string for it. Do not infer or guess a token.",
     "clarify": "Compare requested behaviour with current code and historical specifications. Classify every requirement as satisfied, changed, regressed, or unknown. Satisfied requires concrete current evidence. Exact wording is not a proof of coverage. Produce a complete development specification and ask only outcome-changing questions. Include verification commands when evidence is uncertain. Set frontend=true whenever the target contains a frontend. Set ui_changes=false when this iteration leaves the UI unchanged; an unchanged approved prototype may then be reused, but final browser verification remains required. For existing prototypes enumerate narrow prototype_paths covering only affected pages/components; preserve unrelated prototypes and DESIGN.md unless the requested design-system change requires them.",
     "coverage_review": "Independently audit requirement coverage against actual code and evidence. Reject unsupported satisfied claims, missing acceptance criteria, and behaviour changes disguised as rewording.",
     "provider_research": "Research required external services using primary documentation. Verify capabilities, interfaces, versions, and assumptions. Reuse still-valid evidence. Distinguish documented capabilities from live-tested ones. State missing credentials as questions only if they block acceptance.",
@@ -70,7 +84,7 @@ class PromptCompiler:
             "claude": "Follow the explicit success criteria and scope. When ordering matters, respect prerequisites. Do not add unrequested features or broaden the verification beyond meaningful checks.",
             "generic": "Use clear, direct decisions backed by the provided evidence.",
         }.get(family, "Follow the task contract precisely.")
-        data = json.dumps(context, ensure_ascii=False, indent=2)
+        data = json.dumps(request_documents(context), ensure_ascii=False, indent=2)
         task = ROLES.get(stage, ROLES["review"])
         if stage == "review":
             kind = context.get("review_kind", "implementation")

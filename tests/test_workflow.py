@@ -99,11 +99,11 @@ async def test_complete_delivery_same_input_and_semantic_noop(tmp_path):
     calls = len(agent.calls)
     second = await engine(project, agent).start(str(requirements))
     assert second["data"]["outcome"] == "NO_CHANGES"
-    assert len(agent.calls) == calls
+    assert [stage for stage, _ in agent.calls[calls:]] == ["verify"]
     requirements.write_text("Compute the sum of two inputs")
     third = await engine(project, agent).start(str(requirements))
     assert third["data"]["outcome"] == "NO_CHANGES"
-    assert [stage for stage, _ in agent.calls[calls:]] == ["clarify", "coverage_review"]
+    assert [stage for stage, _ in agent.calls[calls:]] == ["verify", "clarify", "coverage_review", "verify"]
     assert not list((project / ".aa2/worktrees").glob("*/*"))
 
 
@@ -256,7 +256,7 @@ async def test_prototype_waits_for_versioned_human_approval_and_external_reply(t
         workflow.store.answer(question["id"], "1", question["artifact_hash"])
         result = await asyncio.wait_for(running, 15)
         assert result["status"] == "SUCCEEDED"
-        assert workflow.store.get(rid, "prototype_approval")["hash"] == question["artifact_hash"]
+        assert workflow.store.get(rid, "prototype_approval")["identity"] == question["artifact_hash"]
     finally:
         running.cancel()
         await asyncio.gather(running, return_exceptions=True)

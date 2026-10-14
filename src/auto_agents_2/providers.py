@@ -7,17 +7,26 @@ import time
 from pathlib import Path
 from typing import Protocol
 
+from jsonschema import ValidationError, validate
 from pydantic import BaseModel
 
+from .artifacts import ArtifactStore
+from .capabilities import ReadChallengeResult, challenge_files, confirm_read
 from .config import ConfigStore
+from .diagnostics import references
 from .errors import ConfigurationError, ProviderError
+from .evidence import invocation_identity
+from .materials import bundle
 from .models import Usage, strict_schema
+from .progress import capture_output
 from .prompts import PROMPT_VERSION, PromptCompiler
+from .readview import VIEW_VERSION, create_view, sensitive_values
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
 from .store import Store
 from .transports import BUILTIN_TRANSPORTS, CLITransport
 from .util import atomic_write, digest, identifier, scrub_text, write_json
+from .workspace import file_digest
 
 
 def diagnostic_summary(text: str) -> str:
@@ -151,18 +160,93 @@ class ProviderRouter:
         raise ProviderError("; ".join(errors)[-3000:])
 
     async def _call(self, eff, stage, context, schema, workspace, run_id, operation, fresh):
+        with ArtifactStore(self.store.root).reading(context, run_id):
+            return await self._call_with_materials(eff, stage, context, schema, workspace, run_id, operation, fresh)
+
+    async def _call_with_materials(self, eff, stage, context, schema, workspace, run_id, operation, fresh):
         if eff["kind"] not in self.transports:
             raise ConfigurationError(f"No installed provider transport: {eff['kind']}")
         transport = self.transports[eff["kind"]]
+        input_identity = invocation_identity(stage, context, schema, workspace, self.config.load())
         aid = identifier("attempt")
         root = self.store.root / "attempts" / run_id / aid
         out = root / "out"
         out.mkdir(parents=True)
+        resource_manager = ResourceManager(self.store, self.config.load().cleanup)
+        resource_id = resource_manager.register(root, "temporary", run_id)
         schema_file = root / "schema.json"
         write_json(schema_file, strict_schema(schema))
+        original_workspace = workspace
+        workspace = create_view(workspace, root / "workspace", self.config.load().sensitive_paths)
+        read_status = "uncertified"
+        # Self-contained input always names the actually mounted public snapshot.
+        context = json.loads(json.dumps(context))
+        referenced = set(context.get("context_files", []))
+        visited = set()
+        released = []
+        artifact_store = ArtifactStore(self.store.root)
+        def attach(value):
+            if isinstance(value, dict):
+                sha = value.get("hash")
+                if isinstance(sha, str) and len(sha) == 64 and "kind" in value and "bytes" in value:
+                    path = artifact_store.root / sha[:2] / sha
+                    value.pop("lease_id", None)
+                    if artifact_store.released(value):
+                        value.pop("location", None)
+                        value["availability"] = "released"
+                        value["reason"] = "Diagnostic body released after its consumers finished; rerun the check if needed"
+                        released.append(dict(value))
+                        return
+                    try:
+                        raw = artifact_store.bytes(value)
+                    except (OSError, ValueError) as exc:
+                        raise ProviderError("Referenced evidence artifact is unavailable") from exc
+                    value["location"] = str(path)
+                    referenced.add(str(path))
+                    if sha not in visited:
+                        visited.add(sha)
+                        # Exposure follows controller-registered edges, never arbitrary JSON in raw documents.
+                        with self.store.connect() as db:
+                            present = db.execute("SELECT 1 FROM sqlite_master WHERE name='artifact_edges'").fetchone()
+                            children = [row[0] for row in db.execute("SELECT child FROM artifact_edges WHERE parent=?", (sha,))] if present else []
+                        nested = list(references(json.loads(raw))) if children else []
+                        for child in children:
+                            entries = [ref for ref in nested if ref["hash"] == child]
+                            if entries:
+                                for ref in entries:
+                                    attach(ref)
+                            else:
+                                child_path = artifact_store.root / child[:2] / child
+                                if not child_path.is_file():
+                                    raise ProviderError("Referenced evidence dependency is unavailable")
+                                attach({"hash": child, "kind": "evidence_dependency", "bytes": child_path.stat().st_size})
+                for child in list(value.values()):
+                    attach(child)
+            elif isinstance(value, list):
+                for child in value:
+                    attach(child)
+        attach(context)
+        context["context_files"] = sorted(referenced)
+        if released:
+            context["released_diagnostics"] = released
+        def locate(value):
+            if isinstance(value, dict):
+                if value.get("workspace") == str(original_workspace):
+                    value["workspace"] = str(workspace)
+                for child in value.values():
+                    locate(child)
+            elif isinstance(value, list):
+                for child in value:
+                    locate(child)
+        locate(context)
         prompt, family = self.compiler.compile(stage, context, eff["model"], eff["prompt_profile"])
+        confidential = sensitive_values(original_workspace, self.config.load().sensitive_paths)
+        # Preserve exact editable text: never silently rewrite model-visible file content.
+        if any(value in prompt for value in confidential):
+            raise ProviderError("Required material includes a protected value; provide a safe execution contract before model delivery")
         atomic_write(root / "prompt.txt", prompt)
-        previous = self.store.get(run_id, f"session/{operation}/{eff['provider']}") if not fresh else None
+        session_key = f"session/{operation}/{eff['provider']}/{VIEW_VERSION}/{PROMPT_VERSION}/{eff['fingerprint']}/{digest(self.config.load().sensitive_paths)}"
+        previous = self.store.get(run_id, session_key) if not fresh else None
         assets = []
 
         def images(value):
@@ -170,8 +254,9 @@ class ProviderRouter:
                 for k, v in value.items():
                     if k == "screenshot" and isinstance(v, str):
                         file = Path(v)
-                        if file.is_file() and file.resolve().is_relative_to(self.store.root):
-                            assets.append(file)
+                        if not file.is_file() or not file.resolve().is_relative_to(self.store.root):
+                            raise ProviderError("Required screenshot cannot be delivered")
+                        assets.append(file)
                     else:
                         images(v)
             elif isinstance(value, list):
@@ -179,11 +264,24 @@ class ProviderRouter:
                     images(v)
 
         images(context)
-        context_files = [Path(p) for p in context.get("context_files", [])
-                         if Path(p).is_file() and Path(p).resolve().is_relative_to(self.store.root / "artifacts")]
+        context_files = [Path(p) for p in context.get("context_files", [])]
+        if any(not p.is_file() or not p.resolve().is_relative_to(self.store.root / "artifacts") for p in context_files):
+            raise ProviderError("Required context attachment cannot be delivered")
+        for attachment in context_files:
+            body = attachment.read_bytes()
+            if any(value.encode() in body for value in confidential):
+                raise ProviderError("Required attachment includes protected data and cannot be delivered")
+        image_read = eff["kind"] == "antigravity" and bool(assets)
+        if stage != "material_probe" and (context_files or image_read):
+            await self._ensure_material_read(eff, workspace, run_id, image_read)
+            read_status = "observed_read"
+        material = bundle(prompt, strict_schema(schema), context_files, assets,
+                          {"provider": eff["kind"], "profile": eff["fingerprint"], "view": VIEW_VERSION,
+                           "binary": file_digest(Path(eff["binary"])), "native_read_test": read_status})
+        self.store.checkpoint(run_id, "materials/" + operation, material)
         argv = transport.argv(eff, workspace, schema_file, out / "result.json", prompt, previous, assets, context_files)
         env = dict(eff["environment"])
-        overlays = self._session_overlay(eff, run_id, operation)
+        overlays = self._session_overlay(eff, run_id, operation + VIEW_VERSION + PROMPT_VERSION + eff["fingerprint"] + digest(self.config.load().sensitive_paths))
         secret_values = [v for k, v in env.items() if any(s in k.upper() for s in ("TOKEN", "SECRET", "API_KEY", "PASSWORD"))]
         self.store.event(run_id, "agent.started", {"attempt": aid, "operation": operation, "stage": stage,
                          "provider": eff["provider"], "level": eff["level"], "model": eff["model"],
@@ -214,7 +312,7 @@ class ProviderRouter:
                 decoder.feed(event)
                 if decoder.session and decoder.session != session:
                     session = decoder.session
-                    self.store.checkpoint(run_id, f"session/{operation}/{eff['provider']}", session)
+                    self.store.checkpoint(run_id, session_key, session)
                 typ = event.get("type", event.get("event", ""))
                 item = event.get("item") or {}
                 detail = {"thread.started": "会话已建立", "turn.started": "等待模型响应",
@@ -231,7 +329,8 @@ class ProviderRouter:
                 del errors[:-100]
 
         try:
-            process = await self.sandbox.spawn(argv, workspace, env, [out], [schema_file, root / "prompt.txt", *assets, *context_files], overlays)
+            process = await self.sandbox.spawn(argv, workspace, env, [out], [schema_file, root / "prompt.txt", *assets, *context_files], overlays,
+                                               hidden=[self.config.project, original_workspace])
             self.store.event(run_id, "agent.spawned", {"attempt": aid, "pid": process.pid})
 
             async def stdout():
@@ -272,9 +371,15 @@ class ProviderRouter:
                     retryable=any(t in message.lower() for t in ("timeout", "timed out", "429", "503", "connection", "rate limit", "capacity", "overloaded")))
             response = (out / "result.json").read_text() if (out / "result.json").exists() else (decoder.messages[-1] if decoder.messages else "")
             try:
+                validate(json.loads(response), strict_schema(schema))
                 result = schema.model_validate_json(response)
-            except ValueError as exc:
+            except (ValueError, ValidationError) as exc:
                 raise ProviderError("Invalid structured response: schema validation failed") from exc
+            artifact = ArtifactStore(self.store.root).put(result.model_dump(mode="json"), stage)
+            self.store.checkpoints(run_id, {
+                f"provider-result/{operation}": {"attempt": aid, "artifact": artifact, "usage": decoder.usage.model_dump()},
+                f"invocation/{operation}": {"identity": input_identity, "result": result.model_dump(mode="json"), "artifact": artifact},
+            }, usage=(eff["provider"], aid, decoder.usage.model_dump()))
             outcome = "success"
             return result
         except OSError as exc:
@@ -293,6 +398,37 @@ class ProviderRouter:
                                                        if outcome == "error" else ""})
             # Candidate responses have been consumed; persistent sessions and usage survive.
             shutil.rmtree(root, ignore_errors=True)
+            resource_manager.release(resource_id)
+
+    @staticmethod
+    def _has_images(value):
+        if isinstance(value, dict):
+            return bool(value.get("screenshot")) or any(ProviderRouter._has_images(v) for v in value.values())
+        return isinstance(value, list) and any(ProviderRouter._has_images(v) for v in value)
+
+    async def _ensure_material_read(self, eff, workspace, run_id, image_read):
+        process = await self.sandbox.spawn([eff["binary"], "--version"], workspace, eff["environment"], [],
+                                           hidden=[self.config.project])
+        try:
+            async with asyncio.timeout(30):
+                version, _ = await capture_output(process, machine_limit=65536)
+            if process.returncode:
+                raise ProviderError("Cannot establish native CLI material capability identity")
+        finally:
+            await self.sandbox.stop(process)
+        identity = digest([eff["fingerprint"], file_digest(Path(eff["binary"])), digest(version),
+                           VIEW_VERSION, PROMPT_VERSION, self.config.load().sensitive_paths, image_read])
+        key = "material-capability/" + identity
+        if self.store.get(run_id, key, {}).get("status") == "observed_read":
+            return
+        resources = ResourceManager(self.store, self.config.load().cleanup)
+        with resources.temporary("read-challenge") as directory:
+            context, expected = await challenge_files(ArtifactStore(self.store.root), directory, image_read)
+            response = await self._call(eff, "material_probe", context, ReadChallengeResult,
+                                        workspace, run_id, "material-probe/" + identity, True)
+            proof = confirm_read(response, expected)
+            self.store.checkpoint(run_id, key, {**proof, "capability": identity,
+                                              "scope": "text and PNG read; not task correctness" if image_read else "text read; not task correctness"})
 
     def _session_overlay(self, eff, run_id, operation):
         env = eff["environment"]
