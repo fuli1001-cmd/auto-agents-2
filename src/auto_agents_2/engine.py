@@ -638,7 +638,13 @@ class WorkflowEngine:
                     continue
             schema = PlanResult if stage == "plan" else DocumentResult
             if stage == "plan":
-                context["task_origins"] = self.store.get(rid, "task_origins", {})
+                origin_state = self.store.task_origin_state(rid)
+                if set(origin_state["budgets"]) - set(origin_state["origins"].values()):
+                    raise Replan("plan", "Task origin history is missing for consumed task budgets; restore the registry before planning")
+                context["task_origins"] = origin_state["origins"]
+                context["task_budgets"] = origin_state["budgets"]
+                context["unresolved_issues"] = [issue for issue in IssueLedger(self.store, self.artifacts).unresolved(rid)
+                                                if issue["scope"] == "plan-review"]
             if stage == "prototype":
                 document, retrieved = await self._prepare_prototype(rid, work, result, assessment, context, original)
             else:
@@ -680,13 +686,23 @@ class WorkflowEngine:
                         task.origin_id = task.origin_id or task.id
                     origins[task.id] = task.origin_id
                 self.store.checkpoint(rid, "task_origins", origins)
+                # Registration changes the controller state after the planner's
+                # input was built. Review the validated state, not that stale input.
+                context["task_origins"] = origins
+                context["task_origin_validation"] = {
+                    "status": "passed", "registration": "existing" if prior else "initial",
+                    "prior_origins": prior, "budget_counters_unchanged": True,
+                    "scope": "task origin registration and budget inheritance only; independent plan review still required",
+                }
                 if result.frontend and document.preview is None:
                     raise Replan("plan", "Frontend plan requires a runnable preview and route mapping")
                 self._replan_contract(rid, "plan", True)
                 review = await self._invoke("review", {**context, "plan": document.model_dump(), "review_kind": "plan"}, ReviewResult,
                                             work, rid, "plan-review", fresh=True)
                 if not review.approved:
-                    raise Replan("plan", review.summary)
+                    details = "".join(f"\n\n[{f.severity}] {f.location}\n{f.description}\n证据：{f.evidence}\n修复要求：{f.resolution}"
+                                      for f in review.findings)
+                    raise Replan("plan", review.summary + details)
             atomic_write(work / "docs/aa2" / f"{stage}.md", document.document)
             stage_data = document.model_dump()
             if retrieved:

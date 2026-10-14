@@ -4,7 +4,7 @@ import json
 
 from .research import request_documents
 
-PROMPT_VERSION = "2026-10-14.2"
+PROMPT_VERSION = "2026-10-14.3"
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
     "gemini": "https://ai.google.dev/gemini-api/docs/prompting-strategies#gemini-3",
@@ -30,6 +30,12 @@ Research rows with document_id refer to the complete matching body in research_d
 in this same request. Each claim retains its own source and version; review every claim separately.
 A diagnostic marked released is unavailable, not evidence of success. Request a fresh check if
 its full contents are needed to decide a gate.
+For planning, task_origins and task_budgets are current controller records. When both are
+empty, initial tasks may register their own IDs as origins; an old feedback error is not proof
+of a missing historical registry. With existing origins, replacements must inherit them.
+For plan review, task_origin_validation records the controller's completed registration check;
+use its current mapping and budget evidence to assess old origin findings. This validates only
+lineage, not plan quality. Independently review every other obligation and unresolved finding.
 Return only the requested structured result. Include concrete evidence for conclusions.
 Do not claim tests were executed unless their actual results are available. aa2 runs
 the required checks independently. Avoid duplicate investigation and excessive tests.

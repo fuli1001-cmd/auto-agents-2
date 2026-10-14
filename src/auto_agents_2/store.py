@@ -307,6 +307,16 @@ class Store:
                        (now(), json.dumps(body), rid))
             self._event(db, rid, "delivery.completed", {"target": receipt["target"], "commit": receipt["candidate"]})
 
+    def task_origin_state(self, rid):
+        """Read the registry and consumed task budgets from one database snapshot."""
+        with self.connect() as db:
+            rows = {row["key"]: json.loads(row["data"]) for row in db.execute(
+                "SELECT key,data FROM checkpoints WHERE run_id=? AND (key='task_origins' OR key LIKE 'rounds/%')", (rid,))}
+        # Delivery repair has a separate budget, unrelated to task lineage.
+        return {"origins": rows.get("task_origins", {}),
+                "budgets": {key.removeprefix("rounds/"): value for key, value in rows.items()
+                            if key.startswith("rounds/") and key != "rounds/delivery"}}
+
     def delivery_evidence(self, rid):
         result = {}
         with self.connect() as db:
