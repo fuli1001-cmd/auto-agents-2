@@ -9,7 +9,7 @@ from pathlib import Path
 from .artifacts import ArtifactStore
 from .config import Cleanup
 from .environment import Environment
-from .errors import PolicyViolation
+from .errors import PolicyViolation, VerificationPreparationError
 from .evidence import (
     CHECKER_VERSION,
     NODE_RUNTIME_CACHES,
@@ -25,7 +25,7 @@ from .resources import ResourceManager
 from .sandbox import SandboxRunner
 from .store import Store
 from .test_reports import is_python, read_junit, report_command, test_runner
-from .util import SECRET, contained, digest
+from .util import SECRET, contained, digest, scrub_text
 from .workspace import tree_hash
 
 
@@ -92,8 +92,11 @@ class VerificationService:
             if not Path(argv[0]).is_file():
                 raise PolicyViolation("Verification interpreter is missing from the selected environment")
         runner = test_runner(command.argv, cwd)
+        if executable == "npm" and command.expected_tests and not runner:
+            raise VerificationPreparationError(
+                "Unsupported npm test script for report collection; use a simple Vitest/Playwright script or direct runner command")
         report_file = scratch / "junit.xml"
-        argv, report_env = report_command(argv, runner, report_file)
+        argv, report_env = report_command(argv, runner, report_file, cwd=cwd)
         env.update(report_env)
         outputs = [scratch, cwd / ".pytest_cache", cwd / ".next", cwd / "dist", cwd / "test-results",
                    *(cwd / "node_modules" / name for name in sorted(NODE_RUNTIME_CACHES))]
@@ -148,11 +151,12 @@ class VerificationService:
                 with report_file.open("rb") as stream:
                     cases = read_junit(stream.read(32 * 1024 * 1024 + 1))
                 test_ids, passed_test_ids = cases.ids, cases.passed
-                tests, skipped, report_status = len(cases.passed), cases.skipped, "valid"
+                tests, skipped, report_status = cases.passed_count, cases.skipped, "valid"
                 if cases.failures:
                     reasons.append("test_report_failed")
-            except (ET.ParseError, ValueError):
+            except (ET.ParseError, ValueError) as exc:
                 report_status = "invalid"
+                output += "\nJUnit report rejected: " + scrub_text(str(exc), secrets)
         attachments = []
         attachment_root = scratch / "playwright-results"
         if runner == "playwright" and attachment_root.is_dir():

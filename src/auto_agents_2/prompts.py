@@ -58,6 +58,12 @@ proof of a product defect. The controller collects JUnit for pytest (including P
 Vitest and Playwright, directly or through simple npm scripts. Keep nonzero expected_tests
 for test suites. An unsupported wrapper requires a supported direct runner command, never
 weaker assertions or a reduced expected_tests. Rechecking old evidence still requires review.
+Existing run/reporter options are composed by the controller; do not rewrite a valid task
+check just to compensate for duplicated controller flags. The original argv, effective_argv
+and current controller verification_recheck distinguish compilation faults from test failures.
+The environment manager installs version-matched project-local Playwright browsers
+(Chromium by default, configured by environment.playwright_browsers). Declare Playwright
+in the project dependencies; browser installation is separate from read-only verification.
 For controller_recheck feedback, reassess the complete previous_request against fresh checks;
 retain any unresolved design/scope concerns and request replanning again if still warranted.
 Multiple replace changes to one file run in list order in memory; each old_text must

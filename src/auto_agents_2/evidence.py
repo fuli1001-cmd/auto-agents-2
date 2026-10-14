@@ -8,7 +8,7 @@ from pathlib import Path
 from .util import contained, digest
 from .workspace import input_entry, tree_hash
 
-CHECKER_VERSION = "verification-v3"
+CHECKER_VERSION = "verification-v4"
 NODE_RUNTIME_CACHES = {".cache", ".vite", ".vite-temp", ".tmp"}
 RUNTIME_CACHES = {"__pycache__", ".pytest_cache", *NODE_RUNTIME_CACHES}
 

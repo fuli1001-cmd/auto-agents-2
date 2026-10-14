@@ -10,7 +10,7 @@ from auto_agents_2.util import digest
 from auto_agents_2.workspace import apply_prepared, prepare_changes, tree_hash
 
 
-async def blocked_workflow(tmp_path, *, failing=False):
+async def blocked_workflow(tmp_path, *, failing=False, checker_version="verification-v2"):
     class Agent(CodingAgent):
         async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
             if stage == "implement":
@@ -33,7 +33,7 @@ async def blocked_workflow(tmp_path, *, failing=False):
     if failing:
         (work / "calc.py").write_text("def add(a,b): return 0\n")
     old = (await workflow.verifier.run(proposal.tasks[0].checks, work, await workflow._environment()))[0]
-    old = old.model_copy(update={"checker_version": "verification-v2", "process_exit_code": None,
+    old = old.model_copy(update={"checker_version": checker_version, "process_exit_code": None,
                                  "exit_code": 1, "tests": 0, "report": {}, "test_ids": [], "passed_test_ids": []})
     saved = {"phase": "implementing", "feedback": {"checks": [old.model_dump()]}}
     response = ImplementationResult(summary="Missing evidence", changes=[], replan_stage="plan", replan_reason="recheck report")
@@ -48,8 +48,9 @@ async def blocked_workflow(tmp_path, *, failing=False):
 
 
 @pytest.mark.asyncio
-async def test_legacy_report_recovery_rechecks_without_resetting_budgets_or_skipping_review(tmp_path):
-    workflow, rid, proposal, base, work, pending = await blocked_workflow(tmp_path)
+@pytest.mark.parametrize("checker_version", ["verification-v2", "verification-v3"])
+async def test_legacy_report_recovery_rechecks_without_resetting_budgets_or_skipping_review(tmp_path, checker_version):
+    workflow, rid, proposal, base, work, pending = await blocked_workflow(tmp_path, checker_version=checker_version)
     progress = workflow.store.get(rid, "replanning/progress")
     rounds = workflow.store.get(rid, "rounds/T1")
     source = tree_hash(work)
@@ -77,7 +78,13 @@ async def test_recovery_cannot_clear_unproven_or_unrelated_replan(tmp_path, cond
         pending["reason"] = "unrelated design issue"
         workflow.store.checkpoint(rid, "replanning/pending", pending)
     assert not await workflow._refresh_legacy_task_checks(rid)
-    assert workflow.store.get(rid, "replanning/pending") == pending
+    current = workflow.store.get(rid, "replanning/pending")
+    assert {k: v for k, v in current.items() if k != "verification_recheck"} == pending
+    if condition == "actual_failure":
+        assert current["verification_recheck"]["checks"][0]["process_exit_code"] != 0
+        assert current["verification_recheck"]["checks"][0]["report_status"] == "valid"
+        workflow.store.complete_replan(rid, ["plan", "develop"], [])
+        assert workflow.store.get(rid, "replan_feedback")["verification_recheck"] == current["verification_recheck"]
     assert workflow.store.pending(rid)
     assert work.exists() and not workflow.agent.calls
 

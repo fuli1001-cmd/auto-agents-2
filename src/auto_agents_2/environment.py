@@ -33,13 +33,16 @@ class Environment:
     fingerprint: str
 
     def variables(self, scratch: Path) -> dict[str, str]:
-        env = {k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"}
+        # Target checks are headless. Inheriting WSLg/desktop endpoints can freeze
+        # Chromium's frame clock even though DOM evaluation continues to work.
+        env = {k: v for k, v in os.environ.items() if k not in {
+            "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"}
                and not SECRET.search(k)}
         env.update(PATH=str(self.prefix / "bin") + os.pathsep + env.get("PATH", ""),
                    CONDA_PREFIX=str(self.prefix), PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1",
                    XDG_CACHE_HOME=str(scratch / "cache"), TMPDIR=str(scratch),
                    npm_config_cache=str(scratch / "npm-cache"), npm_config_update_notifier="false",
-                   NEXT_TELEMETRY_DISABLED="1", PLAYWRIGHT_BROWSERS_PATH=str(scratch / "browsers"))
+                   NEXT_TELEMETRY_DISABLED="1", PLAYWRIGHT_BROWSERS_PATH="0")
         return env
 
 
@@ -273,7 +276,9 @@ class EnvironmentManager:
                     atomic_write(lock, (staging / "package-lock.json").read_bytes(), 0o644)
                 modules = workspace / "node_modules"
                 marker = self.root / "node-records" / (digest(str(workspace)) + ".json")
-                identity = digest([environment.fingerprint, (workspace / "package.json").read_text(), lock.read_text()])
+                identity = digest(["node-install-v2", environment.fingerprint,
+                                   self.config.load().environment.playwright_browsers,
+                                   (workspace / "package.json").read_text(), lock.read_text()])
                 try:
                     installed = json.loads(marker.read_text())
                 except (OSError, ValueError):
@@ -284,9 +289,25 @@ class EnvironmentManager:
                         await self.prepare_generated_types(workspace, environment)
                     return
                 await self._command([npm, "ci"], workspace, variables, [modules, scratch, package_cache], [environment.prefix], timeout=900)
+                await self.prepare_node_browsers(workspace, environment)
                 write_json(marker, {"fingerprint": identity, "integrity": digest(input_entry(modules, modules, excluded=RUNTIME_CACHES))})
                 if not frozen:
                     await self.prepare_generated_types(workspace, environment)
+
+    async def prepare_node_browsers(self, workspace: Path, environment: Environment):
+        """Install browsers with the locked project's CLI, inside its node_modules.
+
+        Installation precedes the Node readiness marker. Browser binaries are part
+        of the same immutable execution-input identity as the installed packages.
+        """
+        cli = workspace / "node_modules/playwright/cli.js"
+        if not cli.is_file():
+            return
+        with self.resources.temporary("node-browsers") as scratch:
+            await self._command([str(environment.prefix / "bin/node"), str(cli), "install",
+                                 *self.config.load().environment.playwright_browsers], workspace,
+                                environment.variables(scratch), [workspace / "node_modules", scratch],
+                                [environment.prefix], timeout=900)
 
     async def prepare_delivery(self, environment: Environment, command_directories=()):
         """Handoff the verified immutable environment, installing only frozen Node outputs."""

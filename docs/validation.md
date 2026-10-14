@@ -1,5 +1,31 @@
 # 验证记录
 
+## 2026-10-14 命令合成、报告身份与浏览器运行契约修复
+
+以 demo 的 T002 暂停状态和原始检查命令为复现基线。直接原因是控制器向已有 `--run` 的命令再次追加单值选项，Vitest 4.0.18 在收集测试前退出。进一步执行原命令发现两个参数化用例同名，旧报告解析器又将有效的 67 用例报告判为损坏。后续真浏览器验证还确认了空临时浏览器路径，以及 WSLg 桌面会话变量干扰无头 Chromium 渲染帧的问题。
+
+本轮将原 argv、npm script 和控制器参数共同纳入组装契约：按工具语义合成单值/多值选项，重复组装幂等，报告写入独占目录；保留文件过滤、名称表达式、npm 前后置钩子、环境和原检查义务。复杂 shell、显式 watch、禁用 JUnit 或无法安全重定向的脚本内固定 Vitest 输出路径在启动前报告准备错误，保留已应用候选和轮数。重名用例在计数一致时获得明确身份，进展仅按整组通过计算，不能靠重排或改变组大小制造改善。
+
+最终源码完整回归 **328 项通过，0 失败、0 跳过**（314.84 秒），较上一版新增 58 项覆盖；ruff 与 `git diff --check` 通过。[完整 JUnit](evidence/command-contract-suite.xml) 已归档。受影响子系统先行测试，最后全套回归使用包含桌面环境隔离和脚本解析修复的最终源码。
+
+真实执行证据见 [命令与恢复实跑摘要](evidence/command-contract-smoke.json)：
+
+- 原 T002 的 `npm run test -- --run src/domain/title.test.ts src/api/tasks.test.ts` 实际采集 **67 个通过用例**；原 `npm run typecheck` 退出码 **0**。计划文件、过滤条件、expected_tests 和 inputs 保持原值。
+- Vitest **3.2.4 / 4.0.18**、Playwright **1.55.0 / 1.58.2** 的 **34 种不同组合**实际通过判定，包括已有 run 参数、脚本内 run、报告选项、过滤、直接调用和 npm 调用。真实失败和全部跳过被拒绝；posttest 退出 17 即使用例通过也不能通过验收。另一次重复执行的 17 组结果保留在原记录中，不计为新增覆盖。
+- 真实 T002 暂停状态的隔离副本，复用已验证运行时并执行原两条检查后恢复成功。计划与历史预算保持一致，旧回退请求归档，后续仍须独立模型审查；没有调用真实 provider 或执行发布。
+- 用项目锁定的 Playwright CLI 安装本地 Chromium，再在原 bubblewrap 权限下实际访问回环 HTTP 页面、普通点击、断言和截图。默认无头 Chromium 使用项目内匹配版本的浏览器；去掉继承的桌面会话变量后渲染帧恢复。[归档截图](evidence/node-browser-smoke.png) 在临时输出目录清理后仍可读取。浏览器实跑覆盖 Chromium。
+
+Node 就绪记录在浏览器安装成功后发布，浏览器内容纳入完整性校验和检查输入身份。旧 v2/v3 证据需重新采集；若复测仍失败，最新结果随待回退状态和规划反馈保留，避免继续依据过时诊断修正计划。
+
+复现入口使用项目 Conda Python 及已安装的、锁定版本的 Node 依赖；脚本复制输入到自身临时项目，不安装到全局环境：
+
+```bash
+.conda-env/bin/python -m pytest -q --junitxml=/tmp/aa2-command-final-suite.xml
+.conda-env/bin/python -m ruff check src tests
+.conda-env/bin/python tests/manual_command_matrix.py CONDA_PREFIX NODE_MODULES_V3 NODE_MODULES_V4
+.conda-env/bin/python tests/manual_node_browser.py CONDA_PREFIX NODE_MODULES_V4
+```
+
 ## 2026-10-14 检查采集与恢复链路修复
 
 demo 的原检查命令是 `python -B -m pytest`，旧检查器只识别紧邻解释器的 `-m pytest`，因此漏采 JUnit；随后又把用例数不足写入 `exit_code`，丢失原始进程状态。现按 Python 选项语法识别模块，记录 `process_exit_code`、验收 `exit_code` 与明确失败原因；新增 Vitest/Playwright 的 JUnit 采集，校验报告完整性并归档 Playwright 输出文件。真实前端执行还暴露并修复了 Vite `.vite-temp` 写入范围和 Playwright 删除输出挂载点的问题，预览与检查共用 Node 缓存目录声明。

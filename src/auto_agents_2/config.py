@@ -66,6 +66,7 @@ class EnvironmentConfig(Record):
     node_version: str = "22"
     environment_file: str = ""
     requirements_file: str = ""
+    playwright_browsers: list[Literal["chromium", "firefox", "webkit"]] = Field(default=["chromium"], min_length=1)
 
 
 class DeliveryConfig(Record):

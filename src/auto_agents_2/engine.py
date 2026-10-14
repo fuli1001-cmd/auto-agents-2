@@ -172,9 +172,14 @@ class WorkflowEngine:
         if decision["stalled"] >= self.config.load().execution.max_stalled_replans and not pending["granted"]:
             interaction = choice_spec(["已处理，再尝试一次", "暂停，稍后续跑"], ["continue", "pause"], yes_no=True)
             interaction["pause_on"] = "n"
+            reason = pending["reason"]
+            if pending.get("verification_recheck"):
+                reason += "\n更新检查器后的实际复测仍未通过：" + json.dumps([
+                    {key: row.get(key) for key in ("process_exit_code", "exit_code", "tests", "report_status", "failure_reasons")}
+                    for row in pending["verification_recheck"]["checks"]], ensure_ascii=False)
             await self._ask(rid, f"replan-stalled/{pending['evaluation']}",
                             f"连续 {decision['stalled']} 次回退未检测到可验证改进，已停止自动执行并保留现场。\n"
-                            f"回退目标：{pending['stage']}\n原因：{pending['reason']}\n"
+                            f"回退目标：{pending['stage']}\n原因：{reason}\n"
                             "请处理阻塞后确认再尝试一次，或暂停。确认不会清零历史计数。",
                             digest(pending), interaction)
             pending["granted"] = True
@@ -185,7 +190,7 @@ class WorkflowEngine:
         self.store.complete_replan(rid, STAGES[STAGES.index(pending["stage"]):], archived)
 
     async def _refresh_legacy_task_checks(self, rid):
-        """Recheck a pending task whose old checker missed a supported test runner.
+        """Recheck a pending task whose old checker failed to collect test evidence.
 
         Only an unchanged candidate and a replan bound to that task's exact saved
         response qualify. Fresh checks replace feedback, never independent review.
@@ -211,7 +216,8 @@ class WorkflowEngine:
             source = tree_hash(work)
             if any(row.source_hash != source for row in previous):
                 continue
-            affected = any(row.checker_version == "verification-v2" and row.tests == 0 and not row.report
+            affected = any(row.checker_version in {"verification-v2", "verification-v3"} and row.tests == 0
+                           and (not row.report or row.report_status in {"missing", "invalid"})
                            and test_runner(row.argv, work if row.cwd == "." else work / row.cwd)
                            and any(row.command_hash == digest(command.model_dump()) for command in task.checks)
                            for row in previous)
@@ -227,6 +233,8 @@ class WorkflowEngine:
             record["checks"] = [row.model_dump() for row in checks]
             self.store.checkpoint(rid, recovery_key, record)
             if not reusable(task.checks, checks, work, environment, self.artifacts).allowed or tree_hash(work) != source:
+                self.store.checkpoint(rid, "replanning/pending", {**pending, "verification_recheck": {
+                    "checks": record["checks"], "recovery_key": recovery_key, "checker_version": CHECKER_VERSION}})
                 return False
             updated = {**saved, "feedback": {**saved.get("feedback", {}), "checks": record["checks"],
                        "controller_recheck": {"previous_request": proposal, "checker_version": CHECKER_VERSION}}}

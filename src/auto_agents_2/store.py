@@ -201,6 +201,8 @@ class Store:
                 db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR key LIKE ?)",
                            (rid, stage, stage + "/%"))
             feedback = {"stage": pending["stage"], "reason": pending["reason"], "recovery_refs": recovery_refs}
+            if pending.get("verification_recheck"):
+                feedback["verification_recheck"] = pending["verification_recheck"]
             db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
                        (rid, "replan_feedback", json.dumps(feedback, ensure_ascii=False)))
             db.execute("UPDATE runs SET status='RUNNING',stage=?,updated=?,data=? WHERE id=?",

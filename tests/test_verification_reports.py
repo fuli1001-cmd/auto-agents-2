@@ -40,7 +40,7 @@ def test_npm_runner_is_read_from_the_actual_script(tmp_path, script, runner):
     write_json(tmp_path / "package.json", {"scripts": {"test": script, "test:e2e": script}})
     for argv in (["npm", "test"], ["npm", "run", "test:e2e", "--", "selected.spec.ts"]):
         assert runner_for(argv, tmp_path) == runner
-        effective, variables = report_command(argv, runner, tmp_path / "junit.xml")
+        effective, variables = report_command(argv, runner, tmp_path / "junit.xml", cwd=tmp_path)
         if runner:
             assert effective[effective.index("--") + 1:]
             assert "--reporter=line,junit" in effective if runner == "playwright" else "--reporter=junit" in effective
@@ -129,7 +129,7 @@ async def test_direct_node_runner_uses_workspace_binary_and_generated_cache_only
     binary.write_text(f"#!{sys.executable}\nimport pathlib,sys\n"
                       "cache=pathlib.Path('node_modules/.vite-temp')\n"
                       "cache.mkdir(exist_ok=True)\n(cache/'config.mjs').write_text('generated')\n"
-                      "path=next(arg.split('=',1)[1] for arg in sys.argv if arg.startswith('--outputFile='))\n"
+                      "path=next(arg.split('=',1)[1] for arg in sys.argv if arg.startswith('--outputFile.junit='))\n"
                       "pathlib.Path(path).write_text(\"<testsuite><testcase name='observed'/></testsuite>\")\n")
     binary.chmod(0o755)
     write_json(work / "package.json", {"name": "fixture"})

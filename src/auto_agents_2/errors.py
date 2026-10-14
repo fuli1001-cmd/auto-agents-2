@@ -16,6 +16,12 @@ class DependencyResolutionError(AA2Error):
     code = "DEPENDENCY_RESOLUTION_ERROR"
 
 
+class VerificationPreparationError(AA2Error):
+    """The declared command cannot safely collect controller-owned evidence."""
+
+    code = "VERIFICATION_PREPARATION_ERROR"
+
+
 class PolicyViolation(AA2Error):
     code = "POLICY_VIOLATION"
 

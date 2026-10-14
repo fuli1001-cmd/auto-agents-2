@@ -1,0 +1,859 @@
+{
+  "scope": "Command composition, JUnit identities, copied paused-state recovery, and real hermetic Chromium in bubblewrap. No live project state, provider profiles, approval or publication changed.",
+  "matrix_executions": 51,
+  "distinct_matrix_cases": 34,
+  "matrix": [
+    {
+      "case": "bare",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "declared-run",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "run-subcommand",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "script-run-flag",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "watch-false",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "no-watch",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "repeat-run",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "--run=true",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "reporter-existing",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "--reporter=junit",
+        "--reporter=json",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "report-path-existing",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "--outputFile",
+        "user-report.xml",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "report-map-existing",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "--outputFile.junit=user-report.xml",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "name-filter",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "-t",
+        "same title",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 2,
+      "skipped": 1,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "direct",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "./node_modules/.bin/vitest",
+        "run",
+        "--run",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "failed-hook",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "selected.test.js"
+      ],
+      "process_exit_code": 17,
+      "exit_code": 17,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [
+        "process_failed"
+      ],
+      "report_status": "valid"
+    },
+    {
+      "case": "failed-test",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "other.test.js"
+      ],
+      "process_exit_code": 1,
+      "exit_code": 1,
+      "tests": 0,
+      "skipped": 0,
+      "failure_reasons": [
+        "test_report_failed",
+        "insufficient_test_cases",
+        "process_failed"
+      ],
+      "report_status": "valid"
+    },
+    {
+      "case": "skip-only",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "skipped.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 1,
+      "tests": 0,
+      "skipped": 1,
+      "failure_reasons": [
+        "insufficient_test_cases"
+      ],
+      "report_status": "valid"
+    },
+    {
+      "case": "playwright-npm",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "npm",
+        "test",
+        "--",
+        "--reporter=dot",
+        "--reporter",
+        "junit",
+        "--output",
+        "test-results/requested",
+        "--grep",
+        "selection$",
+        "--workers=1"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 1,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "playwright-direct",
+      "versions": {
+        "vitest": "3.2.4",
+        "playwright": "1.55.0"
+      },
+      "argv": [
+        "./node_modules/.bin/playwright",
+        "test",
+        "--reporter=dot",
+        "--reporter",
+        "junit",
+        "--output",
+        "test-results/requested",
+        "--grep",
+        "selection$",
+        "--workers=1"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 1,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "bare",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "declared-run",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "run-subcommand",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "script-run-flag",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "watch-false",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "no-watch",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "repeat-run",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "--run=true",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "reporter-existing",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "--reporter=junit",
+        "--reporter=json",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "report-path-existing",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "--outputFile",
+        "user-report.xml",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "report-map-existing",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "--outputFile.junit=user-report.xml",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "name-filter",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "-t",
+        "same title",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 2,
+      "skipped": 1,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "direct",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "./node_modules/.bin/vitest",
+        "run",
+        "--run",
+        "selected.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "failed-hook",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "selected.test.js"
+      ],
+      "process_exit_code": 17,
+      "exit_code": 17,
+      "tests": 3,
+      "skipped": 0,
+      "failure_reasons": [
+        "process_failed"
+      ],
+      "report_status": "valid"
+    },
+    {
+      "case": "failed-test",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "other.test.js"
+      ],
+      "process_exit_code": 1,
+      "exit_code": 1,
+      "tests": 0,
+      "skipped": 0,
+      "failure_reasons": [
+        "test_report_failed",
+        "insufficient_test_cases",
+        "process_failed"
+      ],
+      "report_status": "valid"
+    },
+    {
+      "case": "skip-only",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "skipped.test.js"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 1,
+      "tests": 0,
+      "skipped": 1,
+      "failure_reasons": [
+        "insufficient_test_cases"
+      ],
+      "report_status": "valid"
+    },
+    {
+      "case": "playwright-npm",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "npm",
+        "test",
+        "--",
+        "--reporter=dot",
+        "--reporter",
+        "junit",
+        "--output",
+        "test-results/requested",
+        "--grep",
+        "selection$",
+        "--workers=1"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 1,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    },
+    {
+      "case": "playwright-direct",
+      "versions": {
+        "vitest": "4.0.18",
+        "playwright": "1.58.2"
+      },
+      "argv": [
+        "./node_modules/.bin/playwright",
+        "test",
+        "--reporter=dot",
+        "--reporter",
+        "junit",
+        "--output",
+        "test-results/requested",
+        "--grep",
+        "selection$",
+        "--workers=1"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 1,
+      "skipped": 0,
+      "failure_reasons": [],
+      "report_status": "valid"
+    }
+  ],
+  "t002_checks": [
+    {
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "src/domain/title.test.ts",
+        "src/api/tasks.test.ts"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 67,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "source_hash": "f482d1dc7374b566244710bd72256ed3652e064a64bd8e53a7a3c25ecc2d3e5d",
+      "report": {
+        "hash": "604f57ae67bea6adf521e13b11461e893ea6bbde1288f13284928a0c4d6b37bd",
+        "kind": "junit",
+        "bytes": 14348
+      }
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "source_hash": "f482d1dc7374b566244710bd72256ed3652e064a64bd8e53a7a3c25ecc2d3e5d",
+      "report": {}
+    }
+  ],
+  "recovery": {
+    "scope": "Copied paused T002 state with original plan and already verified runtime; real checks; no provider invocation or publication",
+    "recovered": true,
+    "plan_unchanged": true,
+    "budgets_unchanged": true,
+    "source_hash": "f482d1dc7374b566244710bd72256ed3652e064a64bd8e53a7a3c25ecc2d3e5d"
+  },
+  "browser": {
+    "argv": [
+      "npm",
+      "run",
+      "test:e2e",
+      "--",
+      "--workers=1"
+    ],
+    "process_exit_code": 0,
+    "exit_code": 0,
+    "tests": 1,
+    "report_status": "valid",
+    "failure_reasons": [],
+    "report": {
+      "hash": "71c0253875b2e99ab7c2967626f30013f3619e03e49aaa6a4a96343d1dfbe99e",
+      "kind": "junit",
+      "bytes": 543
+    },
+    "attachments": [
+      {
+        "path": ".last-run.json",
+        "artifact": {
+          "hash": "91d1c43004802cd49950d78eb11c8fa7d05da8ffffe219a8b13b2f561bc00903",
+          "kind": "test_attachment",
+          "bytes": 45
+        }
+      },
+      {
+        "path": "browser-real-Chromium-click-and-screenshot/attachments/page-49a349ea06403b435e268f3779b9b79d59e3b8fd.png",
+        "artifact": {
+          "hash": "6612f34169a31118862c78e06b0ecebc5c97d508663c6511d5eb664ad675452b",
+          "kind": "test_attachment",
+          "bytes": 5125
+        }
+      },
+      {
+        "path": "browser-real-Chromium-click-and-screenshot/page.png",
+        "artifact": {
+          "hash": "6612f34169a31118862c78e06b0ecebc5c97d508663c6511d5eb664ad675452b",
+          "kind": "test_attachment",
+          "bytes": 5125
+        }
+      }
+    ]
+  },
+  "raw_evidence": {
+    "matrix": "/tmp/aa2-command-matrix-9zojjh48/results.json",
+    "t002": "/tmp/aa2-t002-audit-b4pht0db/final-check-results.json",
+    "recovery": "/tmp/aa2-recovery-replay-4bo5qs85/result.json",
+    "browser": "/tmp/aa2-node-browser-u37rncis/results.json"
+  }
+}
