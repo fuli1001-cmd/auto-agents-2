@@ -1,5 +1,21 @@
 # 验证记录
 
+## 2026-10-14 检查采集与恢复链路修复
+
+demo 的原检查命令是 `python -B -m pytest`，旧检查器只识别紧邻解释器的 `-m pytest`，因此漏采 JUnit；随后又把用例数不足写入 `exit_code`，丢失原始进程状态。现按 Python 选项语法识别模块，记录 `process_exit_code`、验收 `exit_code` 与明确失败原因；新增 Vitest/Playwright 的 JUnit 采集，校验报告完整性并归档 Playwright 输出文件。真实前端执行还暴露并修复了 Vite `.vite-temp` 写入范围和 Playwright 删除输出挂载点的问题，预览与检查共用 Node 缓存目录声明。
+
+自动测试 **270 项通过，0 失败、0 跳过**（205.59 秒），ruff 与 `git diff --check` 通过。新增 42 项覆盖解释器选项、npm 脚本、实际沙箱中的命令执行、原始退出码、缺失/损坏/空/全部跳过报告、计数与身份冲突、缓存、附件、旧证据失效，以及重采事务中断、用户改动和无关回退保护。原验收断言保留，并补充旧检查器与输入变化不得计算进展的断言。
+
+使用 demo 候选的隔离副本、原 Python 3.12 环境及原验收命令，实际采集 **171 个通过用例、有效 JUnit、进程退出码 0、验收退出码 0**。Vitest 3.2.4 / Vite 7.3.7 和 Playwright 1.55.0 通过真实 npm 安装及 bubblewrap 验证：通过、真实失败、全部跳过共六种情形均正确判定；Playwright 文件附件在临时目录清理后仍可从归档读取。[实跑摘要](evidence/test-report-smoke.json) 保留版本、命令、结果与报告引用。
+
+旧现场恢复先核对候选与待回退响应，重新执行全部任务检查；全部通过才以事务替换反馈并归档对应回退请求。原回退理由继续交给模型复核，独立审查照常执行，轮数与停滞历史保留。本次未运行 demo 的真实模型续跑或完成其整轮交付；原项目状态保持在用户控制的暂停/等待边界。
+
+```bash
+.conda-env/bin/python -m pytest -q
+.conda-env/bin/python -m ruff check src tests
+.conda-env/bin/python tests/manual_test_reports.py /path/to/project-conda-prefix-with-node
+```
+
 ## 2026-10-14 清单路径契约修复
 
 修复规划字段缺少路径说明与预检，导致文件正文被当作文件名、直到开发完成才出现 `Invalid environment manifest` 的问题。schema 和规划指令明确区分路径与正文；规划校验失败进入规划修正，环境准备再次校验并报告具体字段，错误不回显输入正文。允许规划声明尚未生成的清单文件，仍在实际准备时核验存在性和边界。

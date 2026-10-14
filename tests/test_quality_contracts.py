@@ -156,12 +156,14 @@ async def test_corrupt_environment_gets_new_instance_without_destroying_old(tmp_
 
 
 def test_legacy_obligation_does_not_reset_progress(tmp_path):
+    from auto_agents_2.evidence import CHECKER_VERSION
     from auto_agents_2.models import CheckResult
     command = Command(argv=["python", "-c", "pass"])
     legacy = command.model_dump(exclude={"inputs"})
     key = "command/" + digest(legacy)
     previous = {"tracked": {"task": {key: False}}, "evaluations": 1, "stalled": 2}
     result = CheckResult(argv=command.argv, cwd=".", exit_code=0, output="", duration=0,
+                         checker_version=CHECKER_VERSION,
                          source_hash="source", environment_hash="env", command_hash=digest(command.model_dump()))
     criteria = check_criteria([command], [result], "source", "env")
     updated, decision = assess(previous, {"task": {"criteria": criteria}})

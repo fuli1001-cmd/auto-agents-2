@@ -30,7 +30,7 @@ from .errors import (
     PrototypeBrowserError,
     ProviderError,
 )
-from .evidence import invocation_identity, reusable
+from .evidence import CHECKER_VERSION, invocation_identity, reusable
 from .interaction import choice_spec, is_prototype_approval, question_text
 from .issues import IssueLedger
 from .models import (
@@ -52,6 +52,7 @@ from .research import ResearchService
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
 from .store import Store
+from .test_reports import test_runner
 from .util import atomic_write, digest, file_lock, identifier, scrub_text
 from .verification import VerificationService, passed
 from .workspace import WorkspaceManager, apply_prepared, git, legacy_tree_hash, prepare_changes, tree_hash
@@ -121,7 +122,8 @@ class WorkflowEngine:
                 while True:
                     try:
                         if self.store.get(rid, "replanning/pending"):
-                            await self._resume_replan(rid)
+                            if not await self._refresh_legacy_task_checks(rid):
+                                await self._resume_replan(rid)
                         return await self._execute(rid)
                     except Replan as exc:
                         self.store.prepare_replan(rid, exc.stage, exc.reason)
@@ -181,6 +183,57 @@ class WorkflowEngine:
         archived = self.archive_workers(rid, pending["generation"])
         self.store.supersede_questions(rid, f"replan-stalled/{pending['evaluation']}")
         self.store.complete_replan(rid, STAGES[STAGES.index(pending["stage"]):], archived)
+
+    async def _refresh_legacy_task_checks(self, rid):
+        """Recheck a pending task whose old checker missed a supported test runner.
+
+        Only an unchanged candidate and a replan bound to that task's exact saved
+        response qualify. Fresh checks replace feedback, never independent review.
+        """
+        pending = self.store.get(rid, "replanning/pending", {})
+        plan_data = self.store.get(rid, "plan")
+        if pending.get("stage") != "plan" or not plan_data:
+            return False
+        plan = PlanResult.model_validate(plan_data)
+        for task in plan.tasks:
+            key = f"develop/task/{task.id}"
+            saved = self.store.get(rid, key, {})
+            invocation = self.store.get(rid, "invocation/" + key, {})
+            proposal = invocation.get("result", {})
+            if (saved.get("phase") != "implementing" or saved.get("implementation")
+                    or proposal.get("replan_stage") != "plan" or proposal.get("changes")
+                    or proposal.get("replan_reason") != pending["reason"]):
+                continue
+            previous = [CheckResult.model_validate(row) for row in saved.get("feedback", {}).get("checks", [])]
+            work = self.store.root / "worktrees" / rid / f"{task.id}-p{pending['generation']}"
+            if not work.is_dir() or work.is_symlink() or not previous:
+                continue
+            source = tree_hash(work)
+            if any(row.source_hash != source for row in previous):
+                continue
+            affected = any(row.checker_version == "verification-v2" and row.tests == 0 and not row.report
+                           and test_runner(row.argv, work if row.cwd == "." else work / row.cwd)
+                           and any(row.command_hash == digest(command.model_dump()) for command in task.checks)
+                           for row in previous)
+            if not affected:
+                continue
+            recovery_key = f"candidate/verification-recovery/{task.id}/p{pending['generation']}"
+            record = {"pending": pending, "task": saved, "invocation": invocation,
+                      "workspace": str(work), "checker_version": CHECKER_VERSION}
+            self.store.checkpoint(rid, recovery_key, record)
+            with observe_activity(self.store, rid, f"重新采集检查证据（{task.id}）"):
+                environment = await self._environment(work, rid, plan)
+                checks = await self.verifier.run(task.checks, work, environment)
+            record["checks"] = [row.model_dump() for row in checks]
+            self.store.checkpoint(rid, recovery_key, record)
+            if not reusable(task.checks, checks, work, environment, self.artifacts).allowed or tree_hash(work) != source:
+                return False
+            updated = {**saved, "feedback": {**saved.get("feedback", {}), "checks": record["checks"],
+                       "controller_recheck": {"previous_request": proposal, "checker_version": CHECKER_VERSION}}}
+            self.store.recover_verification_replan(rid, pending, key, saved, updated, recovery_key, record)
+            self._replan_checks(rid, f"task/{task.origin_id or task.id}", task.checks, checks, work, environment)
+            return True
+        return False
 
     async def _collect_periodically(self, rid, owner):
         elapsed = 0
@@ -854,10 +907,10 @@ class WorkflowEngine:
                 if counters["round"] >= self.config.load().execution.max_rounds:
                     break
                 counters["round"] += 1
-                saved = {"phase": "implementing", "feedback": {k: v for k, v in saved.items() if k in {"checks", "review", "environment_error", "candidate_error"}}}
+                saved = {"phase": "implementing", "feedback": {k: v for k, v in saved.items() if k in {"checks", "review", "environment_error", "candidate_error", "controller_recheck"}}}
                 self.store.checkpoints(rid, {key: saved, counter_key: counters})
             previous_feedback = saved.get("feedback", saved)
-            feedback = {k: previous_feedback[k] for k in ("phase", "checks", "review", "environment_error", "candidate_error") if k in previous_feedback}
+            feedback = {k: previous_feedback[k] for k in ("phase", "checks", "review", "environment_error", "candidate_error", "controller_recheck") if k in previous_feedback}
             feedback = json.loads(json.dumps(feedback))
             task_context = {"task": task.model_dump(), "specification": context["specification"],
                             "design": context.get("design"), "feedback": feedback, "unresolved_issues": IssueLedger(self.store, self.artifacts).unresolved(rid),
@@ -1222,13 +1275,13 @@ class WorkflowEngine:
             return
 
     def _candidate_checks(self, plan):
-        # Legacy task gates cannot supply v2 proof. Recheck their fixed obligations,
+        # Legacy task gates cannot supply current proof. Recheck their fixed obligations,
         # without rerunning implementation or resetting task budgets.
         legacy = []
         run = self.store.current(unfinished=True)
         if run:
             for task in plan.tasks:
                 evidence = self.store.get(run["id"], f"develop/task/{task.id}", {}).get("checks", [])
-                if not evidence or any(row.get("checker_version") != "verification-v2" for row in evidence):
+                if not evidence or any(row.get("checker_version") != CHECKER_VERSION for row in evidence):
                     legacy.extend(task.checks)
         return list({digest(c.model_dump()): c for c in [*legacy, *plan.final_checks, *plan.runtime_prepare, *plan.runtime_probes]}.values())

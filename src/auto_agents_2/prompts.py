@@ -52,6 +52,14 @@ in its selected channels and platform. A version installed on the host is not ev
 Conda publishes it. Preserve required runtime constraints; request replanning if the repair
 requires changes outside the task's allowed paths or accepted design. aa2 must resolve the
 revised manifest and rerun checks before approval.
+CheckResult.process_exit_code is the actual process status; exit_code is the controller's
+acceptance status and failure_reasons explains rejection. Missing/invalid reports are not
+proof of a product defect. The controller collects JUnit for pytest (including Python flags),
+Vitest and Playwright, directly or through simple npm scripts. Keep nonzero expected_tests
+for test suites. An unsupported wrapper requires a supported direct runner command, never
+weaker assertions or a reduced expected_tests. Rechecking old evidence still requires review.
+For controller_recheck feedback, reassess the complete previous_request against fresh checks;
+retain any unresolved design/scope concerns and request replanning again if still warranted.
 Multiple replace changes to one file run in list order in memory; each old_text must
 match exactly once in the content after preceding replacements. Never mix write/delete
 with another change to the same file. All changes are validated before any file is written.

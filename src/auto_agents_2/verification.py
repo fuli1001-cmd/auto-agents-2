@@ -10,7 +10,13 @@ from .artifacts import ArtifactStore
 from .config import Cleanup
 from .environment import Environment
 from .errors import PolicyViolation
-from .evidence import check_environment, input_identity, runtime_configuration
+from .evidence import (
+    CHECKER_VERSION,
+    NODE_RUNTIME_CACHES,
+    check_environment,
+    input_identity,
+    runtime_configuration,
+)
 from .logs import SanitizedLog
 from .models import CheckResult, Command
 from .progress import Activity
@@ -18,6 +24,7 @@ from .readview import sensitive_values
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
 from .store import Store
+from .test_reports import is_python, read_junit, report_command, test_runner
 from .util import SECRET, contained, digest
 from .workspace import tree_hash
 
@@ -67,22 +74,29 @@ class VerificationService:
         if environment:
             if executable in {"pytest", "py.test"}:
                 argv = [str(environment.prefix / "bin/python"), "-m", "pytest", *argv[1:]]
-            elif executable in {"python", "python3"}:
+            elif is_python(executable):
                 argv[0] = str(environment.prefix / "bin/python")
             else:
-                resolved = shutil.which(argv[0], path=env["PATH"])
+                requested = argv[0]
+                if "/" in requested and not Path(requested).is_absolute():
+                    requested = str(cwd / requested)
+                elif executable in {"vitest", "playwright"} and requested == executable:
+                    local = cwd / "node_modules/.bin" / executable
+                    if local.is_file():
+                        requested = str(local)
+                resolved = shutil.which(requested, path=env["PATH"])
                 allowed = (environment.prefix.resolve(), workspace.resolve())
                 if not resolved or not any(Path(resolved).absolute().is_relative_to(p) for p in allowed):
                     raise PolicyViolation("Verification executable is not owned by the selected environment or workspace")
                 argv[0] = resolved
             if not Path(argv[0]).is_file():
                 raise PolicyViolation("Verification interpreter is missing from the selected environment")
-        pytest = executable in {"pytest", "py.test"} or argv[1:3] == ["-m", "pytest"]
+        runner = test_runner(command.argv, cwd)
         report_file = scratch / "junit.xml"
-        if pytest:
-            argv += [f"--junitxml={report_file}", "-p", "no:cacheprovider"]
+        argv, report_env = report_command(argv, runner, report_file)
+        env.update(report_env)
         outputs = [scratch, cwd / ".pytest_cache", cwd / ".next", cwd / "dist", cwd / "test-results",
-                   cwd / "node_modules/.vite", cwd / "node_modules/.cache", cwd / "node_modules/.tmp"]
+                   *(cwd / "node_modules" / name for name in sorted(NODE_RUNTIME_CACHES))]
         start = time.monotonic()
         secrets = [v for k, v in env.items() if SECRET.search(k)] + sensitive_values(workspace)
         logs = [SanitizedLog(log_root / "stdout.log", secrets), SanitizedLog(log_root / "stderr.log", secrets)]
@@ -125,32 +139,60 @@ class VerificationService:
         output = "".join(log.tail for log in logs)
         # Stdout is diagnostic text, not controller-owned test-case evidence.
         tests, skipped = 0, 0
-        test_ids, passed_test_ids, report, report_valid = [], [], {}, not pytest
-        if pytest and report_file.is_file():
+        test_ids, passed_test_ids, report = [], [], {}
+        reasons = []
+        report_status = "not_required" if not runner else "missing"
+        if runner and report_file.is_file():
+            report = self.artifacts.put_file(report_file, "junit")
             try:
-                raw = report_file.read_text()
-                cases = ET.fromstring(raw).findall(".//testcase")
-                tests = sum(not any(case.find(k) is not None for k in ("failure", "error", "skipped")) for case in cases)
-                skipped = sum(case.find("skipped") is not None for case in cases)
-                test_ids = [case.get("classname", "") + "::" + case.get("name", "") for case in cases]
-                passed_test_ids = [name for name, case in zip(test_ids, cases)
-                                   if not any(case.find(k) is not None for k in ("failure", "error", "skipped"))]
-                report = self.artifacts.put(raw)
-                report_valid = bool(cases) and not any(case.find(k) is not None for case in cases for k in ("failure", "error"))
-            except (ET.ParseError, UnicodeError):
-                output += "\nInvalid controller-owned JUnit report."
+                with report_file.open("rb") as stream:
+                    cases = read_junit(stream.read(32 * 1024 * 1024 + 1))
+                test_ids, passed_test_ids = cases.ids, cases.passed
+                tests, skipped, report_status = len(cases.passed), cases.skipped, "valid"
+                if cases.failures:
+                    reasons.append("test_report_failed")
+            except (ET.ParseError, ValueError):
+                report_status = "invalid"
+        attachments = []
+        attachment_root = scratch / "playwright-results"
+        if runner == "playwright" and attachment_root.is_dir():
+            for file in sorted(attachment_root.rglob("*")):
+                if file.is_file() and not file.is_symlink():
+                    attachments.append({"path": file.relative_to(attachment_root).as_posix(),
+                                        "artifact": self.artifacts.put_file(file, "test_attachment")})
+        if runner and report_status != "valid":
+            reasons.append("test_report_" + report_status)
+        if not runner and command.expected_tests:
+            reasons.append("unsupported_test_runner")
+        if tests < max(command.expected_tests, int(bool(runner))):
+            reasons.append("insufficient_test_cases")
+        if timed_out:
+            reasons.append("timeout")
+        if not all(log.complete for log in logs):
+            reasons.append("incomplete_log_capture")
+        if input_identity(workspace, command) != inputs_before:
+            reasons.append("execution_inputs_changed")
+        if tree_hash(workspace) != baseline:
+            reasons.append("source_changed")
+        if process.returncode != 0:
+            reasons.append("process_failed")
         code = process.returncode if process.returncode is not None else -1
-        if timed_out or input_identity(workspace, command) != inputs_before or tree_hash(workspace) != baseline or tests < max(command.expected_tests, int(pytest)) or not report_valid:
+        if reasons:
             code = code or 1
+            output += "\nController verification rejected: " + ", ".join(reasons) + "."
         return CheckResult(argv=command.argv, cwd=command.cwd, exit_code=code, output=output,
+                           process_exit_code=process.returncode, failure_reasons=reasons,
+                           test_runner=runner, report_status=report_status,
+                           attachments=attachments,
                            duration=time.monotonic() - start, source_hash=baseline,
                            environment_hash=environment.fingerprint if environment else "host",
                            command_hash=digest(command.model_dump()),
-                           effective_argv=argv, checker_version="verification-v2", input_hash=inputs_before,
+                           effective_argv=argv, checker_version=CHECKER_VERSION, input_hash=inputs_before,
                            runtime_config_hash=runtime_config, logs=log_refs,
                            tests=tests, skipped=skipped, timed_out=timed_out, test_ids=test_ids,
                            passed_test_ids=passed_test_ids, report=report)
 
 
 def passed(results: list[CheckResult]) -> bool:
-    return bool(results) and all(r.exit_code == 0 and not r.timed_out for r in results)
+    return bool(results) and all(r.exit_code == 0 and not r.timed_out and not r.failure_reasons
+                                 and r.process_exit_code in {None, 0} for r in results)

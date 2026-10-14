@@ -8,6 +8,7 @@ from test_workflow import CodingAgent, engine
 
 from auto_agents_2.config import Execution
 from auto_agents_2.engine import Replan
+from auto_agents_2.evidence import CHECKER_VERSION
 from auto_agents_2.models import BrowserAction, CheckResult, Command
 from auto_agents_2.replanning import assess, browser_criteria, check_criteria
 from auto_agents_2.util import digest
@@ -64,10 +65,14 @@ def test_check_progress_requires_current_source_environment_and_actual_junit_cas
     command = Command(argv=["pytest", "tests"], expected_tests=2)
     result = CheckResult(argv=command.argv, cwd=".", exit_code=1, duration=1, output="999 passed",
                          source_hash="source", environment_hash="env", tests=999,
+                         checker_version=CHECKER_VERSION, report_status="valid",
                          command_hash=digest(command.model_dump()),
                          test_ids=["a", "b"], passed_test_ids=["a"], report={"hash": "report"})
     criteria = check_criteria([command], [result], "source", "env")
     assert sum(criteria.values()) == 1
+    for update in ({"checker_version": "verification-v2"}, {"failure_reasons": ["execution_inputs_changed"]},
+                   {"failure_reasons": ["incomplete_log_capture"]}, {"report_status": "invalid"}):
+        assert not any(check_criteria([command], [result.model_copy(update=update)], "source", "env").values())
     assert not any(check_criteria([command], [result], "changed", "env").values())
     assert not any(check_criteria([command], [result], "source", "changed").values())
     stale = result.model_copy(update={"command_hash": "different check contract"})

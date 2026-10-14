@@ -19,6 +19,8 @@ STAGE_LABELS = {"clarify": "需求澄清", "coverage_review": "需求覆盖审�
 def agent_label(data):
     stage, operation = data["stage"], data.get("operation", "")
     label = STAGE_LABELS.get(stage, stage)
+    if stage == "implement":
+        label = {"dependencies": "修复依赖清单", "checks": "修复检查问题"}.get(data.get("repair_kind"), label)
     for key, value in (("prototype-review", "原型自动审查"), ("reintegration-prototype", "集成后原型审查"),
                        ("plan-review", "任务规划审查"), ("test-change-review", "测试与配置变更审查")):
         if key in operation:

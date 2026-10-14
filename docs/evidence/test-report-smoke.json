@@ -1,0 +1,199 @@
+{
+  "scope": "Real pytest, Vitest and Playwright report collection in read-only bubblewrap execution; no provider or live-project state mutation.",
+  "packages": {
+    "vitest": "3.2.4",
+    "vite": "7.3.7",
+    "@playwright/test": "1.55.0"
+  },
+  "backend": [
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-c",
+        "import sys; assert sys.version_info >= (3, 12), '需要 Python 3.12 或更高版本'; print(sys.version)"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "source_hash": "465a3d65191c737fe9c6f0730b6abce0fe2b8b092dd81c04f0d9b3ea6f5a5945",
+      "report": {}
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 171,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "source_hash": "465a3d65191c737fe9c6f0730b6abce0fe2b8b092dd81c04f0d9b3ea6f5a5945",
+      "report": {
+        "hash": "b11979b485ccdae51acc6427d6ca92388876301113c21c0b503568b02e17b7ec",
+        "kind": "junit",
+        "bytes": 19130
+      }
+    }
+  ],
+  "node": [
+    {
+      "runner": "vitest",
+      "scenario": "passing",
+      "argv": [
+        "npm",
+        "run",
+        "test"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 1,
+      "skipped": 1,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "report": {
+        "hash": "bd31741aefd573bb862002d0f65cb20a706f34b9e858b7394c4670b2f080d459",
+        "kind": "junit",
+        "bytes": 533
+      },
+      "archived_files": []
+    },
+    {
+      "runner": "vitest",
+      "scenario": "failing",
+      "argv": [
+        "npm",
+        "run",
+        "test"
+      ],
+      "process_exit_code": 1,
+      "exit_code": 1,
+      "tests": 0,
+      "skipped": 1,
+      "report_status": "valid",
+      "failure_reasons": [
+        "test_report_failed",
+        "insufficient_test_cases",
+        "process_failed"
+      ],
+      "report": {
+        "hash": "b397fdbcc277c492dd42cb744e46d2bc0822d2788a9e72bceb9077912266d6d5",
+        "kind": "junit",
+        "bytes": 767
+      },
+      "archived_files": []
+    },
+    {
+      "runner": "vitest",
+      "scenario": "skip_only",
+      "argv": [
+        "npm",
+        "run",
+        "test"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 1,
+      "tests": 0,
+      "skipped": 2,
+      "report_status": "valid",
+      "failure_reasons": [
+        "insufficient_test_cases"
+      ],
+      "report": {
+        "hash": "a86b82ba9487d0920e76c8ea1730d02f48b2bf9ae9179a04b88dce96607ec18c",
+        "kind": "junit",
+        "bytes": 526
+      },
+      "archived_files": []
+    },
+    {
+      "runner": "playwright",
+      "scenario": "passing",
+      "argv": [
+        "npm",
+        "run",
+        "test:e2e"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 1,
+      "skipped": 1,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "report": {
+        "hash": "0112269982cf7d57ea2048a6f0d4a2cfda31c03695300646eb4bbbc537cd6fb8",
+        "kind": "junit",
+        "bytes": 671
+      },
+      "archived_files": [
+        ".last-run.json",
+        "browser-sum/attachments/diagnostic-d296b302886126765fb74cf3552274c8862392fe.txt",
+        "browser-sum/diagnostic.txt"
+      ]
+    },
+    {
+      "runner": "playwright",
+      "scenario": "failing",
+      "argv": [
+        "npm",
+        "run",
+        "test:e2e"
+      ],
+      "process_exit_code": 1,
+      "exit_code": 1,
+      "tests": 0,
+      "skipped": 1,
+      "report_status": "valid",
+      "failure_reasons": [
+        "test_report_failed",
+        "insufficient_test_cases",
+        "process_failed"
+      ],
+      "report": {
+        "hash": "2d574effad38b17e8ebdf43355ac99cee6dae1737bf67166161a4e3169b47f8d",
+        "kind": "junit",
+        "bytes": 2566
+      },
+      "archived_files": [
+        ".last-run.json",
+        "browser-sum/attachments/diagnostic-a3c6c14c00a2d6cbc7a877b81f2cdda9685af68b.txt",
+        "browser-sum/diagnostic.txt"
+      ]
+    },
+    {
+      "runner": "playwright",
+      "scenario": "skip_only",
+      "argv": [
+        "npm",
+        "run",
+        "test:e2e"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 1,
+      "tests": 0,
+      "skipped": 2,
+      "report_status": "valid",
+      "failure_reasons": [
+        "insufficient_test_cases"
+      ],
+      "report": {
+        "hash": "fbe556eb96a015e2ffc9cc19368b2c58cd51e6ebea0c466578c823ac721623ce",
+        "kind": "junit",
+        "bytes": 601
+      },
+      "archived_files": [
+        ".last-run.json"
+      ]
+    }
+  ],
+  "backend_evidence": "/tmp/aa2-demo-verification-x0djhcdg/final-results.json",
+  "node_evidence": "/tmp/aa2-real-test-reports-dc6uqw04/results.json"
+}

@@ -144,6 +144,11 @@ class CheckResult(Record):
     argv: list[str]
     cwd: str
     exit_code: int
+    process_exit_code: int | None = None
+    failure_reasons: list[str] = []
+    test_runner: str = ""
+    report_status: str = ""
+    attachments: list[dict] = []
     output: str
     duration: float
     source_hash: str

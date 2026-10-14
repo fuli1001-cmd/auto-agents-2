@@ -8,8 +8,9 @@ from pathlib import Path
 from .util import contained, digest
 from .workspace import input_entry, tree_hash
 
-CHECKER_VERSION = "verification-v2"
-RUNTIME_CACHES = {"__pycache__", ".cache", ".vite", ".tmp", ".pytest_cache"}
+CHECKER_VERSION = "verification-v3"
+NODE_RUNTIME_CACHES = {".cache", ".vite", ".vite-temp", ".tmp"}
+RUNTIME_CACHES = {"__pycache__", ".pytest_cache", *NODE_RUNTIME_CACHES}
 
 
 def input_identity(workspace, command):
@@ -54,7 +55,9 @@ def reusable(commands, results, workspace: Path, environment, artifacts=None):
                 or result.input_hash != input_identity(workspace, command)
                 or result.runtime_config_hash != runtime_configuration(workspace, command, environment)):
             return ReuseDecision(False, "execution inputs, environment, command or checker changed")
-        if result.timed_out or result.exit_code:
+        if (result.timed_out or result.exit_code or result.failure_reasons
+                or result.process_exit_code != 0 or result.tests < command.expected_tests
+                or result.test_runner and (result.report_status != "valid" or not result.report or result.tests < 1)):
             return ReuseDecision(False, "unsuccessful observation")
         if artifacts:
             try:
@@ -63,7 +66,9 @@ def reusable(commands, results, workspace: Path, environment, artifacts=None):
                         artifacts.bytes(ref)
                 if result.report:
                     artifacts.bytes(result.report)
-            except (OSError, ValueError):
+                for attachment in result.attachments:
+                    artifacts.bytes(attachment["artifact"])
+            except (OSError, ValueError, KeyError, TypeError):
                 return ReuseDecision(False, "evidence artifact unavailable or changed")
     return ReuseDecision(True, "complete matching controller evidence")
 

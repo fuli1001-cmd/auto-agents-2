@@ -6,6 +6,7 @@ The historical best is monotone, so regression/recovery cycles get no repeat cre
 """
 from __future__ import annotations
 
+from .evidence import CHECKER_VERSION
 from .util import digest
 
 
@@ -46,12 +47,17 @@ def check_criteria(commands, results, source_hash: str, environment_hash: str) -
         obligation = {k: v for k, v in data.items() if k != "inputs" or v}
         key = digest(obligation)
         result = actual.get((tuple(command.argv), command.cwd, digest(data)))
-        valid = bool(result and result.command_hash == digest(data) and not result.timed_out and result.source_hash == source_hash
+        invalid_evidence = {"execution_inputs_changed", "source_changed", "incomplete_log_capture",
+                            "test_report_missing", "test_report_invalid", "unsupported_test_runner"}
+        valid = bool(result and result.checker_version == CHECKER_VERSION
+                     and not invalid_evidence.intersection(result.failure_reasons)
+                     and result.command_hash == digest(data) and not result.timed_out and result.source_hash == source_hash
                      and result.environment_hash == environment_hash)
         criteria["command/" + key] = bool(valid and result.exit_code == 0)
         if result:
             for test_id in result.test_ids:
-                criteria[f"test/{key}/{test_id}"] = bool(valid and result.report and test_id in result.passed_test_ids)
+                criteria[f"test/{key}/{test_id}"] = bool(valid and result.report_status == "valid"
+                                                       and result.report and test_id in result.passed_test_ids)
     return criteria
 
 

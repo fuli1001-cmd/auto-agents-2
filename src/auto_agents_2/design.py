@@ -14,6 +14,7 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 import httpx
 
 from .errors import AA2Error, PrototypeBrowserError
+from .evidence import NODE_RUNTIME_CACHES
 from .progress import capture_output, current_activity
 from .sandbox import SandboxRunner
 from .util import atomic_write, digest, scrub_text
@@ -231,7 +232,8 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
         raise AA2Error("Preview command must contain a {port} placeholder")
     cwd = workspace if spec.command.cwd == "." else contained(workspace, spec.command.cwd)
     process = await sandbox.spawn(argv, cwd, environment.variables(scratch),
-                                  [scratch, cwd / ".next", cwd / "dist", cwd / "node_modules/.vite"], [environment.prefix])
+                                  [scratch, cwd / ".next", cwd / "dist",
+                                   *(cwd / "node_modules" / name for name in sorted(NODE_RUNTIME_CACHES))], [environment.prefix])
     # Drain pipes to avoid deadlocking a long-running server; retain a bounded diagnostic tail.
     tail = []
 
