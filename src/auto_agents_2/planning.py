@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from .dependencies import manifest_reference
 from .errors import AA2Error
 from .models import PlanResult, TaskSpec
 from .workspace import path_allowed
 
 
 def validate_plan(plan: PlanResult, requirement_ids: set[str]):
+    manifest_reference(plan.environment_file, "environment_file")
+    manifest_reference(plan.requirements_file, "requirements_file")
     tasks = {t.id: t for t in plan.tasks}
     if len(tasks) != len(plan.tasks):
         raise AA2Error("Duplicate task IDs")

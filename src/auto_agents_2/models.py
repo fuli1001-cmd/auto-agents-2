@@ -102,8 +102,12 @@ class PlanResult(Record):
     document: str
     tasks: list[TaskSpec] = Field(min_length=1)
     final_checks: list[Command] = Field(min_length=1)
-    environment_file: str = ""
-    requirements_file: str = ""
+    environment_file: str = Field(default="", description=(
+        "Workspace-root-relative PATH to a Conda YAML file, e.g. environment.yml, or empty for discovery. "
+        "Never put YAML contents here. The implementing task must create the declared file before environment preparation."))
+    requirements_file: str = Field(default="", description=(
+        "Workspace-root-relative PATH to a pip requirements file, e.g. requirements.txt, or empty for discovery. "
+        "Never put package lists or file contents here. The implementing task must create the declared file."))
     preview: PreviewSpec | None = None
     runtime_prepare: list[Command] = []
     runtime_probes: list[Command] = []

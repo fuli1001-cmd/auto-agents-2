@@ -4,7 +4,7 @@ import json
 
 from .research import request_documents
 
-PROMPT_VERSION = "2026-10-14.3"
+PROMPT_VERSION = "2026-10-14.4"
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
     "gemini": "https://ai.google.dev/gemini-api/docs/prompting-strategies#gemini-3",
@@ -92,6 +92,11 @@ class PromptCompiler:
         }.get(family, "Follow the task contract precisely.")
         data = json.dumps(request_documents(context), ensure_ascii=False, indent=2)
         task = ROLES.get(stage, ROLES["review"])
+        if stage == "plan" or stage == "review" and context.get("review_kind") == "plan":
+            task += (" environment_file and requirements_file are workspace-root-relative file PATHS, "
+                     "such as environment.yml and requirements.txt, never file contents or package lists. "
+                     "Empty values select automatic discovery. Assign creation of declared manifests to the "
+                     "appropriate implementation task before environment preparation; planning does not write these files.")
         if stage == "review":
             kind = context.get("review_kind", "implementation")
             task += {

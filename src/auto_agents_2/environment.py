@@ -14,7 +14,7 @@ import yaml
 
 from .artifacts import ArtifactStore
 from .config import ConfigStore
-from .dependencies import copy_execution_source, pip_inputs
+from .dependencies import copy_execution_source, manifest_reference, pip_inputs
 from .diagnostics import DiagnosticOperation, current_diagnostics
 from .errors import AA2Error
 from .evidence import RUNTIME_CACHES
@@ -53,11 +53,13 @@ class EnvironmentManager:
     async def ensure(self, workspace: Path, profile: str, environment_file="", requirements_file="") -> Environment:
         cfg = self.config.load().environment
         conda_name, pip_name = environment_file or cfg.environment_file, requirements_file or cfg.requirements_file
+        manifest_reference(conda_name, "environment_file")
+        manifest_reference(pip_name, "requirements_file")
         conda_file = workspace / conda_name if conda_name else None
         if conda_file is None and (workspace / "environment.yml").exists():
             conda_file = workspace / "environment.yml"
         if conda_file and (not conda_file.resolve().is_relative_to(workspace.resolve()) or not conda_file.is_file()):
-            raise AA2Error("Invalid environment manifest")
+            raise AA2Error("environment_file must refer to an existing file inside the execution workspace")
         conda_document, extra_pip = None, []
         if conda_file:
             try:

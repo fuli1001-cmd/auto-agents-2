@@ -671,7 +671,10 @@ class WorkflowEngine:
             if stage == "plan":
                 self._replan_contract(rid, "plan", False)
                 unmet = {c.requirement_id for c in result.coverage if c.status != "satisfied"} or {r.id for r in result.requirements}
-                validate_plan(document, unmet)
+                try:
+                    validate_plan(document, unmet)
+                except AA2Error as exc:
+                    raise Replan("plan", str(exc)) from exc
                 if not document.runtime_probes:
                     raise Replan("plan", "Declare lightweight runtime_probes that exercise the implemented application without user/production data writes")
                 prior = self.store.get(rid, "task_origins", {})

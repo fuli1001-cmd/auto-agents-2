@@ -5,10 +5,24 @@ import re
 import shlex
 import tomllib
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .errors import AA2Error
 from .util import contained
+
+
+def manifest_reference(value: str, field: str) -> str:
+    """Selectors are literal workspace-relative paths, never inline dependency text."""
+    if not value:
+        return value
+    path = PurePosixPath(value)
+    if (value != value.strip() or not path.parts or path.is_absolute() or ".." in path.parts
+            or value.startswith("-") or any(ord(c) < 32 or ord(c) == 127 for c in value)
+            or any(c in value for c in "\\:<>|?*=[]{};")):
+        example = "environment.yml" if field == "environment_file" else "requirements.txt"
+        raise AA2Error(f"{field} must be a workspace-relative file path such as {example}, "
+                       "or empty for discovery; file contents, dependency expressions and external paths are not accepted")
+    return value
 
 
 @dataclass
