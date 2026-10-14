@@ -618,6 +618,8 @@ class WorkflowEngine:
                 if not document.runtime_probes:
                     raise Replan("plan", "Declare lightweight runtime_probes that exercise the implemented application without user/production data writes")
                 prior = self.store.get(rid, "task_origins", {})
+                # Validate against history, not tasks newly registered in this plan.
+                origins = dict(prior)
                 for task in document.tasks:
                     if task.id in prior:
                         task.origin_id = prior[task.id]
@@ -625,8 +627,8 @@ class WorkflowEngine:
                         raise Replan("plan", f"Replacement task {task.id} must retain an existing origin_id so budgets cannot reset")
                     else:
                         task.origin_id = task.origin_id or task.id
-                    prior[task.id] = task.origin_id
-                self.store.checkpoint(rid, "task_origins", prior)
+                    origins[task.id] = task.origin_id
+                self.store.checkpoint(rid, "task_origins", origins)
                 if result.frontend and document.preview is None:
                     raise Replan("plan", "Frontend plan requires a runnable preview and route mapping")
                 self._replan_contract(rid, "plan", True)

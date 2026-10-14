@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from auto_agents_2.config import ConfigStore
-from auto_agents_2.engine import WorkflowEngine
+from auto_agents_2.engine import Replan, WorkflowEngine
 from auto_agents_2.environment import Environment
 from auto_agents_2.models import (
     Change,
@@ -325,3 +325,87 @@ async def test_replan_renaming_preserves_budget_and_reclaims_previous_worker(tmp
     assert result["status"] == "SUCCEEDED"
     assert workflow.store.get(result["id"], "rounds/T1")["round"] == 2
     assert workflow.store.get(result["id"], "rounds/T1_REVISED") is None
+
+
+@pytest.mark.parametrize("explicit_origins", [False, True])
+async def test_first_multitask_plan_preserves_independent_budgets_after_review_interruption(tmp_path, explicit_origins):
+    project = tmp_path / "project"
+    project.mkdir()
+    requirements = tmp_path / "requirements.md"
+    requirements.write_text("Add two numbers, including negative operands")
+
+    class MultitaskAgent(CodingAgent):
+        interrupt_plan_review = True
+
+        async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
+            if operation == "plan-review" and self.interrupt_plan_review:
+                self.interrupt_plan_review = False
+                raise asyncio.CancelledError()
+            if stage == "implement" and context["task"]["id"] == "T2":
+                return ImplementationResult(summary="Cover negative operands", changes=[Change(
+                    path="tests/test_negative.py",
+                    content="from calc import add\n\ndef test_negative():\n    assert add(-2, -3) == -5\n")])
+            result = await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
+            if stage == "plan":
+                # A DAG need not be listed in execution order.
+                result.tasks.insert(0, TaskSpec(
+                    id="T2", title="Negative operands", description="Verify addition of negative operands",
+                    requirement_ids=["R1"], depends_on=["T1"], allowed_paths=["tests/test_negative.py"],
+                    acceptance=["-2 + -3 == -5"], checks=[Command(
+                        argv=[sys.executable, "-m", "pytest", "-q", "tests/test_negative.py"], expected_tests=1)]))
+                result.final_checks = [Command(argv=[sys.executable, "-m", "pytest", "-q", "tests"], expected_tests=2)]
+                if explicit_origins:
+                    for task in result.tasks:
+                        task.origin_id = task.id
+            return result
+
+    agent = MultitaskAgent()
+    workflow = engine(project, agent)
+    with pytest.raises(asyncio.CancelledError):
+        await workflow.start(str(requirements))
+    rid = workflow.store.current()["id"]
+    assert workflow.store.get(rid, "task_origins") == {"T1": "T1", "T2": "T2"}
+    assert workflow.store.get(rid, "plan") is None
+    assert workflow.store.get(rid, "rounds/T1") is None
+    assert workflow.store.get(rid, "rounds/T2") is None
+
+    workflow = engine(project, agent)
+    result = await workflow.start()
+    assert result["status"] == "SUCCEEDED"
+    assert result["data"]["replans"] == 0
+    assert workflow.store.get(rid, "task_origins") == {"T1": "T1", "T2": "T2"}
+    assert workflow.store.get(rid, "rounds/T1")["round"] == 1
+    assert workflow.store.get(rid, "rounds/T2")["round"] == 1
+    assert workflow.store.get(rid, "develop/done") == ["T1", "T2"]
+    assert workflow.store.get(rid, "verify/checks")[0]["tests"] == 2
+
+
+@pytest.mark.parametrize("invalid_origin", ["", "T2", "T1_REVISED"])
+async def test_replacement_plan_rejects_new_origins_without_persisting_partial_mapping(tmp_path, invalid_origin):
+    project = tmp_path / "project"
+    project.mkdir()
+    requirements = tmp_path / "requirements.md"
+    requirements.write_text("Add two numbers")
+
+    class ReplacementAgent(CodingAgent):
+        async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
+            result = await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
+            if stage == "plan":
+                assert context["task_origins"] == {"T1": "T1"}
+                result.tasks[0].id = "T1_REVISED"
+                result.tasks[0].origin_id = "T1"
+                result.tasks.append(result.tasks[0].model_copy(update={"id": "T2", "origin_id": invalid_origin}))
+            return result
+
+    workflow = engine(project, ReplacementAgent())
+    rid = workflow.store.admit(str(requirements), {})["id"]
+    workflow.store.checkpoint(rid, "task_origins", {"T1": "T1"})
+    counters = {"round": 3, "stalled": 1, "failure": "previous failure"}
+    workflow.store.checkpoint(rid, "rounds/T1", counters)
+    with pytest.raises(Replan, match="Replacement task T2 must retain an existing origin_id"):
+        await workflow._execute(rid)
+    assert workflow.store.get(rid, "task_origins") == {"T1": "T1"}
+    assert workflow.store.get(rid, "rounds/T1") == counters
+    assert workflow.store.get(rid, "rounds/T1_REVISED") is None
+    assert workflow.store.get(rid, "rounds/T2") is None
+    assert workflow.store.get(rid, "plan") is None
