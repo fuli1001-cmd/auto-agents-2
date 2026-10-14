@@ -4,7 +4,7 @@ import json
 
 from .research import request_documents
 
-PROMPT_VERSION = "2026-10-14.4"
+PROMPT_VERSION = "2026-10-14.5"
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
     "gemini": "https://ai.google.dev/gemini-api/docs/prompting-strategies#gemini-3",
@@ -23,7 +23,15 @@ the schema. Respect required human prototype approval; you cannot approve it you
 The controller requests prototype approval AFTER applying files, running browser checks
 and an independent review, and starting a usable preview. Do not ask the user to approve
 prototypes in questions, do not wait for approval before proposing prototype files, and
-do not implement production UI before that gate. For genuine missing information use
+do not implement production UI before that gate. When context.prototype_approval.status
+is approved, the controller has verified the recorded human decision against the current
+prototype content and action contract, separately from browser checks and independent review.
+Use its human question_id and artifact_hash as approval evidence. A generation-time
+"pending approval" label in DESIGN.md does not override that receipt. Do not edit the
+approved design merely to change that label. A task dispatch or a provider review alone
+is never human approval. For controller_approval_recheck feedback, reassess the complete
+previous_request with this receipt; retain every other unresolved concern and request
+replanning again if warranted. For genuine missing information use
 structured questions with prompt, options (empty for free text), and purpose=clarification.
 Use options for finite decisions; do not embed options or internal requirement IDs in prose.
 Research rows with document_id refer to the complete matching body in research_document_bodies

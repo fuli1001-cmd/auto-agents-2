@@ -186,6 +186,9 @@ async def test_prototype_waits_for_versioned_human_approval_and_external_reply(t
 
     class FrontendAgent(CodingAgent):
         async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
+            if stage in {"design", "plan", "implement", "verify"} or stage == "review" and context.get("review_kind") != "prototype":
+                receipt = context["prototype_approval"]
+                assert receipt["status"] == "approved" and receipt["human"]["answer"] == "1"
             if stage == "prototype":
                 self.calls.append((stage, fresh))
                 return DocumentResult(summary="prototype", document="Static counter",
@@ -204,11 +207,13 @@ async def test_prototype_waits_for_versioned_human_approval_and_external_reply(t
         return [{"url": "https://fixture.invalid/DESIGN.md", "revision": "fixture"}]
 
     async def browser(*args):
+        browser_calls.append(args)
         return [{"status": 200, "viewport": 390}]
 
     async def research(*args):
         return [{"url": "https://fixture.invalid/DESIGN.md", "excerpt": "Simple monochrome counter"}]
 
+    browser_calls = []
     monkeypatch.setattr("auto_agents_2.engine.DesignCatalog.candidates", candidates)
     monkeypatch.setattr("auto_agents_2.engine.ResearchService.verify", research)
     monkeypatch.setattr("auto_agents_2.engine.inspect_prototype", browser)
@@ -257,6 +262,11 @@ async def test_prototype_waits_for_versioned_human_approval_and_external_reply(t
         result = await asyncio.wait_for(running, 15)
         assert result["status"] == "SUCCEEDED"
         assert workflow.store.get(rid, "prototype_approval")["identity"] == question["artifact_hash"]
+        before = len(browser_calls)
+        second = await workflow.start(str(requirements))
+        assert second["data"]["outcome"] == "NO_CHANGES"
+        assert workflow.store.get(second["id"], "prototype_approval")["human"]["question_id"] == question["id"]
+        assert len(browser_calls) > before and workflow.store.get(second["id"], "verify/visuals")
     finally:
         running.cancel()
         await asyncio.gather(running, return_exceptions=True)

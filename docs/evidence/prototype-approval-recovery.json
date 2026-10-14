@@ -1,0 +1,28 @@
+{
+  "run_id": "run_f8a82b6d34f24434",
+  "mode": "isolated database and workspace copy; recorded real Chromium evidence; controlled independent reviewer",
+  "recovered": true,
+  "preserved_completed_tasks": [
+    "T001",
+    "T002"
+  ],
+  "preserved_counters_and_plan": true,
+  "preserved_candidate_source": true,
+  "human_question_id": "question_635a858c6e3845c7",
+  "legacy_hash": "bb79ba3a59c488f31df408b6ced080581a0e05cce3c4252b130277dc5a1906d5",
+  "current_hash": "90e66d99eb694187851f218965ce7639bd65a6c611be93952749251d79e0c7c5",
+  "identity": "dadedf0f2528f08fcc6529d8eeeb802332aed84542f4f7638088d99a6d4cf2f4",
+  "review_calls": 1,
+  "native_provider_calls": 0,
+  "live_project_writes": 0,
+  "browser": {
+    "routes": 5,
+    "viewports": [
+      390,
+      1440
+    ],
+    "declared_actions": 99,
+    "executed_actions": 198,
+    "complete_action_evidence": true
+  }
+}

@@ -213,12 +213,16 @@ class Store:
 
     def recover_verification_replan(self, rid, pending, task_key, previous, updated, recovery_key, record):
         """Replace obsolete checker feedback atomically, retaining budgets and history."""
+        self.recover_task_replan(rid, pending, task_key, previous, updated, recovery_key, record, "verification.recovered")
+
+    def recover_task_replan(self, rid, pending, task_key, previous, updated, recovery_key, record, event):
+        """Reassess an unchanged proposal with repaired evidence, preserving all budgets."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             for key, expected in (("replanning/pending", pending), (task_key, previous)):
                 row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
                 if row is None or json.loads(row[0]) != expected:
-                    raise AA2Error("Verification recovery state changed; preserve the candidate and retry")
+                    raise AA2Error("Task recovery state changed; preserve the candidate and retry")
             for key, value in ((recovery_key, {**record, "recovered": True}), (task_key, updated)):
                 db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
                            (rid, key, json.dumps(value, ensure_ascii=False)))
@@ -226,7 +230,7 @@ class Store:
             db.execute("DELETE FROM checkpoints WHERE run_id=? AND key='replanning/pending'", (rid,))
             db.execute("UPDATE questions SET superseded=1 WHERE run_id=? AND key=?",
                        (rid, f"replan-stalled/{pending['evaluation']}"))
-            self._event(db, rid, "verification.recovered", {"task": task_key, "recovery": recovery_key})
+            self._event(db, rid, event, {"task": task_key, "recovery": recovery_key})
 
     @staticmethod
     def _question(row):

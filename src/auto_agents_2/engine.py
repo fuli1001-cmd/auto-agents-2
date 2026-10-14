@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import quote
 
+from .approvals import APPROVAL_CONTEXT_VERSION, PrototypeApprovals, prototype_identity
 from .artifacts import ArtifactStore
 from .config import ConfigStore
 from .context import ContextBuilder
@@ -77,6 +78,7 @@ class WorkflowEngine:
         self.sandbox = sandbox or SandboxRunner(self.store.root, cfg.sandbox_binary)
         self.agent = agent or ProviderRouter(self.config, self.store, self.sandbox)
         self.artifacts = ArtifactStore(self.store.root)
+        self.approvals = PrototypeApprovals(self.store, self.artifacts)
         self.workspaces = WorkspaceManager(self.project)
         self.contexts = ContextBuilder(self.config.load().sensitive_paths)
         self.resources = ResourceManager(self.store, cfg.cleanup)
@@ -122,7 +124,7 @@ class WorkflowEngine:
                 while True:
                     try:
                         if self.store.get(rid, "replanning/pending"):
-                            if not await self._refresh_legacy_task_checks(rid):
+                            if not await self._refresh_legacy_approval_context(rid) and not await self._refresh_legacy_task_checks(rid):
                                 await self._resume_replan(rid)
                         return await self._execute(rid)
                     except Replan as exc:
@@ -240,6 +242,57 @@ class WorkflowEngine:
                        "controller_recheck": {"previous_request": proposal, "checker_version": CHECKER_VERSION}}}
             self.store.recover_verification_replan(rid, pending, key, saved, updated, recovery_key, record)
             self._replan_checks(rid, f"task/{task.origin_id or task.id}", task.checks, checks, work, environment)
+            return True
+        return False
+
+    async def _refresh_legacy_approval_context(self, rid):
+        """Let an old, unapplied task reassess its exact replan with proven consent.
+
+        An actual human decision for the unchanged prototype is mandatory. Only
+        requests made before approval receipts were supplied qualify, once.
+        """
+        pending = self.store.get(rid, "replanning/pending", {})
+        plan_data, prototype = self.store.get(rid, "plan"), self.store.get(rid, "prototype")
+        if pending.get("stage") != "prototype" or not plan_data or not prototype:
+            return False
+        actions = prototype.get("browser_actions", [])
+        integration = self.store.root / "worktrees" / rid / "integration"
+        if (not integration.is_dir() or integration.is_symlink()
+                or not self.approvals.human(rid, integration, actions)):
+            return False
+        for task in PlanResult.model_validate(plan_data).tasks:
+            key = f"develop/task/{task.id}"
+            saved = self.store.get(rid, key, {})
+            invocation = self.store.get(rid, "invocation/" + key, {})
+            proposal = invocation.get("result", {})
+            if (saved.get("phase") != "implementing" or saved.get("implementation") or saved.get("patch")
+                    or "approval_context_version" in saved
+                    or proposal.get("replan_stage") != "prototype" or proposal.get("changes")
+                    or proposal.get("replan_reason") != pending["reason"]):
+                continue
+            work = self.store.root / "worktrees" / rid / f"{task.id}-p{pending['generation']}"
+            if (not work.is_dir() or work.is_symlink()
+                    or prototype_identity(work, actions) != prototype_identity(integration, actions)):
+                continue
+            source = tree_hash(work)
+            recovery_key = f"candidate/approval-recovery/{task.id}/p{pending['generation']}"
+            record = {"pending": pending, "task": saved, "invocation": invocation,
+                      "workspace": str(work), "source_hash": source, "context_version": APPROVAL_CONTEXT_VERSION}
+            self.store.checkpoint(rid, recovery_key, record)
+            try:
+                with observe_activity(self.store, rid, f"核验历史原型审批（{task.id}）"):
+                    receipt = await self._ensure_prototype_approval(rid, integration, prototype)
+            except Replan as exc:
+                # A pending rollback cannot be replaced by raising another Replan.
+                # Preserve it and expose the real failed gate without a busy loop.
+                raise AA2Error(f"历史原型审批复核未通过：{exc.reason}") from exc
+            if (tree_hash(work) != source or not self.approvals.current(rid, work, actions, PROTOTYPE_BROWSER_VERSION)):
+                raise AA2Error("审批恢复期间候选发生变化，已保留回退现场")
+            record["approval"] = receipt
+            updated = {**saved, "approval_context_version": APPROVAL_CONTEXT_VERSION,
+                       "feedback": {**saved.get("feedback", {}), "controller_approval_recheck": {
+                           "previous_request": proposal, "prototype_approval": receipt}}}
+            self.store.recover_task_replan(rid, pending, key, saved, updated, recovery_key, record, "approval.recovered")
             return True
         return False
 
@@ -407,6 +460,68 @@ class WorkflowEngine:
                               source_hash=fingerprint)
         return report
 
+    async def _record_prototype_approval(self, rid, work, document, review, visuals):
+        actions = [action.model_dump() for action in document.browser_actions]
+        identity = prototype_identity(work, actions)
+        evidence = {**identity, "review": review, "visuals": visuals, "browser_version": PROTOTYPE_BROWSER_VERSION}
+        if not self.approvals.automation_current(evidence, identity, actions, PROTOTYPE_BROWSER_VERSION):
+            raise Replan("prototype", "原型审批缺少完整浏览器证据或独立审查，需要重新核验")
+        human = self.approvals.human(rid, work, actions)
+        if not human:
+            feedback = await self._approve_prototype(rid, work, identity["identity"])
+            if feedback is not None:
+                raise Replan("prototype", feedback)
+            human = self.approvals.human(rid, work, actions)
+        record = self.approvals.publish(rid, work, actions, human, review, visuals, PROTOTYPE_BROWSER_VERSION)
+        return self.approvals.context(record)
+
+    async def _ensure_prototype_approval(self, rid, work, prototype=None):
+        """Restore the real gate for cached stages as well as freshly generated ones."""
+        data = prototype if prototype is not None else self.store.get(rid, "prototype")
+        if not data:
+            raise Replan("prototype", "Frontend development requires a verified prototype and explicit human approval")
+        document = DocumentResult.model_validate({k: v for k, v in data.items() if k in DocumentResult.model_fields})
+        actions = [action.model_dump() for action in document.browser_actions]
+        binding = prototype_identity(work, actions)
+        current = self.approvals.current(rid, work, actions, PROTOTYPE_BROWSER_VERSION)
+        if current:
+            # Also attach provenance to modern receipts created before this version.
+            return await self._record_prototype_approval(rid, work, document, current["review"], current["visuals"])
+        previous = self.store.get(rid, "prototype_approval", {})
+        verification_key = "candidate/prototype-approval-checks/" + digest([
+            binding["identity"], self.store.get(rid, "clarify", {}), PROTOTYPE_BROWSER_VERSION])
+        checked = self.store.get(rid, verification_key, {})
+        if self.approvals.automation_current(checked, binding, actions, PROTOTYPE_BROWSER_VERSION):
+            previous = checked
+        if self.approvals.automation_current(previous, binding, actions, PROTOTYPE_BROWSER_VERSION):
+            review, visuals = previous["review"], previous["visuals"]
+        else:
+            report = await self._prototype_browser_report(rid, work, document)
+            if report["error"]:
+                raise Replan("prototype", report["error"])
+            visuals = report["results"]
+            review = (await self._invoke("review", {"review_kind": "prototype", "prototype": data,
+                "specification": self.store.get(rid, "clarify", {}), "browser_evidence": visuals,
+                "project": self.contexts.build(work)}, ReviewResult, work, rid,
+                "prototype-approval-review/" + binding["identity"], fresh=True)).model_dump()
+            if not review["approved"]:
+                raise Replan("prototype", review["summary"])
+            self.store.checkpoint(rid, verification_key, {**binding, "review": review, "visuals": visuals,
+                                                         "browser_version": PROTOTYPE_BROWSER_VERSION})
+        if prototype_identity(work, actions) != binding:
+            raise AA2Error("原型在审批复核期间发生变化，已保留现场")
+        return await self._record_prototype_approval(rid, work, document, review, visuals)
+
+    def _task_approval_context(self, rid, work, context):
+        if not (context.get("specification", {}).get("frontend") or self.store.get(rid, "clarify", {}).get("frontend")):
+            return {}
+        prototype = self.store.get(rid, "prototype")
+        record = (self.approvals.current(rid, work, prototype.get("browser_actions", []), PROTOTYPE_BROWSER_VERSION)
+                  if prototype else None)
+        if not record:
+            raise AA2Error("当前任务缺少与原型内容及交互动作匹配的人工审批证据，已暂停派发")
+        return {"prototype_approval": self.approvals.context(record)}
+
     async def _prepare_prototype(self, rid, work, specification, assessment, context, original):
         key = "prototype/pending"
         identity = digest([assessment, self.store.get(rid, "baseline"), self.store.get(rid, "replan_feedback")])
@@ -550,24 +665,8 @@ class WorkflowEngine:
             self.store.checkpoint(rid, key, pending)
         if self._prototype_hash(work) != fingerprint:
             raise AA2Error("原型在检查期间被修改，需要重新检查")
-        actions_hash = digest([action.model_dump() for action in document.browser_actions])
-        approval_identity = digest([fingerprint, actions_hash])
-        def same_approval(run_id):
-            approval = self.store.get(run_id, "prototype_approval", {})
-            if approval.get("hash") not in {fingerprint, legacy_fingerprint}:
-                return False
-            if approval.get("actions_hash") == actions_hash:
-                return True
-            legacy = self.store.get(run_id, "prototype")
-            return bool(legacy and digest(legacy.get("browser_actions", [])) == actions_hash)
-        prior = same_approval(rid) or any(same_approval(p["id"]) for p in self.store.successful())
-        if not prior:
-            feedback = await self._approve_prototype(rid, work, approval_identity)
-            if feedback is not None:
-                raise Replan("prototype", feedback)
-        self.store.checkpoint(rid, "prototype_approval", {"hash": fingerprint, "identity": approval_identity,
-                              "actions_hash": actions_hash, "browser_version": PROTOTYPE_BROWSER_VERSION,
-                              "review": pending["review"], "visuals": pending["visuals"]})
+        context["prototype_approval"] = await self._record_prototype_approval(
+            rid, work, document, pending["review"], pending["visuals"])
         return document, pending["retrieved"]
 
     async def _execute(self, rid):
@@ -575,6 +674,12 @@ class WorkflowEngine:
             self.resources.finish_delivery(rid)
             return self.store.run(rid)
         if self.store.get(rid, "delivery/journal"):
+            journal = self.store.get(rid, "delivery/journal")
+            if (journal.get("plan") or {}).get("preview"):
+                try:
+                    await self._ensure_prototype_approval(rid, Path(journal["work"]))
+                except Replan as exc:
+                    raise AA2Error(f"交付原型审批未通过，已保留交付现场：{exc.reason}") from exc
             return await self.delivery.finish(rid)
         run = self.store.run(rid)
         raw = self.store.get(rid, "capture")
@@ -688,19 +793,21 @@ class WorkflowEngine:
             cached = self.store.get(rid, stage)
             if cached:
                 context[stage] = cached
+                if stage == "prototype":
+                    context["prototype_approval"] = await self._ensure_prototype_approval(rid, work, cached)
                 continue
             if stage == "prototype":
-                current_prototype = self._prototype_hash(work)
                 reused = None
                 if not result.ui_changes:
                     for previous in self.store.successful():
                         approval = self.store.get(previous["id"], "prototype_approval", {})
-                        if approval.get("hash") == current_prototype:
-                            reused = self.store.get(previous["id"], "prototype")
-                            if reused:
-                                self.store.checkpoint(rid, "prototype_approval", approval)
-                                break
+                        prior = self.store.get(previous["id"], "prototype")
+                        if prior and self.approvals.human(rid, work, prior.get("browser_actions", []), approval):
+                            reused = prior
+                            self.store.checkpoint(rid, "prototype_approval", approval)
+                            break
                 if reused:
+                    context["prototype_approval"] = await self._ensure_prototype_approval(rid, work, reused)
                     self.store.checkpoint(rid, stage, reused)
                     context[stage] = reused
                     continue
@@ -806,6 +913,8 @@ class WorkflowEngine:
         checkout_policy = self.workspaces.normalize_checkout(work, candidate)
         self.store.checkpoint(rid, "verify/checkout_policy", checkout_policy)
         candidate_hash = tree_hash(work)
+        if result.frontend:
+            context["prototype_approval"] = await self._ensure_prototype_approval(rid, work)
         verify_key = digest([candidate_hash, environment.fingerprint, plan.model_dump(), assessment,
                              self.store.get(rid, "prototype_approval", {}), context.get("provider_research", {})])
         previous_checks = self.store.get(rid, "verify/checks", []) if self.store.get(rid, "verify/identity") == verify_key else []
@@ -821,8 +930,7 @@ class WorkflowEngine:
         if ProjectProfile.detect(work, self.config.load().project_profile).has_frontend and not result.frontend:
             raise Replan("clarify", "Implementation introduced a frontend without a prototype and browser verification contract")
         if result.frontend:
-            if self.store.get(rid, "prototype_approval", {}).get("hash") != self._prototype_hash(work):
-                raise Replan("prototype", "Prototype changed after human approval")
+            self._task_approval_context(rid, work, context)
             await self._ensure_browser(rid, work)
             with observe_activity(self.store, rid, "实现界面浏览器验收"):
                 visuals = await inspect_application(plan.preview, work, self.store.root / "visuals" / rid / "implemented",
@@ -836,7 +944,8 @@ class WorkflowEngine:
         review = ReviewResult.model_validate(cached_review) if cached_review else await self._invoke("verify", {**context, "project": self.contexts.build(work),
                                                "evidence": [r.model_dump() for r in evidence],
                                                "implemented_visuals": visuals,
-                                               "prototype_approval": self.store.get(rid, "prototype_approval", {})},
+                                               "approved_prototype_visuals": self.store.get(rid, "prototype_approval", {}).get("visuals", []),
+                                               "prototype_approval": context.get("prototype_approval", {})},
                                     ReviewResult, work, rid, "final-review", fresh=True)
         if not review.approved:
             raise Replan("plan", review.summary)
@@ -845,6 +954,7 @@ class WorkflowEngine:
         if (git(work, "rev-parse", "HEAD") != candidate or tree_hash(work) != candidate_hash
                 or git(work, "diff", "--name-only", "HEAD")):
             raise AA2Error("Candidate changed during verification")
+        self._task_approval_context(rid, work, context)
         self.store.update(rid, external_dependencies=bool(context.get("provider_research", {}).get("sources")))
         return await self.delivery.finish(rid, candidate=candidate, work=work, environment=environment, plan=plan)
 
@@ -868,6 +978,8 @@ class WorkflowEngine:
         cfg = self.config.load()
         done = set(self.store.get(rid, "develop/done", []))
         while len(done) < len(plan.tasks):
+            if context.get("specification", {}).get("frontend"):
+                context["prototype_approval"] = await self._ensure_prototype_approval(rid, integration)
             if shutil.disk_usage(self.store.root).free < cfg.cleanup.min_free_bytes:
                 self.resources.collect()
                 if shutil.disk_usage(self.store.root).free < cfg.cleanup.min_free_bytes:
@@ -910,23 +1022,28 @@ class WorkflowEngine:
         counter_key = f"rounds/{task.origin_id or task.id}"
         counters = self.store.get(rid, counter_key, {"round": 0, "stalled": 0, "failure": ""})
         while True:
+            approval_context = self._task_approval_context(rid, work, context)
             if saved.get("phase") not in {"implementing", "applied", "tested"}:
                 counters = self.store.get(rid, counter_key, counters)
                 if counters["round"] >= self.config.load().execution.max_rounds:
                     break
                 counters["round"] += 1
-                saved = {"phase": "implementing", "feedback": {k: v for k, v in saved.items() if k in {"checks", "review", "environment_error", "candidate_error", "controller_recheck"}}}
+                saved = {"phase": "implementing", "feedback": {k: v for k, v in saved.items() if k in {"checks", "review", "environment_error", "candidate_error", "controller_recheck", "controller_approval_recheck"}}}
                 self.store.checkpoints(rid, {key: saved, counter_key: counters})
             previous_feedback = saved.get("feedback", saved)
-            feedback = {k: previous_feedback[k] for k in ("phase", "checks", "review", "environment_error", "candidate_error", "controller_recheck") if k in previous_feedback}
+            feedback = {k: previous_feedback[k] for k in ("phase", "checks", "review", "environment_error", "candidate_error", "controller_recheck", "controller_approval_recheck") if k in previous_feedback}
             feedback = json.loads(json.dumps(feedback))
-            task_context = {"task": task.model_dump(), "specification": context["specification"],
+            task_context = {**approval_context, "task": task.model_dump(), "specification": context["specification"],
                             "design": context.get("design"), "feedback": feedback, "unresolved_issues": IssueLedger(self.store, self.artifacts).unresolved(rid),
                             "project": self.contexts.build(work, scopes=task.allowed_paths)}
+            if approval_context and not saved.get("implementation"):
+                saved["approval_context_version"] = APPROVAL_CONTEXT_VERSION
+                self.store.checkpoint(rid, key, saved)
             change = (ImplementationResult.model_validate(saved["implementation"]) if saved.get("implementation") else
                       await self._invoke("implement", task_context, ImplementationResult, work, rid, key))
             if change.replan_stage:
                 raise Replan(change.replan_stage, change.replan_reason)
+            self._task_approval_context(rid, work, context)
             if saved.get("phase") == "implementing":
                 # Persist the candidate before applying it. Full writes are idempotent;
                 # replace changes use a postimage check when recovering an interrupted apply.
@@ -979,12 +1096,14 @@ class WorkflowEngine:
                 self.store.checkpoint(rid, key, saved)
             self._replan_checks(rid, f"task/{task.origin_id or task.id}", task.checks, checks, work, environment)
             if passed(checks):
+                task_context.update(self._task_approval_context(rid, work, context))
                 review = await self._invoke("review", {**task_context, "implementation": change.model_dump(),
                                                        "project": self.contexts.build(work, scopes=task.allowed_paths),
                                                        "checks": [c.model_dump() for c in checks],
                                                        "source_hash": saved["source_hash"]}, ReviewResult, work, rid, key + "/review", fresh=True)
                 saved["review"] = review.model_dump()
                 if review.approved:
+                    self._task_approval_context(rid, work, context)
                     recovery_ref = f"refs/aa2/{rid}/tasks/{task.id}/p{generation}"
                     commit = self.workspaces.checkpoint(work, recovery_ref, f"aa2: {task.title}")
                     self.store.checkpoint(rid, key, {**saved, "commit": commit, "workspace": str(work), "recovery_ref": recovery_ref})
@@ -1080,22 +1199,44 @@ class WorkflowEngine:
                 if value is not None:
                     self.store.checkpoint(rid, key, value)
         plan = PlanResult.model_validate(plan_data) if plan_data else None
+        approval_context = {}
+        if self.store.get(rid, "clarify", {}).get("frontend"):
+            if not self.store.get(rid, "prototype") or not plan or not plan.preview:
+                raise AA2Error("现有前端缺少原型审批或应用浏览器验收契约，不能跳过门禁交付")
+            try:
+                approval_context["prototype_approval"] = await self._ensure_prototype_approval(rid, work)
+            except Replan as exc:
+                raise AA2Error(f"复用前端审批未通过，已保留现场：{exc.reason}") from exc
         environment = await self._environment(work, rid, plan)
         # A source-only match cannot establish current environment or evidence identity.
         candidate = self.workspaces.checkpoint(work, f"refs/aa2/{rid}/candidate", "aa2: dependency lock verification")
         policy = self.workspaces.normalize_checkout(work, candidate)
         self.store.checkpoint(rid, "verify/checkout_policy", policy)
+        candidate_hash = tree_hash(work)
         checks = self._candidate_checks(plan) if plan else (
             IntakeResult.model_validate(self.store.get(rid, "clarify")).verification or self.config.load().verification)
         evidence = await self.verifier.run(checks, work, environment)
         if not passed(evidence):
             raise AA2Error("当前环境未通过验收；保留已有实现和失败证据")
-        review = await self._invoke("verify", {"project": self.contexts.build(work),
+        visuals = []
+        if approval_context:
+            await self._ensure_browser(rid, work)
+            with observe_activity(self.store, rid, "复用实现界面浏览器验收"):
+                visuals = await inspect_application(plan.preview, work, self.store.root / "visuals" / rid / "no-changes",
+                                                    environment, self.sandbox, self.store.root)
+            visuals = self._archive_visuals(visuals)
+            self.store.checkpoint(rid, "verify/visuals", visuals)
+        review = await self._invoke("verify", {**approval_context, "project": self.contexts.build(work),
                                     "specification": self.store.get(rid, "clarify"),
-                                    "evidence": [c.model_dump() for c in evidence]},
+                                    "approved_prototype_visuals": self.store.get(rid, "prototype_approval", {}).get("visuals", []),
+                                    "evidence": [c.model_dump() for c in evidence], "implemented_visuals": visuals},
                                     ReviewResult, work, rid, "no-change-review", fresh=True)
         if not review.approved:
             raise AA2Error(review.summary)
+        self._task_approval_context(rid, work, {"specification": self.store.get(rid, "clarify", {})})
+        if (tree_hash(work) != candidate_hash or git(work, "rev-parse", "HEAD") != candidate
+                or git(work, "diff", "--name-only", "HEAD")):
+            raise AA2Error("Reused candidate changed during verification")
         self.store.checkpoint(rid, "verify/checks", [c.model_dump() for c in evidence])
         self.store.checkpoint(rid, "verify/review", review.model_dump())
         self.store.checkpoint(rid, "verify/identity", digest([tree_hash(work), environment.fingerprint,
@@ -1188,32 +1329,20 @@ class WorkflowEngine:
                                             [p for p in git(work, "ls-files", "-z").split("\0") if p])
                 continue
             visuals = []
+            approval_context = {}
             if plan and plan.preview:
-                prototype_hash = self._prototype_hash(work)
-                if self.store.get(rid, "prototype_approval", {}).get("hash") != prototype_hash:
-                    await self._ensure_browser(rid, work)
-                    with observe_activity(self.store, rid, "集成后原型浏览器检查"):
-                        prototype = await inspect_prototype(work / "design/prototypes", self.store.root / "visuals" / rid / "reintegration-prototype",
-                            DocumentResult.model_validate({k: v for k, v in self.store.get(rid, "prototype", {}).items()
-                                                           if k in DocumentResult.model_fields}).browser_actions)
-                    prototype = self._archive_visuals(prototype)
-                    review = await self._invoke("review", {"review_kind": "prototype", "project": self.contexts.build(work), "visuals": prototype},
-                                                ReviewResult, work, rid, "reintegration-prototype", fresh=True)
-                    if not review.approved:
-                        raise AA2Error(review.summary)
-                    actions_hash = digest(self.store.get(rid, "prototype", {}).get("browser_actions", []))
-                    approval_identity = digest([prototype_hash, actions_hash])
-                    feedback = await self._approve_prototype(rid, work, approval_identity)
-                    if feedback is not None:
-                        await self._delivery_repair(rid, work, {"prototype_feedback": feedback},
-                            [p for p in git(work, "ls-files", "design/prototypes", "DESIGN.md").splitlines() if p])
-                        continue
-                    self.store.checkpoint(rid, "prototype_approval", {"hash": prototype_hash, "identity": approval_identity,
-                                         "actions_hash": actions_hash, "browser_version": PROTOTYPE_BROWSER_VERSION})
+                try:
+                    approval_context["prototype_approval"] = await self._ensure_prototype_approval(rid, work)
+                except Replan as exc:
+                    await self._delivery_repair(rid, work, {"prototype_feedback": exc.reason},
+                        [p for p in git(work, "ls-files", "design/prototypes", "DESIGN.md").splitlines() if p])
+                    continue
+                await self._ensure_browser(rid, work)
                 with observe_activity(self.store, rid, "集成后界面浏览器验收"):
                     visuals = await inspect_application(plan.preview, work, self.store.root / "visuals" / rid / "reintegrated",
                                                         environment, self.sandbox, self.store.root)
-            review = await self._invoke("verify", {"project": self.contexts.build(work), "specification": self.store.get(rid, "clarify"),
+            review = await self._invoke("verify", {**approval_context, "project": self.contexts.build(work), "specification": self.store.get(rid, "clarify"),
+                "approved_prototype_visuals": self.store.get(rid, "prototype_approval", {}).get("visuals", []),
                 "evidence": [c.model_dump() for c in evidence], "implemented_visuals": visuals, "incoming": incoming},
                 ReviewResult, work, rid, f"reintegration-review/{journal['reintegrations']}", fresh=True)
             if not review.approved:
@@ -1223,6 +1352,7 @@ class WorkflowEngine:
             if (tree_hash(work) != before or git(work, "rev-parse", "HEAD") != candidate
                     or git(work, "diff", "--name-only", "HEAD")):
                 raise AA2Error("Reintegrated candidate changed during verification")
+            self._task_approval_context(rid, work, {"specification": self.store.get(rid, "clarify", {})})
             identity = digest([candidate, before, environment.fingerprint, [c.model_dump() for c in evidence], review.model_dump()])
             self.store.checkpoint(rid, "verify/identity", identity)
             self.store.checkpoint(rid, "verify/checks", [c.model_dump() for c in evidence])
@@ -1254,6 +1384,11 @@ class WorkflowEngine:
             context = {"task": {"description": "Repair the isolated reintegration without weakening accepted behaviour", "allowed_paths": scopes},
                        "specification": self.store.get(rid, "clarify"), "project": self.contexts.build(work),
                        "feedback": {**feedback, "repair_feedback": rejection}}
+            prototype = self.store.get(rid, "prototype", {})
+            approval = (self.approvals.current(rid, work, prototype.get("browser_actions", []), PROTOTYPE_BROWSER_VERSION)
+                        if prototype else None)
+            if approval:
+                context["prototype_approval"] = self.approvals.context(approval)
             proposal = (ImplementationResult.model_validate(pending["proposal"]) if pending.get("proposal") else
                         await self._invoke("implement", context, ImplementationResult, work, rid, f"delivery-repair/{count}"))
             if proposal.replan_stage or not proposal.changes:

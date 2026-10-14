@@ -155,6 +155,14 @@ async def test_resume_refreshes_legacy_internal_question_with_actual_browser_rep
     page.write_text("<h1>Preview</h1>")
     document = original.model_copy(update={"files": [], "questions": ["界面语言？", "请提供控制器侧浏览器交互检查的实际报告"],
         "browser_actions": [BrowserAction(route="/index.html", action="expect_visible", selector="h1")]})
+    browser_rows = [{"status": 200, "route": "/index.html", "viewport": width,
+                     "actions": [action.model_dump() for action in document.browser_actions]} for width in (1440, 390)]
+
+    async def browser(*args):
+        calls.append("browser")
+        return browser_rows
+
+    monkeypatch.setattr("auto_agents_2.engine.inspect_prototype", browser)
     identity = digest([spec.model_dump(), workflow.store.get(rid, "baseline"), None])
     workflow.store.checkpoint(rid, "prototype/pending", {"identity": identity,
         "document": document.model_dump(), "design_candidates": []})
@@ -170,7 +178,7 @@ async def test_resume_refreshes_legacy_internal_question_with_actual_browser_rep
                 else:
                     assert context["prototype_answer"] == [{"question": "是否需要导出？", "answer": "需要"}]
                 report = context["controller_browser_report"]
-                assert report["results"] == [{"status": 200}]
+                assert report["results"] == browser_rows
                 assert report["source_hash"] == workflow._prototype_hash(tmp_path)
                 return document.model_copy(update={"questions": ["是否需要导出？"] if genuine_question and fresh else []})
             return ReviewResult(approved=True, summary="verified")
