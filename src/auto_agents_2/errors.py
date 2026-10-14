@@ -10,6 +10,12 @@ class ConfigurationError(AA2Error):
     code = "CONFIGURATION_ERROR"
 
 
+class DependencyResolutionError(AA2Error):
+    """The resolver rejected a workspace dependency manifest."""
+
+    code = "DEPENDENCY_RESOLUTION_ERROR"
+
+
 class PolicyViolation(AA2Error):
     code = "POLICY_VIOLATION"
 

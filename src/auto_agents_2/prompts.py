@@ -47,6 +47,11 @@ an authoritative best-match ranking: inspect the full catalogue when early candi
 Read omitted public files from the supplied workspace. For dependency/version/conflict
 work inspect the relevant full lockfiles, constraints and inclusion chains. Missing or
 inaccessible required evidence must prevent approval; never infer success from a summary.
+For environment_error feedback, repair the declared manifest using package versions available
+in its selected channels and platform. A version installed on the host is not evidence that
+Conda publishes it. Preserve required runtime constraints; request replanning if the repair
+requires changes outside the task's allowed paths or accepted design. aa2 must resolve the
+revised manifest and rerun checks before approval.
 Multiple replace changes to one file run in list order in memory; each old_text must
 match exactly once in the content after preceding replacements. Never mix write/delete
 with another change to the same file. All changes are validated before any file is written.

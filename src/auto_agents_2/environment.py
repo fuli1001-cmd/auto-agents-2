@@ -16,7 +16,7 @@ from .artifacts import ArtifactStore
 from .config import ConfigStore
 from .dependencies import copy_execution_source, manifest_reference, pip_inputs
 from .diagnostics import DiagnosticOperation, current_diagnostics
-from .errors import AA2Error
+from .errors import AA2Error, DependencyResolutionError
 from .evidence import RUNTIME_CACHES
 from .logs import capture_diagnostics
 from .progress import capture_output
@@ -115,7 +115,10 @@ class EnvironmentManager:
                 if conda_document is not None:
                     selected_conda = scratch / "environment.yml"
                     atomic_write(selected_conda, yaml.safe_dump(conda_document))
-                await self._prepare(prefix, ready, fingerprint, profile, selected_conda, pip_file, workspace, [], local)
+                try:
+                    await self._prepare(prefix, ready, fingerprint, profile, selected_conda, pip_file, workspace, [], local)
+                except DependencyResolutionError as exc:
+                    raise DependencyResolutionError(f"Conda manifest {conda_file.relative_to(workspace)}: {exc}") from exc
             write_json(location, {"prefix": str(prefix)})
         return Environment(prefix, self.installed_identity(prefix))
 
@@ -139,7 +142,7 @@ class EnvironmentManager:
         except (OSError, ValueError, KeyError, RecursionError):
             return False
 
-    async def _command(self, argv, workspace, env, writes, reads=(), timeout=1800):
+    async def _command(self, argv, workspace, env, writes, reads=(), timeout=1800, *, conda_manifest=False):
         process = await self.sandbox.spawn(argv, workspace, env, writes, list(reads))
         try:
             async with asyncio.timeout(timeout):
@@ -157,7 +160,17 @@ class EnvironmentManager:
                         self.store.checkpoint(run["id"], "environment/logs/" + identifier("command"),
                                               {"logs": logs, "exit_code": process.returncode})
             if process.returncode:
-                raise AA2Error("Dependency preparation failed: " + scrub_text(stderr.decode(errors="replace"), [v for k, v in env.items() if SECRET.search(k)])[-2000:])
+                diagnostic = scrub_text((stdout + b"\n" + stderr).decode(errors="replace"),
+                                        [v for k, v in env.items() if SECRET.search(k)])
+                # Only explicit solver failures from a workspace manifest are repairable
+                # proposals. Network, permissions, locks and configured defaults stay blocked.
+                resolution = re.search(r"(?m)^(?:ResolvePackageNotFound|PackagesNotFoundError|"
+                                       r"UnsatisfiableError|LibMambaUnsatisfiableError):[^\n]*", diagnostic)
+                failure = DependencyResolutionError if conda_manifest and resolution else AA2Error
+                detail = diagnostic[-2000:]
+                if failure is DependencyResolutionError and resolution.group() not in detail:
+                    detail = resolution.group() + "\n" + detail
+                raise failure("Dependency preparation failed: " + detail)
             return stdout.decode(errors="replace")
         except TimeoutError as exc:
             raise AA2Error("Dependency preparation timed out") from exc
@@ -183,7 +196,8 @@ class EnvironmentManager:
                 env = environment.variables(scratch)
                 env.pop("CONDA_PREFIX", None)
                 env.update(CONDA_PKGS_DIRS=str(cache), PIP_CACHE_DIR=str(scratch / "pip"), CONDA_ALWAYS_COPY="true")
-                if (records / "conda.lock").is_file() and not local:
+                replay_lock = (records / "conda.lock").is_file() and not local
+                if replay_lock:
                     argv = [conda, "create", "-y", "--copy", "-p", str(prefix), "--file", str(records / "conda.lock")]
                 elif conda_file:
                     argv = [conda, "env", "create", "-p", str(prefix), "-f", str(conda_file)]
@@ -196,7 +210,8 @@ class EnvironmentManager:
                     reads.append(conda_file.parent)
                 if records.exists():
                     reads.append(records)
-                await self._command(argv, workspace, env, [prefix, cache, scratch], reads)
+                await self._command(argv, workspace, env, [prefix, cache, scratch], reads,
+                                    conda_manifest=bool(conda_file) and not replay_lock)
                 install_workspace = workspace
                 if local:
                     # Editable bindings live in this private environment and never point into another task.

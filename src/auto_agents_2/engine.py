@@ -22,7 +22,14 @@ from .design import (
     inspect_prototype,
 )
 from .environment import EnvironmentManager
-from .errors import AA2Error, PolicyViolation, ProtectedChange, PrototypeBrowserError, ProviderError
+from .errors import (
+    AA2Error,
+    DependencyResolutionError,
+    PolicyViolation,
+    ProtectedChange,
+    PrototypeBrowserError,
+    ProviderError,
+)
 from .evidence import invocation_identity, reusable
 from .interaction import choice_spec, is_prototype_approval, question_text
 from .issues import IssueLedger
@@ -885,7 +892,22 @@ class WorkflowEngine:
                 apply_prepared(work, prepared)
                 saved.update(phase="applied", source_hash=tree_hash(work))
                 self.store.checkpoint(rid, key, saved)
-            environment = await self._environment(work, rid, plan)
+            try:
+                environment = await self._environment(work, rid, plan)
+            except DependencyResolutionError as exc:
+                saved.update(phase="rejected", environment_error=str(exc), source_hash=tree_hash(work))
+                fingerprint = digest({"environment_error": str(exc)})
+                counters["stalled"] = counters["stalled"] + 1 if fingerprint == counters["failure"] else 0
+                counters["failure"] = fingerprint
+                # Retain the failed proposal even when replanning invalidates develop/.
+                self.store.checkpoints(rid, {
+                    key: saved, counter_key: counters,
+                    f"candidate/environment-failures/{task.id}/p{generation}/r{counters['round']}": {
+                        **saved, "workspace": str(work)},
+                })
+                if counters["stalled"] >= self.config.load().execution.max_stalled_rounds:
+                    raise Replan("plan", f"Task {task.id} dependency resolution stalled: {exc}") from exc
+                continue
             prior_checks = [CheckResult.model_validate(c) for c in saved.get("checks", [])]
             reuse = reusable(task.checks, prior_checks, work, environment, self.artifacts)
             if saved.get("phase") == "tested" and reuse.allowed:
