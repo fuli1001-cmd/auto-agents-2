@@ -1,5 +1,27 @@
 # 验证记录
 
+## 第二轮 OCR 修复验收（2026-10-15）
+
+基于 `f46a690` 核验第二份报告的 52 条评论：51 条成立，第 35 条部分成立，原有调用内源码漂移防护继续保留，补足 HEAD 和跨步骤基线。逐条落点见 [第二轮实施对照](quality-first-implementation.md#第二轮-ocr-核对后实施2026-10-15)。历史验收文件未修改。
+
+最终源码全量回归 **674 项通过，0 失败、0 跳过**（505.96 秒），新增 **101 项**行为、隔离及故障注入回归。[完整 JUnit](evidence/ocr2-fixes-suite.xml) 已单独归档。先验证受影响子系统，再执行完整套件；Ruff、已跟踪及新增文件的差异检查、项目 Conda 环境的 `pip check`、wheel 构建和 wheel 内容校验通过。
+
+真实系统检查包含 Chromium、bubblewrap、Git 和本地 HTTP/CONNECT。沙箱中的测试进程确认无法读取控制器文件，仍可创建指向它的附件根链接；控制器拒绝归档。预览服务拒绝非 HTML 链接、目录链接及链接索引；内部正常静态资源仍可读取。网络半关闭允许响应完成，httpcore 请求和流错误保留 HTTPX 类别。使用真实 pip 离线 dry-run 检查带空格路径的本地 wheel：正确 hash 可解析，错误 hash 明确拒绝，未安装依赖。
+
+恢复回归覆盖最后一次运行成功后回执读取、运行入口写入和完成事务失败；续跑不重复检查或消耗预算。重复失败的阻塞跨重启保留，显式增额只授予有限新尝试。新增文件修复在 staging、commit 和 ref 更新后的中断均可恢复；用户修改仍被保留。计划修订源码/HEAD 漂移、缺失命令观察、文件/目录/链接转换和三条浏览器失败恢复路径分别验证。
+
+状态库 v4 测试从实际缺少表的旧结构开始，覆盖 v1/v2/v3、原始产物引用、DDL 与数据更新回滚、幂等迁移和预算保留。手动工具验证 0600 旁路文件、规范化后的副本定位、外部可变路径拒绝、主工作树配置间接引用、浏览器部分诊断及主异常保留。两项旧测试仅调整受信任二进制夹具位置及加强重复失败停止断言，没有放宽原有读取或门禁条件。
+
+Provider 协议使用受控子进程夹具，安装恢复使用受控安装器边界。本轮没有运行收费模型、远端 Conda/npm 安装或 GitHub 托管 CI；本地回归结果不代表这些外部组合均已实跑。模型、推理设置及执行权限沿用用户配置。
+
+```bash
+.conda-env/bin/python -m pytest -q --junitxml=/tmp/ocr2-final-suite.xml
+.conda-env/bin/python -m ruff check src tests
+git diff --check
+.conda-env/bin/python -m pip check
+.conda-env/bin/python -m hatchling build -t wheel -d /tmp/ocr2-wheel-output
+```
+
 ## OCR 核对后修复验收（2026-10-15）
 
 基于 `bc58f801` 对本轮 OCR 评论核对后实施。修复对照及未采纳项见 [实施记录](quality-first-implementation.md#ocr-核对后实施2026-10-15)，新增恢复与网络约束见 [设计修订](design.md#2026-10-15-ocr-边界修订)。原有历史验收文件保持不变。

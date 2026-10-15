@@ -177,15 +177,17 @@ async def test_runtime_failures_are_bounded_across_restarts(tmp_path, monkeypatc
         delivery = DeliveryCoordinator(store, workspace, SimpleNamespace(), SimpleNamespace(prepare_delivery=prepare), verify, runtime)
         with pytest.raises(AA2Error):
             await delivery.finish(rid)
-    assert len(calls) == 4
-    assert store.get(rid, "delivery/journal")["runtime_budget_used"] == 4
-    assert len(store.get(rid, "delivery/journal")["runtime_failures"]) == 4
+    assert len(calls) == 2
+    assert store.get(rid, "delivery/journal")["runtime_budget_used"] == 2
+    assert store.get(rid, "delivery/journal")["phase"] == "runtime_blocked"
+    assert len(store.get(rid, "delivery/journal")["runtime_failures"]) == 2
     body = config.load().model_dump(mode="json")
     body["delivery"]["max_runtime_retries"] = 4
     write_json(config.path, body)
     with pytest.raises(AA2Error):
         await delivery.finish(rid)
-    assert len(calls) == 5
+    assert len(calls) == 3
+    assert store.get(rid, "delivery/journal")["runtime_budget_used"] == 3
 
 
 async def test_renderer_failure_unwinds_workflow(tmp_path, monkeypatch):

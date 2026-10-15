@@ -307,9 +307,12 @@ def gc(project: Project = Path("."), dry_run: bool = False):
                 with file_lock(store.root / "controller.lock", blocking=False):
                     resources.finish_pending()
                     resources.collect_artifacts_safely()
+                    result = resources.collect()
             except BusyProject:
-                pass
-        console.print_json(data=resources.collect(dry_run))
+                raise AA2Error("控制器正在运行；本次未执行资源删除，请稍后重试") from None
+        else:
+            result = resources.collect(True)
+        console.print_json(data=result)
     except AA2Error as exc:
         fail(exc)
 

@@ -28,6 +28,8 @@ class ArtifactStore:
             run = db.execute("SELECT id FROM runs WHERE status NOT IN ('SUCCEEDED','CANCELLED')").fetchone()
             if not path.exists():
                 atomic_write(path, text)
+            elif digest(path.read_bytes()) != sha:
+                raise ValueError("Existing artifact integrity check failed")
             db.execute("CREATE TABLE IF NOT EXISTS artifact_edges(parent TEXT, child TEXT, PRIMARY KEY(parent,child))")
             def link(value):
                 if isinstance(value, dict):
@@ -45,8 +47,22 @@ class ArtifactStore:
         return ref
 
     def put_file(self, source: Path, kind="binary") -> dict:
+        with source.open("rb") as stream:
+            return self.put_stream(stream, kind)
+
+    def put_stream(self, incoming, kind="binary") -> dict:
+        """Archive the already opened source without reopening an untrusted path."""
         from .workspace import file_digest
-        sha = file_digest(source)
+        self.root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryFile(dir=self.root) as captured:
+            shutil.copyfileobj(incoming, captured, 1024 * 1024)
+            captured.seek(0)
+            import hashlib
+            sha = hashlib.file_digest(captured, "sha256").hexdigest()
+            captured.seek(0)
+            return self._publish_stream(captured, sha, kind, file_digest)
+
+    def _publish_stream(self, incoming, sha, kind, file_digest):
         destination = self.root / sha[:2] / sha
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -54,7 +70,7 @@ class ArtifactStore:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 fd, temporary = tempfile.mkstemp(dir=destination.parent)
                 try:
-                    with os.fdopen(fd, "wb") as output, source.open("rb") as incoming:
+                    with os.fdopen(fd, "wb") as output:
                         shutil.copyfileobj(incoming, output, 1024 * 1024)
                         output.flush()
                         os.fsync(output.fileno())
@@ -69,6 +85,8 @@ class ArtifactStore:
                 finally:
                     if os.path.exists(temporary):
                         os.unlink(temporary)
+            elif file_digest(destination) != sha:
+                raise ValueError("Existing artifact integrity check failed")
             run = db.execute("SELECT id FROM runs WHERE status NOT IN ('SUCCEEDED','CANCELLED')").fetchone()
             db.execute("INSERT OR IGNORE INTO artifact_owners VALUES(?,?)", (sha, run[0] if run else "shared"))
             ref = self._register(db, sha, kind, destination.stat().st_size, run)
@@ -97,6 +115,7 @@ class ArtifactStore:
     def reading(self, value, run_id):
         """Pin a model invocation's evidence until its consumer finishes or is cancelled."""
         leases, queue, traversed, pinned = [], [(ref, True) for ref in references(value)], set(), set()
+        retired_hashes = set()
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             while queue:
@@ -105,6 +124,7 @@ class ArtifactStore:
                 kinds = {row[0] for row in db.execute("SELECT kind FROM artifact_kinds WHERE hash=?", (sha,))}
                 if not declared and not kinds and not db.execute("SELECT 1 FROM artifact_owners WHERE hash=?", (sha,)).fetchone():
                     continue  # Opaque research examples cannot invent required artifacts.
+                retired = sha in retired_hashes
                 if ref.get("kind") in LOG_KINDS or kinds & LOG_KINDS:
                     if sha not in pinned:
                         pinned.add(sha)
@@ -116,10 +136,17 @@ class ArtifactStore:
                             db.execute("DELETE FROM retired_diagnostics WHERE hash=?", (sha,))
                         elif not db.execute("SELECT 1 FROM retired_diagnostics WHERE hash=?", (sha,)).fetchone():
                             raise ValueError("Required diagnostic artifact is unavailable")
-                if sha in traversed or ref.get("kind") in LOG_KINDS:
+                        else:
+                            retired = True
+                            retired_hashes.add(sha)
+                if retired and ref.get("kind") is not None and ref["kind"] not in LOG_KINDS:
+                    raise ValueError("Required nondiagnostic artifact is unavailable")
+                if sha in traversed or retired:
                     continue
                 traversed.add(sha)
                 edges = list(db.execute("SELECT child FROM artifact_edges WHERE parent=?", (sha,)))
+                if not edges and kinds and kinds <= LOG_KINDS:
+                    continue
                 if not kinds and not edges and not ("kind" in ref and "bytes" in ref):
                     continue  # An inline content fingerprint is not an artifact reference.
                 raw = self.bytes(ref)

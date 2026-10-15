@@ -111,8 +111,13 @@ def request_documents(context: dict) -> dict:
     from .util import digest
     result = copy.deepcopy(context)
     bodies = {}
+    visited = set()
 
     def visit(value):
+        if isinstance(value, (dict, list)):
+            if id(value) in visited:
+                return
+            visited.add(id(value))
         if isinstance(value, dict):
             retrieval, body = value.get("retrieval"), value.get("excerpt")
             if isinstance(retrieval, dict) and isinstance(body, str) and isinstance(retrieval.get("artifact"), dict):

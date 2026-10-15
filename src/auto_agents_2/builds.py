@@ -19,12 +19,19 @@ def normalized(command: Command, workspace: Path) -> Command:
     # exactly as declared; inferred outputs must actually be produced and verified.
     if not outputs and Path(command.argv[0]).name == "npm" and command.argv[1:] == ["run", "build"]:
         manifest = cwd / "package.json"
-        if manifest.is_file():
+        try:
             data = json.loads(manifest.read_text())
+            if not isinstance(data, dict) or any(not isinstance(data.get(key, {}), dict)
+                    for key in ("dependencies", "devDependencies")):
+                raise ValueError("Expected dependency mappings")
             dependencies = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
             directory = ".next" if "next" in dependencies else "dist" if "vite" in dependencies else None
             if directory:
                 outputs = [(PurePosixPath(command.cwd) / directory).as_posix()]
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            raise VerificationPreparationError(f"Cannot infer build outputs from {command.cwd}/package.json") from exc
     allowed = {cwd / "dist", cwd / ".next"}
     for output in outputs:
         path = contained(workspace, output)
@@ -60,9 +67,12 @@ def output_hashes(command: Command, workspace: Path) -> dict[str, str]:
         if not path.is_dir() or path.is_symlink() or any(
                 p.is_symlink() or not (p.is_dir() or p.is_file()) for p in path.rglob("*")):
             raise VerificationPreparationError(f"Build output missing or contains symlinks: {output}")
-        if not any(p.is_file() for p in path.rglob("*")):
+        entry = generated_entry(path, workspace)
+        def has_file(value):
+            return value[0] == "file" or value[0] == "directory" and any(has_file(child) for _, child in value[1])
+        if not has_file(entry):
             raise VerificationPreparationError(f"Build produced no files: {output}")
-        result[output] = digest(generated_entry(path, workspace))
+        result[output] = digest(entry)
     return result
 
 
@@ -70,6 +80,17 @@ def command_hashes(command: Command) -> set[str]:
     """Recognize an old observation for recovery, never reuse it as new evidence."""
     body = command.model_dump()
     return {digest(body), digest({k: v for k, v in body.items() if k != "outputs"})} if not command.outputs else {digest(body)}
+
+
+def overlaps(workspace, first, second):
+    left, right = (contained(workspace, name).resolve() for name in (first, second))
+    return left.is_relative_to(right) or right.is_relative_to(left)
+
+
+def runtime_commands(plan, workspace, environment):
+    commands = verification_commands(plan.runtime_probes, workspace, plan.runtime_prepare, prepare_all=True) if plan else []
+    return commands or [Command(argv=[str(environment.prefix / "bin/python"), "-c",
+                                      "import sys; assert sys.prefix == " + repr(str(environment.prefix))])]
 
 
 def verification_commands(commands: list[Command], workspace: Path, preparations=(), *, prepare_all=False) -> list[Command]:
@@ -115,9 +136,8 @@ def verification_commands(commands: list[Command], workspace: Path, preparations
             return
         active.add(key)
         for declared in command.inputs:
-            path = PurePosixPath(declared)
             for output, producer in producers.items():
-                if path.is_relative_to(output) or PurePosixPath(output).is_relative_to(path):
+                if overlaps(workspace, declared, output):
                     visit(producer)
         active.remove(key)
         visited.add(key)

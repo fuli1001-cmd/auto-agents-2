@@ -100,6 +100,14 @@ class PreviewSpec(Record):
     routes: list[str] = ["/"]
     actions: list[BrowserAction] = []
 
+    @model_validator(mode="after")
+    def action_coverage(self):
+        if not self.routes or len(self.routes) != len(set(self.routes)):
+            raise ValueError("Preview routes must be nonempty and unique")
+        if any(action.route not in self.routes for action in self.actions):
+            raise ValueError("Every preview action must name a declared route")
+        return self
+
 
 class PlanResult(Record):
     summary: str

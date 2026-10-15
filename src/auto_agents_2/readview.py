@@ -11,7 +11,7 @@ from pathlib import Path
 from .util import SECRET
 from .workspace import EXCLUDED, file_digest, git
 
-VIEW_VERSION = "public-v2"
+VIEW_VERSION = "public-v3"
 SENSITIVE_DIRS = {".aws", ".ssh", ".codex", ".gemini", ".credentials"}
 SENSITIVE_FILES = {".netrc", ".npmrc", ".pypirc", ".git-credentials"}
 
@@ -24,6 +24,10 @@ def sensitive(path: Path, extra=()) -> bool:
 
 def public_files(root: Path, extra=()):
     candidates, denied_inodes, denied_hashes = [], set(), set()
+    for path in sensitive_files(root, extra):
+        info = path.stat()
+        denied_inodes.add((info.st_dev, info.st_ino))
+        denied_hashes.add(file_digest(path))
     for directory, folders, names in os.walk(root, followlinks=False):
         folders[:] = [n for n in folders if n not in EXCLUDED - SENSITIVE_DIRS
                       and not Path(directory, n).is_symlink()]
@@ -72,7 +76,7 @@ def create_view(workspace: Path, destination: Path, extra=()) -> Path:
 def sensitive_values(workspace: Path, extra=()) -> list[str]:
     values = set()
     def strings(value, protected=False):
-        if isinstance(value, str) and protected and len(value) > 3:
+        if isinstance(value, str) and protected and value:
             values.add(value)
         elif isinstance(value, dict):
             for key, child in value.items():
@@ -80,33 +84,37 @@ def sensitive_values(workspace: Path, extra=()) -> list[str]:
         elif isinstance(value, list):
             for child in value:
                 strings(child, protected)
-    for directory, folders, names in os.walk(workspace, followlinks=False):
-        folders[:] = [n for n in folders if n not in EXCLUDED - SENSITIVE_DIRS
-                      and not Path(directory, n).is_symlink()]
+    for path in sensitive_files(workspace, extra):
+        try:
+            text = path.read_bytes().decode("utf-8")
+        except UnicodeError:
+            continue
+        strings(text.strip(), True)
+        try:
+            document = json.loads(text)
+            strings(document, True)
+        except ValueError:
+            for line in text.splitlines():
+                match = re.match(r"\s*([^=]+)\s*=\s*(.*)", line) if "=" in line else re.match(r"\s*([^:]+)\s*:\s*(.*)", line)
+                if match and not line.lstrip().startswith("#"):
+                    key, value = match.groups()
+                    value = value.strip().strip("\"'")
+                    if SECRET.search(key) or re.search(r"://[^/\s]+:[^/\s]+@", value):
+                        strings(value, True)
+            if "PRIVATE KEY" in text:
+                for line in text.splitlines():
+                    if line.strip() and not line.startswith("-----"):
+                        strings(line.strip(), True)
+            for match in re.finditer(r"(?i)\bpassword\s+(\S+)", text):
+                strings(match[1], True)
+    return sorted(values, key=len, reverse=True)
+
+
+def sensitive_files(root: Path, extra=()):
+    """Output exclusions do not exempt protected files from alias detection."""
+    for directory, folders, names in os.walk(root, followlinks=False):
+        folders[:] = [name for name in folders if not Path(directory, name).is_symlink()]
         for name in names:
             path = Path(directory, name)
-            if not sensitive(path.relative_to(workspace), extra) or path.is_symlink() or not path.is_file():
-                continue
-            try:
-                text = path.read_bytes().decode("utf-8")
-            except UnicodeError:
-                continue
-            strings(text.strip(), True)
-            try:
-                document = json.loads(text)
-                strings(document, not isinstance(document, dict))
-            except ValueError:
-                for line in text.splitlines():
-                    match = re.match(r"\s*([^=]+)\s*=\s*(.*)", line) if "=" in line else re.match(r"\s*([^:]+)\s*:\s*(.*)", line)
-                    if match and not line.lstrip().startswith("#"):
-                        key, value = match.groups()
-                        value = value.strip().strip("\"'")
-                        if SECRET.search(key) or re.search(r"://[^/\s]+:[^/\s]+@", value):
-                            strings(value, True)
-                if "PRIVATE KEY" in text:
-                    for line in text.splitlines():
-                        if line.strip() and not line.startswith("-----"):
-                            strings(line.strip(), True)
-                for match in re.finditer(r"(?i)\bpassword\s+(\S+)", text):
-                    strings(match[1], True)
-    return sorted(values, key=len, reverse=True)
+            if sensitive(path.relative_to(root), extra) and not path.is_symlink() and path.is_file():
+                yield path

@@ -196,7 +196,9 @@ class ConfigStore:
                 try:
                     settings = {}
                     if (home / "config.toml").exists():
-                        settings.update(tomllib.loads((home / "config.toml").read_text()))
+                        raw_base = (home / "config.toml").read_bytes()
+                        settings.update(tomllib.loads(raw_base.decode()))
+                        fingerprints.append(digest(raw_base))
                     settings.update(tomllib.loads(file.read_text()))
                     fingerprints.append(digest(file.read_bytes()))
                 except (OSError, ValueError) as exc:
@@ -245,7 +247,14 @@ class ConfigStore:
                   "effort": effort, "native_profile": native_profile,
                   "extra_args": redact(extra), "profile_hashes": fingerprints,
                   "prompt_profile": profile.prompt_profile}
-        public["fingerprint"] = digest(public)
+        from .workspace import file_digest
+        try:
+            native = Path(environment.get("CODEX_HOME", "~/.codex")).expanduser() / "config.toml"
+            native_hash = digest(native.read_bytes()) if spec.kind == "codex" and native.is_file() else ""
+            public["fingerprint"] = digest(["provider-execution-v2", public, str(Path(binary).resolve()),
+                file_digest(Path(binary)), spec.environment, profile.environment, native_hash])
+        except OSError as exc:
+            raise ConfigurationError("Cannot establish provider execution identity") from exc
         return {**public, "binary": binary, "environment": environment, "args": extra}
 
 
@@ -256,12 +265,17 @@ def validate_extra_args(args: list[str]) -> None:
         arg = args[i]
         key = arg.split("=", 1)[0]
         if key in permitted_values:
+            value = arg.partition("=")[2] if "=" in arg else args[i + 1] if i + 1 < len(args) else ""
+            if not value.strip():
+                raise ConfigurationError("Unsupported provider argument or setting (value omitted)")
             i += 1 if "=" in arg else 2
             if i > len(args):
                 raise ConfigurationError("Unsupported provider argument or setting (value omitted)")
             continue
         if arg in {"-c", "--config"} and i + 1 < len(args):
-            setting = args[i + 1].split("=", 1)[0]
+            setting, separator, value = args[i + 1].partition("=")
+            if not separator or not value.strip().strip("\"'"):
+                raise ConfigurationError("Unsupported provider argument or setting (value omitted)")
             if setting not in {"model", "model_provider", "model_reasoning_effort", "service_tier"}:
                 raise ConfigurationError("Unsupported provider argument or setting (value omitted)")
             i += 2

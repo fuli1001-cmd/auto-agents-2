@@ -340,7 +340,10 @@ class ProviderRouter:
                         session = decoder.session
                         self.store.checkpoint(run_id, session_key, session)
                     typ = event.get("type", event.get("event", ""))
-                    item = event.get("item") or {}
+                    item = event.get("item", {})
+                    if (not isinstance(typ, str) or typ in {"item.started", "item.completed"}
+                            and (not isinstance(item, dict) or not isinstance(item.get("type", ""), str))):
+                        raise ProviderError("Malformed provider progress event structure")
                     detail = {"thread.started": "会话已建立", "turn.started": "等待模型响应",
                               "turn.completed": "响应已返回，校验结果", "turn.failed": "调用失败",
                               "error": "provider 报错"}.get(typ, "")

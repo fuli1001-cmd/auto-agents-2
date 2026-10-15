@@ -121,7 +121,7 @@ def redact(value: Any, key: str = "") -> Any:
 def scrub_text(text: str, secrets: list[str] | None = None) -> str:
     # Match against the original text: replacing a short value must not expose
     # the suffix of a longer or partially overlapping credential.
-    values = {part for secret in secrets or [] if secret and len(secret) > 3
+    values = {part for secret in secrets or [] if secret
               for part in (secret, *secret.splitlines()) if part}
     spans = []
     for value in values:

@@ -7,6 +7,8 @@ import json
 import os
 import shutil
 import socket
+import stat
+import sys
 import threading
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
@@ -17,10 +19,11 @@ from .errors import AA2Error, PrototypeBrowserError
 from .evidence import NODE_RUNTIME_CACHES
 from .network import PreviewProxy
 from .progress import capture_output, current_activity
+from .safe_files import directory_fd, regular_file
 from .sandbox import SandboxRunner
 from .util import atomic_write, digest, scrub_text
 
-PROTOTYPE_BROWSER_VERSION = 3
+PROTOTYPE_BROWSER_VERSION = 4
 
 
 class DesignCatalog:
@@ -73,9 +76,51 @@ class DesignCatalog:
 
 class PreviewServer:
     def __init__(self, directory: Path):
+        directory = directory.absolute()
         class Handler(http.server.SimpleHTTPRequestHandler):
             def log_message(self, *args):
                 pass
+
+            def send_head(self):
+                try:
+                    path = Path(self.translate_path(self.path))
+                    path.relative_to(directory.absolute())
+                    # Every parent and the final component are opened without following links.
+                    with directory_fd(path.parent) as parent:
+                        info = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+                        if stat.S_ISDIR(info.st_mode):
+                            with directory_fd(path) as folder:
+                                parsed = urlsplit(self.path)
+                                if not parsed.path.endswith("/"):
+                                    self.send_response(301)
+                                    self.send_header("Location", urlunsplit(parsed._replace(path=parsed.path + "/")))
+                                    self.send_header("Content-Length", "0")
+                                    self.end_headers()
+                                    return None
+                                stream = None
+                                for name in ("index.html", "index.htm"):
+                                    try:
+                                        stream = regular_file(folder, name)
+                                        path = path / name
+                                        break
+                                    except FileNotFoundError:
+                                        continue
+                                if stream is None:
+                                    raise FileNotFoundError("Directory index unavailable")
+                        else:
+                            stream = regular_file(parent, path.name)
+                    try:
+                        self.send_response(200)
+                        self.send_header("Content-type", self.guess_type(str(path)))
+                        self.send_header("Content-Length", str(os.fstat(stream.fileno()).st_size))
+                        self.end_headers()
+                        return stream
+                    except BaseException:
+                        stream.close()
+                        raise
+                except (OSError, ValueError):
+                    self.send_error(404, "Preview file unavailable")
+                    return None
         handler = functools.partial(Handler, directory=str(directory))
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -154,7 +199,13 @@ class PreviewContext:
     async def close(self):
         try:
             await self.context.close()
-        finally:
+        except BaseException as exc:
+            try:
+                await self.proxy.close()
+            except BaseException as cleanup:
+                exc.add_note("Preview proxy cleanup failed: " + type(cleanup).__name__)
+            raise
+        else:
             await self.proxy.close()
 
 
@@ -187,10 +238,17 @@ async def preview_context(browser, origin, errors, width, height):
         await context.route("**/*", route)
         await context.route_web_socket("**/*", websocket)
         return PreviewContext(context, proxy)
-    except BaseException:
-        if context is not None:
-            await context.close()
-        await proxy.close()
+    except BaseException as exc:
+        try:
+            if context is not None:
+                await context.close()
+        except BaseException as cleanup:
+            exc.add_note("Browser context cleanup failed: " + type(cleanup).__name__)
+        finally:
+            try:
+                await proxy.close()
+            except BaseException as cleanup:
+                exc.add_note("Preview proxy cleanup failed: " + type(cleanup).__name__)
         raise
 
 
@@ -355,9 +413,20 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
     except Exception as exc:
         raise PrototypeBrowserError("Application browser check failed: " + scrub_text(str(exc)), results) from exc
     finally:
-        await sandbox.stop(process)
-        await asyncio.gather(*drains, return_exceptions=True)
-        shutil.rmtree(scratch, ignore_errors=True)
+        original = sys.exception()
+        try:
+            await sandbox.stop(process)
+        except BaseException as exc:
+            if original is None:
+                raise
+            original.add_note("Preview process cleanup failed: " + type(exc).__name__)
+        finally:
+            try:
+                for reader in drains:
+                    reader.cancel()
+                await asyncio.gather(*drains, return_exceptions=True)
+            finally:
+                shutil.rmtree(scratch, ignore_errors=True)
 
 
 def browser_environment(cache: Path):

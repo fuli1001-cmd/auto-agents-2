@@ -161,6 +161,10 @@ class ResourceManager:
                     ORDER BY touched""")]
                 retained = [dict(r) for r in db.execute("SELECT * FROM resources WHERE state!='removed'")]
                 pins = [Path(row[0]) for row in db.execute("SELECT path FROM delivery_pins")]
+                terminal = {row[0] for row in db.execute("SELECT id FROM runs WHERE status IN ('SUCCEEDED','CANCELLED')")}
+                for row in retained:
+                    if row["run_id"] in terminal:
+                        row["refs"] = 0
             sizes = {r["path"]: tree_size(Path(r["path"])) for r in rows}
             cache_roots = sorted((Path(r["path"]) for r in retained if r["kind"] in {"cache", "environment"}),
                                  key=lambda p: len(p.parts))
@@ -181,16 +185,18 @@ class ResourceManager:
                     expired = now() - row["touched"] > self.policy.cache_ttl_seconds
                     if not (expired or pressure or cache_size > self.policy.cache_max_bytes):
                         continue
-                if path.is_symlink() or not path.resolve().is_relative_to(self.store.root.resolve()):
+                if path.absolute() != path.resolve() or not path.resolve().is_relative_to(self.store.root.resolve()):
                     result["errors"].append(f"Unsafe resource: {path}")
                     continue
                 size = sizes[row["path"]]
                 if any(Path(r["path"]) != path and Path(r["path"]).is_relative_to(path) for r in retained):
                     continue  # Registered descendants must be reclaimed under their own policy first.
-                if any(path.is_relative_to(p) for p in [*pins, *(Path(r["path"]) for r in retained if r["refs"] > 0)]):
+                if any(path.is_relative_to(p) or p.is_relative_to(path)
+                       for p in [*pins, *(Path(r["path"]) for r in retained if r["refs"] > 0)]):
                     continue
                 result["candidates"].append(str(path))
                 if dry_run:
+                    cache_size -= size if row["kind"] in {"cache", "environment"} else 0
                     continue
                 try:
                     with self.store.connect() as db:
@@ -206,6 +212,8 @@ class ResourceManager:
                         if any(p.is_relative_to(path) for p in descendants):
                             continue
                         size = tree_size(path)
+                        if path.absolute() != path.resolve() or not path.resolve().is_relative_to(self.store.root.resolve()):
+                            raise PolicyViolation("Resource path changed before collection")
                         db.execute("UPDATE resources SET state='collecting' WHERE id=?", (row["id"],))
                         # Paths were created under controller-owned roots, never user directories.
                         if row["kind"] == "worktree" and path.exists():

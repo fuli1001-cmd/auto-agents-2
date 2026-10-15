@@ -101,7 +101,7 @@ def apply_patch(plan: PlanResult, patch: PlanPatch, revision: int, failures: set
         _retain_checks(task.checks, [c for t in replacements for c in t.checks])
     changes = {k: getattr(patch, k) for k in ("final_checks", "runtime_prepare", "runtime_probes", "preview", "environment_file", "requirements_file")
                if getattr(patch, k) is not None}
-    candidate = plan.model_copy(deep=True, update={"tasks": list(tasks.values()), "document": patch.document, **changes})
+    candidate = plan.model_copy(update={"tasks": list(tasks.values()), "document": patch.document, **changes}).model_copy(deep=True)
     _retain_checks(plan.final_checks, candidate.final_checks)
     _retain_checks(plan.runtime_prepare, candidate.runtime_prepare)
     _retain_checks(plan.runtime_probes, candidate.runtime_probes)

@@ -39,8 +39,17 @@ class PipInputs:
         # Placeholder paths bind local dependencies to the owned immutable source copy.
         def render(line):
             line = line.replace("{AA2_SOURCE_URI}", source.as_uri())
-            return re.sub(r"\{AA2_SOURCE\}/(.*?)(?=\s+;|$)",
-                          lambda match: shlex.quote(str(source / match[1])), line)
+            def local(match):
+                operand = match[1]
+                if line.startswith("-e "):
+                    return shlex.quote(str(source / operand))
+                extras = re.search(r"\[[A-Za-z0-9_,. -]+\]$", operand)
+                suffix = extras[0] if extras else ""
+                path = operand[:extras.start()] if extras else operand
+                # Non-editable requirement operands are not shell-tokenized by pip.
+                return (source / path).as_uri() + suffix
+            return re.sub(r"\{AA2_SOURCE\}/(.*?)(?=\s+(?:;|--hash(?:=|\s)|--config-settings(?:=|\s))|$)",
+                          local, line)
         return tuple("\n".join(render(line) for line in lines) + "\n"
                      for lines in (self.requirements, self.constraints))
 
@@ -48,7 +57,46 @@ class PipInputs:
 def pip_inputs(workspace: Path, explicit: str = "", additional=()) -> PipInputs:
     result = PipInputs()
 
+    def options(line):
+        quoted, escaped = "", False
+        for index, char in enumerate(line):
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char in {"'", '"'}:
+                quoted = "" if char == quoted else char if not quoted else quoted
+            elif not quoted and char.isspace() and re.match(r"\s+--(?:hash|config-settings)(?:=|\s)", line[index:]):
+                suffix = line[index:].strip()
+                try:
+                    tokens = shlex.split(suffix)
+                except ValueError as exc:
+                    raise AA2Error("Invalid pip requirement options") from exc
+                offset = 0
+                while offset < len(tokens):
+                    key, equals, value = tokens[offset].partition("=")
+                    if key not in {"--hash", "--config-settings"}:
+                        raise AA2Error("Unsupported per-requirement option")
+                    if not equals:
+                        offset += 1
+                        value = tokens[offset] if offset < len(tokens) else ""
+                    if not value or value.startswith("--"):
+                        raise AA2Error("Missing pip requirement option value")
+                    offset += 1
+                return line[:index].rstrip(), " " + suffix
+        return line, ""
+
+    def include_name(name):
+        try:
+            parts = shlex.split(name)
+        except ValueError as exc:
+            raise AA2Error("Invalid quoting in pip manifest include") from exc
+        if len(parts) != 1 or not parts[0].strip():
+            raise AA2Error("Pip manifest include requires one nonempty filename")
+        return parts[0]
+
     def normalize(line: str, base: Path) -> str:
+        line, requirement_options = options(line)
         editable = re.match(r"^(?:-e\s+|--editable[=\s]+)(.+)$", line)
         value = editable[1] if editable else line
         # Keep URLs/options/markers verbatim; only local path operands are rebound.
@@ -92,7 +140,7 @@ def pip_inputs(workspace: Path, explicit: str = "", additional=()) -> PipInputs:
                      "{AA2_SOURCE}/" + relative) + suffix + marker
         elif editable:
             result.local = True  # VCS editable installs also cannot share mutable bindings.
-        return ("-e " if editable else "") + value
+        return ("-e " if editable else "") + value + requirement_options
 
     def read(path: Path, base: Path, constraint=False, stack=()):
         path = path.resolve()
@@ -109,7 +157,7 @@ def pip_inputs(workspace: Path, explicit: str = "", additional=()) -> PipInputs:
             match = re.match(r"^(--requirement|--constraint)(?:=|\s+)(.+)$|^(-r|-c)\s*(.+)$", line)
             if match:
                 flag, name = (match[1], match[2]) if match[1] else (match[3], match[4])
-                read(path.parent / shlex.split(name)[0], base, constraint or flag in {"-c", "--constraint"}, stack + (path,))
+                read(path.parent / include_name(name), base, constraint or flag in {"-c", "--constraint"}, stack + (path,))
             else:
                 (result.constraints if constraint else result.requirements).append(normalize(line, base))
 
@@ -132,10 +180,12 @@ def pip_inputs(workspace: Path, explicit: str = "", additional=()) -> PipInputs:
                 for dependency in project.get("dependencies", []) + extras.get("test", []) + extras.get("dev", []):
                     result.requirements.append(normalize(dependency, base))
     for line in additional:
+        if not line.strip():
+            continue
         match = re.match(r"^(--requirement|--constraint)(?:=|\s+)(.+)$|^(-r|-c)\s*(.+)$", line.strip())
         if match:
             flag, name = (match[1], match[2]) if match[1] else (match[3], match[4])
-            read(workspace / shlex.split(name)[0], workspace, flag in {"-c", "--constraint"})
+            read(workspace / include_name(name), workspace, flag in {"-c", "--constraint"})
         else:
             result.requirements.append(normalize(line.strip(), workspace))
     return result

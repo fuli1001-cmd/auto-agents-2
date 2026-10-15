@@ -14,6 +14,7 @@ from manual_support import finalize
 from auto_agents_2.config import ConfigStore
 from auto_agents_2.design import inspect_application
 from auto_agents_2.environment import EnvironmentManager
+from auto_agents_2.errors import PrototypeBrowserError
 from auto_agents_2.models import BrowserAction, Command, PreviewSpec
 from auto_agents_2.resources import ResourceManager
 from auto_agents_2.sandbox import SandboxRunner
@@ -94,12 +95,19 @@ async def main():
             results[framework] = {"checks": [r.model_dump() for r in checks]}
             if not (passed(checks)):
                 raise RuntimeError(checks[0].output)
-            visuals = await inspect_application(preview, work, root / "visuals" / framework, environment, runner, root)
+            try:
+                visuals = await inspect_application(preview, work, root / "visuals" / framework, environment, runner, root)
+            except PrototypeBrowserError as exc:
+                results[framework]["browser"] = exc.results
+                raise
             results[framework]["browser"] = visuals
             print(f"Passed {framework}: production build, desktop and mobile click assertions", flush=True)
         store.update(run["id"], status="SUCCEEDED", outcome="DIAGNOSTIC")
-    except BaseException:
-        store.update(run["id"], status="CANCELLED", outcome="DIAGNOSTIC_FAILED")
+    except BaseException as exc:
+        try:
+            store.update(run["id"], status="CANCELLED", outcome="DIAGNOSTIC_FAILED")
+        except Exception as secondary:
+            exc.add_note("Failure status could not be saved: " + type(secondary).__name__)
         raise
     finally:
         directories = [project / framework / generated for framework in ("react", "next")

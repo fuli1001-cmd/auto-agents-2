@@ -14,29 +14,7 @@ from .replanning import assess
 from .util import digest, identifier, now, redact
 
 TERMINAL = ("SUCCEEDED", "CANCELLED")
-
-
-class Store:
-    def __init__(self, project: Path, *, readonly=False, _initialize=False):
-        self.readonly = readonly
-        self.root = project.resolve() / ".aa2"
-        if self.root.is_symlink():
-            raise AA2Error("Project state must be a local directory, not a symlink")
-        self.path = self.root / "state.sqlite"
-        if self.path.exists() and not _initialize:
-            # Readers and engine construction must never perform a migration.
-            with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)) as db:
-                meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
-                version = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] if meta else "0"
-                if version not in {"0", "1", "2", "3"}:
-                    raise AA2Error("Unsupported state database version")
-            return
-        if readonly:
-            raise AA2Error("Project state database does not exist")
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.root.chmod(0o700)
-        with self.connect() as db:
-            db.executescript("""
+SCHEMA = """
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             INSERT OR IGNORE INTO meta VALUES('schema_version','1');
             CREATE TABLE IF NOT EXISTS runs(
@@ -70,7 +48,30 @@ class Store:
                 id TEXT PRIMARY KEY, hash TEXT NOT NULL, run_id TEXT, purpose TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS retired_diagnostics(
                 hash TEXT PRIMARY KEY, retired REAL NOT NULL, reason TEXT NOT NULL);
-            """)
+"""
+
+
+class Store:
+    def __init__(self, project: Path, *, readonly=False, _initialize=False):
+        self.readonly = readonly
+        self.root = project.resolve() / ".aa2"
+        if self.root.is_symlink():
+            raise AA2Error("Project state must be a local directory, not a symlink")
+        self.path = self.root / "state.sqlite"
+        if self.path.exists() and not _initialize:
+            # Readers and engine construction must never perform a migration.
+            with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)) as db:
+                meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
+                version = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] if meta else "0"
+                if version not in {"0", "1", "2", "3", "4"}:
+                    raise AA2Error("Unsupported state database version")
+            return
+        if readonly:
+            raise AA2Error("Project state database does not exist")
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.root.chmod(0o700)
+        with self.connect() as db:
+            db.executescript(SCHEMA)
             if db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] != "1":
                 raise AA2Error("Unsupported state database version")
             db.execute("BEGIN IMMEDIATE")
@@ -105,7 +106,7 @@ class Store:
         with self.connect() as db:
             meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
             version = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] if meta else "0"
-            if version == "3":
+            if version == "4":
                 return
             backup = self.root / f"state-v{version if version != '0' else '1'}.backup.sqlite"
             if not backup.exists():
@@ -120,9 +121,11 @@ class Store:
                     os.fsync(directory)
                 finally:
                     os.close(directory)
-            if not meta:
-                Store(self.root.parent, _initialize=True)
             db.execute("BEGIN IMMEDIATE")
+            # executescript would commit before running DDL; keep schema and data atomic.
+            for statement in SCHEMA.split(";"):
+                if statement.strip():
+                    db.execute(statement)
             columns = {row[1] for row in db.execute("PRAGMA table_info(questions)")}
             if "interaction" not in columns:
                 db.execute("ALTER TABLE questions ADD COLUMN interaction TEXT NOT NULL DEFAULT '{}'")
@@ -142,6 +145,8 @@ class Store:
                         self._put(db, rid, "task_state/" + task["id"], {
                             "version": 1, "revision": 1, "implementation": "accepted" if task["id"] in done else "pending",
                             "evidence": "stale" if task["id"] in done else "absent"})
+                if version == "3":
+                    continue  # v3 data semantics are already current; only its schema needs repair.
                 owners = {}
                 for key, value in records.items():
                     if key.startswith("recovery/failures/") and value:
@@ -161,8 +166,8 @@ class Store:
                     if key.startswith("replanning/evidence/") and key != "replanning/evidence/contracts":
                         self._put(db, rid, key, {**value, "comparable": False,
                                                "comparison_reason": "legacy evidence requires revalidation"})
-            db.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
-            self._event(db, None, "state.migrated", {"version": 3, "backup": str(backup)})
+            db.execute("UPDATE meta SET value='4' WHERE key='schema_version'")
+            self._event(db, None, "state.migrated", {"version": 4, "backup": str(backup)})
 
     def finish_recovery(self, rid, updates, pending, *, replan=None, successor=None):
         """Dispatch and retire the obsolete question together; retain raw history."""
@@ -504,6 +509,12 @@ class Store:
         """Receipt, current runtime ownership and success are one durable transaction."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            finished = db.execute("SELECT status FROM runs WHERE id=?", (rid,)).fetchone()
+            if finished and finished[0] == "SUCCEEDED":
+                prior = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key='delivery/receipt'", (rid,)).fetchone()
+                if not prior or json.loads(prior[0]) != receipt:
+                    raise AA2Error("Completed delivery cannot be replaced by a different receipt")
+                return
             row = db.execute("SELECT data FROM runs WHERE id=?", (rid,)).fetchone()
             body = json.loads(row[0])
             body.update(outcome=receipt["outcome"], branch=receipt["target"],

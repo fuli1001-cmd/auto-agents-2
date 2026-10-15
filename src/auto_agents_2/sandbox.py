@@ -35,7 +35,9 @@ class SandboxRunner:
         for path in hidden or []:
             if path.exists():
                 cmd += ["--tmpfs", str(path.resolve())]
-        mounts = [Path(sys.prefix), cwd.resolve(), *(p.resolve() for p in readable or [])]
+        mounts = [Path(sys.prefix).resolve(), cwd.resolve(), *(p.resolve() for p in readable or [])]
+        implicit = [Path(sys.prefix).resolve()]
+        direct = []
         executable = Path(argv[0])
         if executable.is_absolute() and executable.is_file():
             real = executable.resolve()
@@ -44,8 +46,15 @@ class SandboxRunner:
                                if p.is_relative_to(user_home) and
                                ((p / "bin/python").exists() or (p / "bin/node").exists())), None)
                 mounts.insert(0, prefix or real)
+                implicit.append((prefix or real).resolve())
                 if executable != real and not (prefix and executable.is_relative_to(prefix)):
-                    cmd += ["--ro-bind", str(real), str(executable)]
+                    direct.append((real, executable))
+        for path in [*implicit, *(p for pair in direct for p in pair)]:
+            if any(path == h.resolve() or path.is_relative_to(h.resolve()) or h.resolve().is_relative_to(path)
+                   for h in hidden or []):
+                raise PolicyViolation("Provider runtime mount would expose a protected project root")
+        for source, destination in direct:
+            cmd += ["--ro-bind", str(source), str(destination)]
         metadata = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-common-dir"],
                                   capture_output=True, text=True, timeout=10)
         if metadata.returncode == 0:
@@ -121,6 +130,25 @@ class SandboxRunner:
         return process
 
     async def stop(self, process):
+        task = asyncio.create_task(self._stop(process))
+        cancelled = None
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+                if task.cancelled():
+                    raise
+            except BaseException as exc:
+                if cancelled is None:
+                    raise
+                cancelled.add_note("Process termination failed: " + type(exc).__name__)
+                break
+        if cancelled is not None:
+            raise cancelled
+
+    async def _stop(self, process):
         if process.returncode is None:
             try:
                 os.killpg(process.pid, signal.SIGTERM)

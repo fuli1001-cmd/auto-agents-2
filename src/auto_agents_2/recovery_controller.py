@@ -137,9 +137,10 @@ class RecoveryController:
             if rows and any(c.source_hash != source for c in rows):
                 raise AA2Error("Retained candidate changed since its recorded checks; preserve user changes before recovery")
             environment = await engine._environment(work, rid, plan)
-            matching = {(c.cwd, tuple(c.argv)): c for c in commands}
-            if not rows or any((c.cwd, tuple(c.argv)) not in matching or not assess_observation(
-                    matching[(c.cwd, tuple(c.argv))], c, work, environment, engine.artifacts).valid for c in rows):
+            matching = {digest(c.model_dump()): c for c in commands}
+            if (set(matching) != {row.command_hash for row in rows} or len(rows) != len(matching)
+                    or any(row.command_hash not in matching or not assess_observation(
+                        matching[row.command_hash], row, work, environment, engine.artifacts).valid for row in rows)):
                 rows = await engine.verifier.run(commands, work, environment)
             engine._replan_checks(rid, "task/" + failure.origin_id, commands, rows, work, environment)
             failure.evidence["checks"] = [c.model_dump() for c in rows]
@@ -298,7 +299,8 @@ class RecoveryController:
         journal_key = "plan_revision/journal/" + identity
         journal = self.store.get(rid, journal_key)
         if journal:
-            if journal["phase"] != "activated" and tree_hash(work) != journal["source_hash"]:
+            if journal["phase"] != "activated" and (tree_hash(work) != journal["source_hash"]
+                    or git(work, "rev-parse", "HEAD") != journal["base_commit"]):
                 raise AA2Error("Integration changed before patch activation; preserved journal requires reconciliation")
             if journal["phase"] != "activated":
                 for snapshot in journal.get("snapshots", {}).values():
@@ -318,10 +320,16 @@ class RecoveryController:
             self.store.checkpoint(rid, "replanning/pending", pending)
         await engine._grant_replan(rid, pending)
         revision = self.store.get(rid, "plan_revision/current", {}).get("revision", 1)
+        baseline = {"source_hash": tree_hash(work), "base_commit": git(work, "rev-parse", "HEAD")}
+        def unchanged(proposal):
+            if tree_hash(work) != baseline["source_hash"] or git(work, "rev-parse", "HEAD") != baseline["base_commit"]:
+                self.store.checkpoint(rid, "recovery/patch-drift/" + identity, {**baseline, **proposal})
+                raise AA2Error("Integration baseline changed during plan amendment; preserved proposal requires reconciliation")
         patch = await engine._invoke("plan", {"plan_patch": True, "base_revision": revision,
             "plan": plan.model_dump(), "failure": failure.model_dump(), "task_origins": self.store.task_origin_state(rid),
             "specification": self.store.get(rid, "clarify"), "project": engine.contexts.build(work)},
             PlanPatch, work, rid, "recovery/patch/" + identity, fresh=True)
+        unchanged({"patch": patch.model_dump()})
         try:
             candidate, affected, reopen = apply_patch(plan, patch, revision, {failure.id}, self.store.get(rid, "task_origins", {}))
             for task in candidate.tasks:
@@ -340,12 +348,15 @@ class RecoveryController:
                 ref = f"refs/aa2/{rid}/plan-patches/{revision}/{task_id}"
                 snapshots[task_id] = {"workspace": str(path), "ref": ref, "source_hash": tree_hash(path),
                     "commit": engine.workspaces.checkpoint(path, ref, "aa2: preserve candidate before plan amendment")}
+                if path.resolve() == work.resolve():
+                    baseline["base_commit"] = snapshots[task_id]["commit"]
                 candidates[task_id] = {"state": saved, "project": engine.contexts.build(path)}
         review = await engine._invoke("review", {"review_kind": "plan_patch", "previous_plan": plan.model_dump(),
             "patch": patch.model_dump(), "plan": candidate.model_dump(), "failure": failure.model_dump(),
             "retained_candidates": candidates,
             "affected": sorted(affected), "reopen": sorted(reopen), "specification": self.store.get(rid, "clarify"),
             "project": engine.contexts.build(work)}, ReviewResult, work, rid, "recovery/patch-review/" + identity, fresh=True)
+        unchanged({"patch": patch.model_dump(), "review": review.model_dump()})
         if not review.approved:
             # Preserve both the rejected proposal and its review. A new bounded
             # diagnosis decides what to do; replaying this cached patch cannot help.
@@ -358,7 +369,7 @@ class RecoveryController:
         journal = {"version": 1, "phase": "prepared", "base_revision": revision, "previous_plan": plan.model_dump(),
             "plan": candidate.model_dump(), "patch": patch.model_dump(), "review": review.model_dump(),
             "affected": sorted(affected), "reopen": sorted(reopen), "reason": patch.reason,
-            "snapshots": snapshots, "source_hash": tree_hash(work), "base_commit": git(work, "rev-parse", "HEAD"),
+            "snapshots": snapshots, **baseline,
             "document_preimage": {"path": "docs/aa2/plan.md", "before": digest(document.read_bytes()) if document.is_file() else None,
                                   "mode": document.stat().st_mode & 0o7777 if document.is_file() else 0o644}}
         self.store.checkpoint(rid, journal_key, journal)

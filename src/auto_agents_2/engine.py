@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 from .approvals import APPROVAL_CONTEXT_VERSION, PrototypeApprovals, prototype_identity
 from .artifacts import ArtifactStore
-from .builds import BUILD_CONTRACT_VERSION, command_hashes, verification_commands
+from .builds import BUILD_CONTRACT_VERSION, command_hashes, runtime_commands, verification_commands
 from .config import ConfigStore
 from .context import ContextBuilder
 from .delivery import DeliveryCoordinator, RuntimeVerificationError
@@ -39,7 +39,6 @@ from .interaction import choice_spec, is_prototype_approval, question_text
 from .issues import IssueLedger
 from .models import (
     CheckResult,
-    Command,
     DocumentResult,
     ImplementationResult,
     IntakeResult,
@@ -595,6 +594,8 @@ class WorkflowEngine:
                 self.agent.grant_retry(rid, key)
             result = await self.agent.invoke(stage, context, schema, workspace, rid, key, fresh)
         if tree_hash(workspace) != source_before:
+            self.store.checkpoint(rid, "invocation-drift/" + key, {"source_hash": source_before,
+                "proposal": self.artifacts.put(result.model_dump(mode="json"), "unaccepted_proposal")})
             raise PolicyViolation("Workspace changed while generating or reviewing a candidate; preserving user changes")
         artifact = self.artifacts.put(result.model_dump(mode="json"), stage)
         if isinstance(result, ReviewResult):
@@ -1574,9 +1575,16 @@ class WorkflowEngine:
         visuals = []
         if approval_context:
             await self._ensure_browser(rid, work)
-            with observe_activity(self.store, rid, "复用实现界面浏览器验收"):
-                visuals = await inspect_application(plan.preview, work, self.store.root / "visuals" / rid / "no-changes",
-                                                    environment, self.sandbox, self.store.root)
+            try:
+                with observe_activity(self.store, rid, "复用实现界面浏览器验收"):
+                    visuals = await inspect_application(plan.preview, work, self.store.root / "visuals" / rid / "no-changes",
+                                                        environment, self.sandbox, self.store.root)
+            except PrototypeBrowserError as exc:
+                visuals = self._archive_visuals(exc.results)
+                self.store.checkpoint(rid, "verify/visuals", visuals)
+                raise RecoveryNeeded(FailureRecord.create(kind="checks", component="browser", origin_id="final",
+                    step="reuse_browser", obligations=[r for task in plan.tasks for r in task.requirement_ids],
+                    evidence_refs=["verify/visuals"], evidence={"results": visuals, "error": str(exc)})) from exc
             visuals = self._archive_visuals(visuals)
             self.store.checkpoint(rid, "verify/visuals", visuals)
         review = await self._invoke("verify", {**approval_context, "project": self.contexts.build(work),
@@ -1602,9 +1610,7 @@ class WorkflowEngine:
 
     async def _runtime_checks(self, rid, journal, environment):
         plan = PlanResult.model_validate(journal["plan"]) if journal["plan"] else None
-        commands = verification_commands(plan.runtime_probes, self.project, plan.runtime_prepare, prepare_all=True) if plan else []
-        if not commands:
-            commands = [Command(argv=[str(environment.prefix / "bin/python"), "-c", "import sys; assert sys.prefix == " + repr(str(environment.prefix))])]
+        commands = runtime_commands(plan, self.project, environment)
         checks = []
         for index, command in enumerate(commands):
             identity = digest([journal["candidate"], environment.fingerprint, command.model_dump()])
@@ -1612,15 +1618,20 @@ class WorkflowEngine:
             # Outputs and runtime caches may change without a source commit. Probe every handoff.
             results = await self.verifier.run([command], self.project, environment)
             if not passed(results):
-                raise RuntimeVerificationError([c.model_dump() for c in results])
+                raise RuntimeVerificationError({"checks": [c.model_dump() for c in [*checks, *results]], "visuals": []})
             checks.extend(results)
             self.store.checkpoint(rid, key, {"identity": identity, "checks": [c.model_dump() for c in results]})
         evidence = {"checks": [c.model_dump() for c in checks]}
         if plan and plan.preview:
             await self._ensure_browser(rid, self.project)
-            with observe_activity(self.store, rid, "交付界面运行检查"):
-                evidence["visuals"] = await inspect_application(plan.preview, self.project,
-                    self.store.root / "visuals" / rid / "runtime", environment, self.sandbox, self.store.root)
+            try:
+                with observe_activity(self.store, rid, "交付界面运行检查"):
+                    evidence["visuals"] = await inspect_application(plan.preview, self.project,
+                        self.store.root / "visuals" / rid / "runtime", environment, self.sandbox, self.store.root)
+            except PrototypeBrowserError as exc:
+                evidence.update(visuals=self._archive_visuals(exc.results), error=str(exc))
+                self.store.checkpoint(rid, "delivery/runtime-browser-failure", evidence)
+                raise RuntimeVerificationError(evidence) from exc
         if "visuals" in evidence:
             evidence["visuals"] = self._archive_visuals(evidence["visuals"])
         if not reusable(commands, checks, self.project, environment, self.artifacts).allowed:
@@ -1706,9 +1717,16 @@ class WorkflowEngine:
                         observation=observation)
                     continue
                 await self._ensure_browser(rid, work)
-                with observe_activity(self.store, rid, "集成后界面浏览器验收"):
-                    visuals = await inspect_application(plan.preview, work, self.store.root / "visuals" / rid / "reintegrated",
-                                                        environment, self.sandbox, self.store.root)
+                try:
+                    with observe_activity(self.store, rid, "集成后界面浏览器验收"):
+                        visuals = await inspect_application(plan.preview, work, self.store.root / "visuals" / rid / "reintegrated",
+                                                            environment, self.sandbox, self.store.root)
+                except PrototypeBrowserError as exc:
+                    visuals = self._archive_visuals(exc.results)
+                    self.store.checkpoint(rid, "verify/visuals", visuals)
+                    await self._delivery_repair(rid, work, {"visuals": visuals, "browser_error": str(exc)},
+                        [p for p in git(work, "ls-files", "-z").split("\0") if p], observation=observation)
+                    continue
             review = await self._invoke("verify", {**approval_context, "project": self.contexts.build(work), "specification": self.store.get(rid, "clarify"),
                 "verification_contract": self._verification_contract(checks),
                 "approved_prototype_visuals": self.store.get(rid, "prototype_approval", {}).get("visuals", []),
@@ -1741,6 +1759,11 @@ class WorkflowEngine:
         feedback_identity = digest([feedback, scopes])
         resuming = (previous.get("feedback_identity") == feedback_identity
                     and not previous.get("commit") and previous.get("phase") != "rejected")
+        if resuming and previous.get("commit_intent"):
+            previous["commit"] = self.workspaces.finish_checkpoint(work, previous["commit_intent"])
+            previous["result_source"] = tree_hash(work)
+            self.store.checkpoint(rid, pending_key, previous)
+            return
         if resuming:
             source = prepared_before_hash(work, previous["patch"]) if previous.get("patch") else tree_hash(work)
             if source != previous.get("base_source"):
@@ -1760,7 +1783,8 @@ class WorkflowEngine:
                     self.artifacts.put(pending, "delivery-repair-history")
                 pending = {"identity": identity, "trigger": trigger, "feedback_identity": feedback_identity,
                            "feedback": feedback, "scopes": scopes,
-                           "base_source": tree_hash(work), "round": count + 1, "rejection": rejection}
+                           "base_source": tree_hash(work), "base_head": git(work, "rev-parse", "HEAD"),
+                           "round": count + 1, "rejection": rejection}
                 self.store.checkpoints(rid, {key: {"round": count + 1}, pending_key: pending})
             if pending.get("commit"):
                 if (pending.get("result_source") != tree_hash(work)
@@ -1811,8 +1835,12 @@ class WorkflowEngine:
                 continue
             pending["review"] = review.model_dump()
             self.store.checkpoint(rid, pending_key, pending)
+            if pending.get("base_head", git(work, "rev-parse", "HEAD")) != git(work, "rev-parse", "HEAD"):
+                raise AA2Error("Delivery repair HEAD changed before publication; preserving user commits")
             apply_prepared(work, pending["patch"])
-            pending["commit"] = self.workspaces.checkpoint(work, f"refs/aa2/{rid}/candidate", "aa2: reviewed integration repair")
+            pending["commit_intent"] = self.workspaces.checkpoint_intent(work, f"refs/aa2/{rid}/candidate")
+            self.store.checkpoint(rid, pending_key, pending)
+            pending["commit"] = self.workspaces.finish_checkpoint(work, pending["commit_intent"])
             pending["result_source"] = tree_hash(work)
             self.store.checkpoint(rid, pending_key, pending)
             return

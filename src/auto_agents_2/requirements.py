@@ -25,6 +25,8 @@ class TextExtractor(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag in {"script", "style"}:
             self.hidden += 1
+        if self.hidden:
+            return
         if tag in {"p", "div", "br", "li", "h1", "h2", "h3", "h4", "pre", "tr", "table"}:
             self.parts.append("\n")
         if tag in {"td", "th"}:
@@ -36,6 +38,10 @@ class TextExtractor(HTMLParser):
             self.parts.append(f" [#{anchor}] ")
 
     def handle_endtag(self, tag):
+        if self.hidden:
+            if tag in {"script", "style"}:
+                self.hidden = max(0, self.hidden - 1)
+            return
         if tag == "a" and self.links:
             self.parts.append(" (" + self.links.pop() + ") ")
         if tag in {"script", "style"}:
@@ -80,7 +86,7 @@ async def capture(source: str, artifacts: ArtifactStore) -> dict:
                 raw = b"".join(chunks)
                 kind = response.headers.get("content-type", "")
         text = decode_response(raw, kind)
-        if "html" in kind:
+        if kind.partition(";")[0].strip().lower() in {"text/html", "application/xhtml+xml"}:
             parser = TextExtractor()
             parser.feed(text)
             text = "".join(parser.parts)
@@ -90,7 +96,11 @@ async def capture(source: str, artifacts: ArtifactStore) -> dict:
             raise AA2Error("首期需求文件支持 Markdown、TXT 和文本网页")
         if file.stat().st_size > MAX_REQUIREMENTS_BYTES:
             raise AA2Error("Requirements document exceeds 4 MiB")
-        text = file.read_text(encoding="utf-8-sig")
+        with file.open("rb") as stream:
+            raw = stream.read(MAX_REQUIREMENTS_BYTES + 1)
+        if len(raw) > MAX_REQUIREMENTS_BYTES:
+            raise AA2Error("Requirements document exceeds 4 MiB")
+        text = raw.decode("utf-8-sig")
         source = str(file)
     if not text.strip():
         raise AA2Error("需求文档为空")

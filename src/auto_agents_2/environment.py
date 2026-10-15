@@ -161,13 +161,13 @@ class EnvironmentManager:
     @staticmethod
     def integrity(prefix: Path) -> str:
         # Interpreter, packages, copied source and resolved locks; writable caches are excluded.
-        names = ("bin", "lib", "lib64", "conda-meta", "aa2-source", "aa2-pip.lock", "aa2-conda.lock")
-        return digest([(name, input_entry(prefix / name, prefix, excluded=RUNTIME_CACHES)) for name in names])
+        return digest(["prefix-v3", input_entry(prefix, prefix, excluded=RUNTIME_CACHES,
+                                              omitted={prefix / "aa2-ready.json"})])
 
     @staticmethod
     def installed_identity(prefix: Path) -> str:
         ready = json.loads((prefix / "aa2-ready.json").read_text())
-        return digest(["installed-v2", ready["fingerprint"], ready["integrity"]])
+        return digest(["installed-v3", ready["fingerprint"], ready["integrity"]])
 
     @classmethod
     def valid(cls, prefix: Path, fingerprint: str) -> bool:

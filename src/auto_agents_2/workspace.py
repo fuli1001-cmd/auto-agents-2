@@ -118,7 +118,7 @@ def prepared_before_hash(root: Path, prepared: list[dict]) -> str:
         _, path = write_path(root, item["path"])
         if item["before"] is None:
             overrides[root / path] = None
-            if path not in tracked:
+            if not item.get("was_tracked", path in tracked):
                 paths.discard(path)
             for directory in item.get("created_parents", []):
                 overrides[root / directory] = None
@@ -150,6 +150,7 @@ def prepare_changes(root: Path, changes: list[Change], scopes: list[str], *, pro
         prepare_changes(root, changes, scopes, protected=False, contracts=contracts)
     prepared = []
     by_path = {}
+    _, tracked = _tree_paths(root)
     for change in changes:
         path, canonical = write_path(root, change.path)
         previous = by_path.get(path)
@@ -188,22 +189,41 @@ def prepare_changes(root: Path, changes: list[Change], scopes: list[str], *, pro
                     "after": None if change.operation == "delete" else digest(content)}
             item["created_parents"] = [p.relative_to(root).as_posix() for p in path.parents
                                        if p != root and p.is_relative_to(root) and not p.exists()]
+            item["was_tracked"] = canonical in tracked
             by_path[path] = item
             prepared.append(item)
+    validate_patch_structure(prepared)
     return prepared
 
 
+def validate_patch_structure(prepared):
+    live = [Path(item["path"]) for item in prepared if item["after"] is not None]
+    for index, path in enumerate(live):
+        if any(path.is_relative_to(other) or other.is_relative_to(path) for other in live[index + 1:]):
+            raise PolicyViolation("Conflicting ancestor/descendant file changes")
+
+
 def apply_prepared(root: Path, prepared: list[dict]):
-    for item in prepared:
+    validate_patch_structure(prepared)
+    ordered = sorted(prepared, key=lambda row: (row["after"] is not None,
+                     -len(Path(row["path"]).parts) if row["after"] is None else len(Path(row["path"]).parts)))
+    for item in ordered:
         path, _ = write_path(root, item["path"])
+        if path.is_dir() and item["after"] is None:
+            children = {str(child.relative_to(root)) for child in path.rglob("*") if child.is_symlink() or not child.is_dir()}
+            owned = {row["path"] for row in prepared if row["after"] is not None}
+            if children <= owned and any(Path(name).is_relative_to(item["path"]) for name in owned):
+                continue  # A partially applied, owned file-to-directory conversion.
         if path.exists() and (not path.is_file() or stat.S_IMODE(path.stat().st_mode) != item.get("mode", 0o644)):
             raise PolicyViolation(f"File type or mode changed after candidate preparation: {item['path']}")
         current = digest(path.read_bytes()) if path.is_file() else None
         if current not in {item["before"], item["after"]}:
             raise PolicyViolation(f"File changed after candidate preparation: {item['path']}")
-    for item in prepared:
+    for item in ordered:
         path, _ = write_path(root, item["path"])
         op, content = item["operation"], item["content"]
+        if path.is_dir() and item["after"] is None:
+            continue
         current = digest(path.read_bytes()) if path.is_file() else None
         if current == item["after"]:
             continue
@@ -226,12 +246,13 @@ class WorkspaceManager:
     def initialize(self):
         try:
             top = Path(git(self.project, "rev-parse", "--show-toplevel")).resolve()
-            if top != self.project:
-                raise AA2Error("Project must be a Git repository root")
         except AA2Error:
-            if (self.project / ".git").exists():
+            if repository_workspace(self.project):
                 raise
             git(self.project, "init", "-b", "main")
+        else:
+            if top != self.project:
+                raise AA2Error("Project must be a Git repository root")
         self._ensure_exclusions()
 
     def _ensure_exclusions(self):
@@ -258,7 +279,7 @@ class WorkspaceManager:
         git(self.project, "worktree", "add", "--detach", str(path), base)
         return path
 
-    def checkpoint(self, path: Path, ref: str, message: str) -> str:
+    def checkpoint(self, path: Path, ref: str, message: str, *, expected_ref=None) -> str:
         # Preserve already tracked files, including user .env files; never add new secrets.
         git(path, "add", "-u")
         new_files = [p for p in git(path, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
@@ -269,8 +290,48 @@ class WorkspaceManager:
         if git(path, "diff", "--cached", "--name-only"):
             git(path, "-c", "user.name=aa2", "-c", "user.email=aa2@localhost", "commit", "-m", message)
         commit = git(path, "rev-parse", "HEAD")
-        git(self.project, "update-ref", ref, commit)
+        git(self.project, "update-ref", ref, commit, *([] if expected_ref is None else [expected_ref or "0" * len(commit)]))
         return commit
+
+    def checkpoint_intent(self, path, ref):
+        head = git(path, "rev-parse", "HEAD")
+        merge_file = Path(git(path, "rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"))
+        return {"head": head, "parents": [head, *(merge_file.read_text().splitlines() if merge_file.exists() else [])],
+                "ref": ref, "ref_before": git(self.project, "for-each-ref", "--format=%(objectname)", ref),
+                "source": tree_hash(path), "index": git(path, "ls-files", "--stage", "-z")}
+
+    def finish_checkpoint(self, path, intent):
+        """Reconcile an interrupted, reviewed commit without accepting unrelated index/HEAD edits."""
+        if tree_hash(path) != intent["source"]:
+            raise AA2Error("Prepared checkpoint source changed; preserving user changes")
+        head = git(path, "rev-parse", "HEAD")
+        current_ref = git(self.project, "for-each-ref", "--format=%(objectname)", intent["ref"])
+        if current_ref not in {intent["ref_before"], head}:
+            raise AA2Error("Prepared checkpoint reference changed")
+        if head == intent["head"]:
+            def entries(raw):
+                result = {}
+                for row in raw.split("\0"):
+                    if row:
+                        metadata, name = row.split("\t", 1)
+                        result.setdefault(name, []).append(metadata)
+                return result
+            before = entries(intent["index"])
+            current = entries(git(path, "ls-files", "--stage", "-z"))
+            view = WorkspaceManager(path)
+            for name in before.keys() | current.keys():
+                if current.get(name) == before.get(name):
+                    continue
+                actual = view.file_entry(name)
+                expected = [f"{actual['mode']} {actual['oid']} 0"] if actual and "oid" in actual else None
+                if current.get(name) != expected:
+                    raise AA2Error("Prepared checkpoint index changed; preserving staged user changes")
+            return self.checkpoint(path, intent["ref"], "aa2: reviewed integration repair", expected_ref=current_ref)
+        parents = git(path, "rev-list", "--parents", "-n", "1", head).split()[1:]
+        if parents != intent["parents"] or git(path, "diff", "--name-only", "HEAD"):
+            raise AA2Error("Prepared checkpoint HEAD changed; preserving user commits")
+        git(self.project, "update-ref", intent["ref"], head, current_ref or "0" * len(head))
+        return head
 
     def integrate(self, target: Path, commit: str):
         try:
@@ -381,6 +442,7 @@ class WorkspaceManager:
         view = work or self.project
         self.checkout_policy(view, sorted(after))
         manifest = {}
+        structure = {name: {"before": before.get(name), "after": after.get(name)} for name in before.keys() | after.keys()}
         for name in before.keys() | after.keys():
             entry = after.get(name)
             content = None
@@ -388,7 +450,8 @@ class WorkspaceManager:
                 conversion = ["blob", entry["oid"]] if entry["mode"] == "120000" else ["--filters", f"{new}:{name}"]
                 content = subprocess.run(["git", "-C", str(view), "cat-file", *conversion],
                                          capture_output=True, check=True).stdout
-            before_bytes = self.raw_file_hash(self.project / name)
+            actual = self.publication_entry(name, structure)
+            before_bytes = self.raw_file_hash(self.project / name) if actual and actual != {"directory": True} else None
             after_bytes = digest(content) if content is not None else None
             if before.get(name) != entry or before_bytes != after_bytes:
                 manifest[name] = {"before": before.get(name), "after": entry,
@@ -419,12 +482,28 @@ class WorkspaceManager:
 
     def check_publication_paths(self, manifest: dict):
         for name, images in manifest.items():
-            actual = self.file_entry(name)
+            actual = self.publication_entry(name, manifest)
             if actual == {"directory": True} and images["before"] is None:
                 self._attributable_directory(name, manifest)
                 continue
             if actual != images["before"]:
                 raise AA2Error(f"发布路径与基线不符（可能含被忽略的用户文件）：{name}")
+
+    def publication_entry(self, name, manifest):
+        """A verified file/link ancestor can hide an absent journal descendant."""
+        relative = Path(name)
+        for parent in reversed(relative.parents):
+            if parent == Path("."):
+                continue
+            path = self.project / parent
+            if path.is_symlink() or path.is_file():
+                images = manifest.get(parent.as_posix(), {})
+                actual = self.file_entry(parent.as_posix())
+                if any(actual == images.get(phase) and images.get(phase) is not None
+                       and manifest[name].get(phase) is None for phase in ("before", "after")):
+                    return None
+                raise AA2Error(f"Unattributable publication parent: {name}")
+        return self.file_entry(name)
 
     def _attributable_directory(self, name, manifest, recovery=False):
         path = self.project / name
@@ -502,13 +581,14 @@ class WorkspaceManager:
             if policy != journal["checkout_policy"]:
                 raise AA2Error("Publication conversion policy changed during recovery")
         for name, images in manifest.items():
-            actual = self.file_entry(name)
+            actual = self.publication_entry(name, manifest)
             if actual == {"directory": True} and (images["before"] is None or images["after"] is None):
                 self._attributable_directory(name, manifest, recovery=True)
                 continue
             if actual not in (images["before"], images["after"]):
                 raise AA2Error(f"发布恢复发现用户修改：{name}")
-            if "before_bytes" in images and self.raw_file_hash(self.project / name) not in (images["before_bytes"], images["after_bytes"]):
+            raw = self.raw_file_hash(self.project / name) if actual and actual != {"directory": True} else None
+            if "before_bytes" in images and raw not in (images["before_bytes"], images["after_bytes"]):
                 raise AA2Error(f"Publication recovery found changed file bytes: {name}")
         # Unchanged tracked files must remain clean; nonignored untracked files also block.
         changed = set(git(self.project, "diff", "--name-only", "-z").split("\0")) - {""}
@@ -520,8 +600,8 @@ class WorkspaceManager:
                                                   -len(Path(n).parts) if manifest[n]["after"] is None else len(Path(n).parts), n))
         for name in ordered:
             images = manifest[name]
-            actual = self.file_entry(name)
-            raw = self.raw_file_hash(self.project / name)
+            actual = self.publication_entry(name, manifest)
+            raw = self.raw_file_hash(self.project / name) if actual and actual != {"directory": True} else None
             if actual == images["after"] and ("after_bytes" not in images or raw == images["after_bytes"]):
                 continue
             if actual == {"directory": True} and images["after"] is None:

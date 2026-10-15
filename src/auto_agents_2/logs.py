@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import codecs
 import os
+from contextlib import ExitStack
 from pathlib import Path
 
 from .errors import AA2Error
@@ -13,7 +14,11 @@ class SanitizedLog:
     def __init__(self, path: Path, secrets=(), max_record=1024 * 1024):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.stream = path.open("wb")
-        os.chmod(path, 0o600)
+        try:
+            os.chmod(path, 0o600)
+        except BaseException:
+            self.stream.close()
+            raise
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.pending = ""
         self.secrets = list(secrets)
@@ -60,8 +65,12 @@ async def capture_diagnostics(process, resources, artifacts, secrets=()):
 
     from .progress import current_activity
     activity = current_activity.get()
-    with resources.temporary("diagnostic-log") as directory:
-        logs = [SanitizedLog(directory / name, secrets) for name in ("stdout", "stderr")]
+    with resources.temporary("diagnostic-log") as directory, ExitStack() as cleanup:
+        logs = []
+        for name in ("stdout", "stderr"):
+            log = SanitizedLog(directory / name, secrets)
+            cleanup.callback(log.close)
+            logs.append(log)
         async def drain(stream, log):
             while chunk := await stream.read(65536):
                 log.feed(chunk)
@@ -77,7 +86,5 @@ async def capture_diagnostics(process, resources, artifacts, secrets=()):
             for reader in readers:
                 reader.cancel()
             await asyncio.gather(*readers, return_exceptions=True)
-            for log in logs:
-                log.close()
         refs = [artifacts.put_file(directory / name, "dependency_log") for name in ("stdout", "stderr")]
         return logs[0].tail.encode(), logs[1].tail.encode(), refs

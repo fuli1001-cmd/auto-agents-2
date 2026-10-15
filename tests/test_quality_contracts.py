@@ -470,13 +470,13 @@ def test_file_to_directory_recovery_is_idempotent(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_material_references_are_mounted_and_probed_in_cli_sandbox(tmp_path):
+async def test_material_references_are_mounted_and_probed_in_cli_sandbox(tmp_path, tmp_path_factory):
     from test_runtime import configured
 
     from auto_agents_2.providers import ProviderRouter
     from auto_agents_2.transports import CodexTransport
     config, store = configured(tmp_path)
-    binary = tmp_path / "provider-fixture"
+    binary = tmp_path_factory.mktemp("trusted-provider") / "provider-fixture"
     binary.write_text(f"#!{sys.executable}\n" + '''import json, pathlib, sys
 args = sys.argv[1:]
 if args == ["--version"]:

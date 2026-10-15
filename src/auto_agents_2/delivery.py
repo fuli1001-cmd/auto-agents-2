@@ -11,7 +11,7 @@ from .workspace import git, legacy_tree_hash, tree_hash
 
 class RuntimeVerificationError(AA2Error):
     def __init__(self, evidence):
-        self.evidence = evidence
+        self.evidence = {"checks": evidence, "visuals": []} if isinstance(evidence, list) else evidence
         super().__init__("主目录运行检查失败，需要在隔离工作区诊断修复")
 
 
@@ -29,6 +29,9 @@ class DeliveryCoordinator:
         self.store.update(rid, stage="deliver", delivery_phase=journal["phase"])
 
     async def finish(self, rid, *, candidate=None, work=None, environment=None, plan=None, outcome="DELIVERED"):
+        if self.store.run(rid)["status"] == "SUCCEEDED":
+            self.resources.finish_delivery(rid)
+            return self.store.run(rid)
         journal = self.store.get(rid, "delivery/journal")
         if not journal:
             run = self.store.run(rid)
@@ -50,6 +53,14 @@ class DeliveryCoordinator:
         project = self.workspaces.project
         saved_environment = journal["environment"]
         prefix = Path(saved_environment["prefix"])
+        if journal["phase"] == "completion_pending":
+            return self.complete_pending(rid, journal)
+        if journal["phase"] == "runtime_blocked":
+            limit = ConfigStore(project).load().delivery.max_runtime_retries + 1
+            if (limit <= journal["blocked_limit"]
+                    and self.runtime_identity(journal) == journal["blocked_inputs"]):
+                raise AA2Error("同一运行输入已重复失败；处理故障或明确增加 delivery.max_runtime_retries 后继续")
+            self.save(rid, journal, "runtime")
         if (journal.get("identity_version") == 2 and journal["phase"] in {"ready", "published", "runtime"}
                 and prefix.is_relative_to(self.store.root / "environments")
                 and not self.environments.valid(prefix, saved_environment["fingerprint"])):
@@ -161,39 +172,89 @@ class DeliveryCoordinator:
                 evidence = await self.runtime(rid, journal, env)
             except RuntimeVerificationError as exc:
                 # Repair source only in the retained isolated checkout, then reverify and FF again.
-                from .evidence import runtime_configuration
-                from .models import Command
-                inputs = [runtime_configuration(project, Command.model_validate(c), env) for c in commands]
                 # Exclude capture timing, log addresses and changing diagnostic prose.
-                rows = exc.evidence.get("checks", []) if isinstance(exc.evidence, dict) else []
+                rows = exc.evidence.get("checks", [])
                 failure = [{k: row.get(k) for k in ("argv", "cwd", "exit_code", "process_exit_code", "failure_reasons",
-                    "test_ids", "passed_test_ids", "report_status", "input_hash")} for row in rows] or exc.evidence
-                identity = digest([journal["candidate"], journal["source_hash"], journal["environment"], inputs, failure])
+                    "test_ids", "passed_test_ids", "report_status", "input_hash")} for row in rows]
+                visuals = [{k: row.get(k) for k in ("route", "viewport", "status", "actions", "failed_action")}
+                           for row in exc.evidence.get("visuals", [])]
+                identity = digest([journal["candidate"], self.runtime_identity(journal), failure, visuals])
                 repeated = identity in journal.get("runtime_failed_inputs", [])
                 journal.setdefault("runtime_failed_inputs", []).append(identity)
                 journal.setdefault("runtime_failures", []).append({"attempt": journal["runtime_attempt_id"],
                     "identity": identity, "evidence": exc.evidence})
                 journal.update(runtime_failure=exc.evidence, old=journal["candidate"], incoming=journal["candidate"])
-                self.save(rid, journal, "runtime" if repeated else "repairing_runtime")
+                if repeated:
+                    journal.update(blocked_inputs=self.runtime_identity(journal), blocked_limit=limit)
+                self.save(rid, journal, "runtime_blocked" if repeated else "repairing_runtime")
                 if repeated:
                     raise AA2Error("同一候选和运行输入重复失败，停止自动交付并保留证据") from exc
                 return None
             self.workspaces.clean_target(journal["target"])
             if self.workspaces.head(journal["target"]) != journal["candidate"] or tree_hash(project) != journal["source_hash"]:
                 raise AA2Error("运行环境准备期间源码或目标提交发生变化，保留现场")
-            resources = [str(env.prefix)] if env.prefix.is_relative_to(self.store.root / "environments") else []
+            journal.update(completion_evidence=evidence, completion_inputs=self.runtime_identity(journal))
+            self.save(rid, journal, "completion_pending")
+            return self.complete_pending(rid, journal)
+        self.resources.finish_delivery(rid)
+        return self.store.run(rid)
+
+    def runtime_identity(self, journal):
+        from .builds import generated_entry, runtime_commands, verification_commands
+        from .evidence import input_identity, runtime_configuration
+        from .models import PlanResult
+        from .util import contained
+        project = self.workspaces.project
+        env = Environment(Path(journal["environment"]["prefix"]), journal["environment"]["fingerprint"])
+        plan = PlanResult.model_validate(journal["plan"]) if journal.get("plan") else None
+        commands = runtime_commands(plan, project, env)
+        if plan and plan.preview:
+            commands = verification_commands([*commands, plan.preview.command], project)
+        integrity = self.environments.integrity(env.prefix) if env.prefix.is_relative_to(self.store.root / "environments") else None
+        return digest([tree_hash(project), journal["environment"], integrity, plan.preview.model_dump() if plan and plan.preview else None,
+            [(c.model_dump(), input_identity(project, c), runtime_configuration(project, c, env),
+              [(p, generated_entry(contained(project, p), project)) for p in c.outputs]) for c in commands]])
+
+    def complete_pending(self, rid, journal):
+        from .artifacts import ArtifactStore
+        from .builds import runtime_commands
+        from .evidence import reusable
+        from .models import CheckResult, PlanResult
+        self.workspaces.clean_target(journal["target"])
+        prefix = Path(journal["environment"]["prefix"])
+        if (self.workspaces.head(journal["target"]) != journal["candidate"]
+                or self.runtime_identity(journal) != journal["completion_inputs"]
+                or prefix.is_relative_to(self.store.root / "environments")
+                and not self.environments.valid(prefix, journal["environment"]["fingerprint"])):
+            raise AA2Error("Verified runtime inputs changed before completion; pending evidence retained")
+        evidence = journal["completion_evidence"]
+        artifacts = ArtifactStore(self.store.root)
+        rows = [CheckResult.model_validate(row) for row in evidence.get("checks", [])]
+        env = Environment(prefix, journal["environment"]["fingerprint"])
+        plan = PlanResult.model_validate(journal["plan"]) if journal["plan"] else None
+        if rows and not reusable(runtime_commands(plan, self.workspaces.project, env), rows,
+                                 self.workspaces.project, env, artifacts).allowed:
+            raise AA2Error("Pending runtime evidence no longer proves the current inputs")
+        receipt = journal.get("completion_receipt")
+        if receipt is None:
             receipt = {"version": 1, "run_id": rid, "target": journal["target"], "candidate": journal["candidate"],
                        "tree": journal["candidate_tree"], "source_hash": journal["source_hash"],
                        "validation": journal["validation"], "outcome": journal["outcome"],
                        "reintegrations": journal["reintegrations"], "runtime_budget_used": journal["runtime_budget_used"],
-                       "runtime": {**journal["environment"], "resources": resources, "evidence": evidence},
+                       "runtime": {**journal["environment"], "resources": [str(prefix)]
+                           if prefix.is_relative_to(self.store.root / "environments") else [], "evidence": evidence},
                        "tokens": self.store.usage_summary(rid), "evidence": self.store.delivery_evidence(rid)}
-            receipt["owned_refs"] = dict(line.split(" ", 1) for line in git(project, "for-each-ref",
+            receipt["owned_refs"] = dict(line.split(" ", 1) for line in git(self.workspaces.project, "for-each-ref",
                 "--format=%(refname) %(objectname)", f"refs/aa2/{rid}/").splitlines())
             receipt["digest"] = digest(receipt)
+            journal["completion_receipt"] = receipt
+            self.save(rid, journal)
+        if digest({k: v for k, v in receipt.items() if k != "digest"}) != receipt["digest"]:
+            raise AA2Error("Pending delivery receipt integrity mismatch")
+        with artifacts.reading(receipt["runtime"]["evidence"], rid):
             write_json(self.store.root / "runtime.json", receipt["runtime"])
-            # Atomic status and resource pin transfer; interruption retries this tail only.
-            self.store.complete_delivery(rid, receipt)
+        # The pending checkpoint retains evidence after temporary reader holds close.
+        self.store.complete_delivery(rid, receipt)
         self.resources.finish_delivery(rid)
         return self.store.run(rid)
 

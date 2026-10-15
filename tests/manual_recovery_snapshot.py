@@ -48,7 +48,7 @@ def validate_copy(root):
         raise ValueError("External Git object databases cannot be safely relocated")
     variables = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     variables.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
-    for config in [root / ".git/config", *(root / ".git/worktrees").glob("*/config.worktree")]:
+    for config in [root / ".git/config", root / ".git/config.worktree", *(root / ".git/worktrees").glob("*/config.worktree")]:
         if not config.exists():
             continue
         result = subprocess.run(["git", "config", "--file", str(config), "--no-includes", "--get-regexp",
@@ -80,7 +80,8 @@ def snapshot(source, destination):
     handles = []
     try:
         for path in (original, manifest):
-            handles.append((path, path.open("xb")))
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            handles.append((path, os.fdopen(fd, "wb")))
     except BaseException:
         for path, handle in handles:
             handle.close()
@@ -116,25 +117,42 @@ def snapshot(source, destination):
         with (state / "state.sqlite").open("xb") as output:
             output.write(raw)
 
-        def relocate(value):
+        def relocate(value, *, external=False, relative_base=None):
             if value is None:
                 return None
             if not isinstance(value, str):
                 raise ValueError("Unsupported infrastructure path shape")
             path = Path(value)
-            return str(destination / path.relative_to(source)) if path.is_absolute() and path.is_relative_to(source) else value
+            if not path.is_absolute():
+                if relative_base is None:
+                    if external:
+                        return value  # Executable names and profile selectors are not mutable locators.
+                    raise ValueError("Mutable snapshot paths must be absolute")
+                path = relative_base / path
+            path = path.resolve()
+            if path.is_relative_to(source):
+                relocated = destination / path.relative_to(source)
+            elif path.is_relative_to(destination):
+                relocated = path
+            elif external:
+                return value
+            else:
+                raise ValueError("External mutable snapshot path cannot be safely relocated")
+            if not relocated.resolve().is_relative_to(destination):
+                raise ValueError("Mutable snapshot path escapes the recovery copy")
+            return str(relocated)
 
-        def field(value, pattern):
+        def field(value, pattern, *, external=False):
             first, *rest = pattern.split(".")
             if first == "*":
                 values = list(value.values()) if isinstance(value, dict) else value if isinstance(value, list) else []
                 for child in values:
-                    field(child, ".".join(rest))
+                    field(child, ".".join(rest), external=external)
             elif isinstance(value, dict) and first in value:
                 if rest:
-                    field(value[first], ".".join(rest))
+                    field(value[first], ".".join(rest), external=external)
                 else:
-                    value[first] = relocate(value[first])
+                    value[first] = relocate(value[first], external=external)
 
         with closing(sqlite3.connect(state / "state.sqlite")) as db, db:
             current = db.execute("SELECT id,status FROM runs ORDER BY created DESC LIMIT 1").fetchone()
@@ -166,7 +184,7 @@ def snapshot(source, destination):
         settings = json.loads(configuration.read_text())
         for pattern in ("providers.*.binary", "providers.*.environment.CODEX_HOME", "providers.*.environment.GEMINI_CLI_HOME",
                         "providers.*.profile_map.*.file", "environment.conda"):
-            field(settings, pattern)
+            field(settings, pattern, external=True)
         safe_write(configuration, destination, json.dumps(settings, ensure_ascii=False))
         pointers = list((destination / ".git/worktrees").glob("*/gitdir"))
         pointers += list((state / "worktrees").glob("*/*/.git"))
@@ -175,7 +193,7 @@ def snapshot(source, destination):
             text = path.read_text().strip()
             prefix = "gitdir: " if text.startswith("gitdir: ") else ""
             target = text.removeprefix(prefix)
-            relocated = relocate(target)
+            relocated = relocate(target, relative_base=source / path.parent.relative_to(destination))
             if not (path.parent / relocated).resolve().is_relative_to(destination):
                 raise ValueError("Git pointer references an external repository")
             safe_write(path, destination, prefix + relocated + "\n")

@@ -11,17 +11,19 @@ from .errors import AA2Error
 from .util import contained, digest
 from .workspace import input_entry, tree_hash
 
-CHECKER_VERSION = "verification-v7"
+CHECKER_VERSION = "verification-v8"
 NODE_RUNTIME_CACHES = {".cache", ".vite", ".vite-temp", ".tmp"}
 RUNTIME_CACHES = {"__pycache__", ".pytest_cache", *NODE_RUNTIME_CACHES}
 
 
 def input_identity(workspace, command):
     entries = [(p, generated_entry(contained(workspace, p), workspace)) for p in command.inputs]
-    for name in ("", "backend", "frontend", "api", "web"):
-        modules = workspace / name / "node_modules"
+    for directory, folders, _ in os.walk(workspace, followlinks=False):
+        modules = Path(directory) / "node_modules"
         if modules.exists() and any(p.name not in RUNTIME_CACHES for p in modules.iterdir()):
             entries.append((modules.relative_to(workspace).as_posix(), input_entry(modules, workspace, excluded=RUNTIME_CACHES)))
+        folders[:] = [name for name in folders if name not in {"node_modules", ".git", ".aa2", ".venv", ".conda-env", *RUNTIME_CACHES}
+                      and not Path(directory, name).is_symlink()]
     return digest(sorted(entries))
 
 
@@ -57,7 +59,7 @@ class EvidenceAssessment:
 def assess_observation(command, result, workspace, environment, artifacts):
     """A trustworthy failing observation may close individual passing obligations."""
     invalid = {"execution_inputs_changed", "source_changed", "incomplete_log_capture",
-               "test_report_missing", "test_report_invalid", "unsupported_test_runner"}
+               "test_report_missing", "test_report_invalid", "test_attachments_invalid", "unsupported_test_runner"}
     try:
         return _assess_observation(command, result, workspace, environment, artifacts, invalid)
     except (OSError, ValueError, KeyError, TypeError, ET.ParseError, AA2Error):

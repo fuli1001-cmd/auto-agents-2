@@ -5,6 +5,7 @@ Copies dependencies into its own project; never changes the supplied installatio
 """
 import asyncio
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -51,6 +52,13 @@ async def main(prefix, modules):
     try:
         work = root / "workspace"
         work.mkdir()
+        modules = modules.resolve()
+        for directory, folders, names in os.walk(modules, followlinks=False):
+            for name in [*folders, *names]:
+                path = Path(directory, name)
+                if path.is_symlink() and (Path(os.readlink(path)).is_absolute()
+                        or not path.resolve().is_relative_to(modules)):
+                    raise ValueError("Browser dependency copy requires internal relative links")
         shutil.copytree(modules, work / "node_modules", symlinks=True,
                         ignore=shutil.ignore_patterns(".vite", ".vite-temp", ".cache", ".tmp"))
         write_json(work / "package.json", {"name": "aa2-node-browser", "type": "module",

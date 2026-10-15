@@ -4,12 +4,14 @@ import asyncio
 import os
 import shutil
 import stat
+import sys
 import time
 import xml.etree.ElementTree as ET
-from pathlib import Path, PurePosixPath
+from contextlib import closing
+from pathlib import Path
 
 from .artifacts import ArtifactStore
-from .builds import output_hashes, verification_commands
+from .builds import output_hashes, overlaps, verification_commands
 from .config import Cleanup
 from .environment import Environment
 from .errors import PolicyViolation, VerificationPreparationError
@@ -25,6 +27,7 @@ from .models import CheckResult, Command
 from .progress import Activity
 from .readview import sensitive_values
 from .resources import ResourceManager
+from .safe_files import regular_files
 from .sandbox import SandboxRunner
 from .store import Store
 from .test_reports import is_python, read_junit, report_command, test_runner
@@ -68,7 +71,7 @@ class VerificationService:
         try:
             for command in commands:
                 blocked = unsafe_source or any(
-                    PurePosixPath(declared).is_relative_to(output) or PurePosixPath(output).is_relative_to(declared)
+                    overlaps(workspace, declared, output)
                     for declared in command.inputs for output in failed_outputs)
                 if blocked:
                     results.append(CheckResult(argv=command.argv, cwd=command.cwd, exit_code=1,
@@ -148,8 +151,10 @@ class VerificationService:
         outputs = [path for path in outputs if path not in {destination for _, destination in overlays}]
         start = time.monotonic()
         secrets = [v for k, v in env.items() if SECRET.search(k)] + sensitive_values(workspace)
-        logs = [SanitizedLog(log_root / "stdout.log", secrets), SanitizedLog(log_root / "stderr.log", secrets)]
+        logs = []
         try:
+            for name in ("stdout.log", "stderr.log"):
+                logs.append(SanitizedLog(log_root / name, secrets))
             process = await self.sandbox.spawn(argv, cwd, env, outputs,
                 [workspace, environment.prefix] if environment else [workspace], overlays=overlays)
         except BaseException:
@@ -172,13 +177,22 @@ class VerificationService:
         except TimeoutError:
             timed_out = True
         finally:
-            await self.sandbox.stop(process)
-            for reader in readers:
-                if not reader.done():
-                    reader.cancel()
-            outcomes = await asyncio.gather(*readers, return_exceptions=True)
-            for log in logs:
-                log.close()
+            original = sys.exception()
+            try:
+                await self.sandbox.stop(process)
+            except BaseException as exc:
+                if original is None:
+                    raise
+                original.add_note("Verification process cleanup failed: " + type(exc).__name__)
+            finally:
+                try:
+                    for reader in readers:
+                        if not reader.done():
+                            reader.cancel()
+                    outcomes = await asyncio.gather(*readers, return_exceptions=True)
+                finally:
+                    for log in logs:
+                        log.close()
         if not timed_out:
             for outcome in outcomes:
                 if isinstance(outcome, BaseException):
@@ -206,11 +220,13 @@ class VerificationService:
                 output += "\nJUnit report rejected: " + scrub_text(str(exc), secrets)
         attachments = []
         attachment_root = scratch / "playwright-results"
-        if runner == "playwright" and attachment_root.is_dir():
-            for file in sorted(attachment_root.rglob("*")):
-                if file.is_file() and not file.is_symlink():
-                    attachments.append({"path": file.relative_to(attachment_root).as_posix(),
-                                        "artifact": self.artifacts.put_file(file, "test_attachment")})
+        if runner == "playwright" and (attachment_root.exists() or attachment_root.is_symlink()):
+            try:
+                with closing(regular_files(attachment_root)) as files:
+                    for name, stream in files:
+                        attachments.append({"path": name, "artifact": self.artifacts.put_stream(stream, "test_attachment")})
+            except (OSError, ValueError):
+                reasons.append("test_attachments_invalid")
         if runner and report_status != "valid":
             reasons.append("test_report_" + report_status)
         if not runner and command.expected_tests:

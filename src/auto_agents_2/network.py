@@ -4,12 +4,31 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+from contextlib import contextmanager
 from urllib.parse import urlsplit, urlunsplit
 
 import httpcore
 import httpx
 
 from .errors import AA2Error
+
+
+@contextmanager
+def http_errors(request=None):
+    """Keep HTTPX's public exception hierarchy at both request and stream boundaries."""
+    try:
+        yield
+    except (httpcore.NetworkError, httpcore.TimeoutException, httpcore.ProtocolError,
+            httpcore.ProxyError, httpcore.UnsupportedProtocol) as exc:
+        kinds = ("ConnectTimeout", "ReadTimeout", "WriteTimeout", "PoolTimeout", "TimeoutException",
+                 "ConnectError", "ReadError", "WriteError", "NetworkError",
+                 "LocalProtocolError", "RemoteProtocolError", "ProtocolError", "ProxyError", "UnsupportedProtocol")
+        kind = next((name for name in kinds if isinstance(exc, getattr(httpcore, name))), "TransportError")
+        raise getattr(httpx, kind)("Research transport failed", request=request) from exc
+    except TimeoutError as exc:
+        raise httpx.ConnectTimeout("Research connection timed out", request=request) from exc
+    except OSError as exc:
+        raise httpx.ConnectError("Research connection failed", request=request) from exc
 
 
 def public_address(value: str) -> bool:
@@ -46,6 +65,8 @@ class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
                     return await self.backend.connect_tcp(ip, port, timeout, local_address, socket_options)
                 except (OSError, httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
                     error = exc
+            if isinstance(error, (httpcore.ConnectTimeout, httpcore.ConnectError)):
+                raise error
             raise httpcore.ConnectError("Public research connection failed") from error
 
     async def sleep(self, seconds):
@@ -53,15 +74,17 @@ class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
 
 
 class ResponseStream(httpx.AsyncByteStream):
-    def __init__(self, stream):
-        self.stream = stream
+    def __init__(self, stream, request=None):
+        self.stream, self.request = stream, request
 
     async def __aiter__(self):
-        async for chunk in self.stream:
-            yield chunk
+        with http_errors(self.request):
+            async for chunk in self.stream:
+                yield chunk
 
     async def aclose(self):
-        await self.stream.aclose()
+        with http_errors(self.request):
+            await self.stream.aclose()
 
 
 class PublicHTTPTransport(httpx.AsyncBaseTransport):
@@ -73,15 +96,14 @@ class PublicHTTPTransport(httpx.AsyncBaseTransport):
             url=httpcore.URL(scheme=request.url.raw_scheme, host=request.url.raw_host,
                              port=request.url.port, target=request.url.raw_path),
             headers=request.headers.raw, content=request.stream, extensions=request.extensions)
-        try:
+        with http_errors(request):
             response = await self.pool.handle_async_request(incoming)
-        except (httpcore.NetworkError, httpcore.TimeoutException, OSError, TimeoutError) as exc:
-            raise httpx.ConnectError("Research connection failed", request=request) from exc
         return httpx.Response(response.status, headers=response.headers,
-                              stream=ResponseStream(response.stream), extensions=response.extensions)
+                              stream=ResponseStream(response.stream, request), extensions=response.extensions)
 
     async def aclose(self):
-        await self.pool.aclose()
+        with http_errors():
+            await self.pool.aclose()
 
 
 class PreviewProxy:
@@ -151,10 +173,11 @@ class PreviewProxy:
                 while chunk := await source.read(65536):
                     destination.write(chunk)
                     await destination.drain()
+                if destination.can_write_eof():
+                    destination.write_eof()
+                    await destination.drain()
             pumps = [asyncio.create_task(relay(reader, upstream)), asyncio.create_task(relay(incoming, writer))]
-            done, _ = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                task.result()
+            await asyncio.gather(*pumps)
         except (OSError, ValueError, TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
             pass  # Navigation/connection failures remain visible to the browser inspector.
         finally:

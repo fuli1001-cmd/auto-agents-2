@@ -16,7 +16,7 @@ def user_text(text: str) -> str:
 def question_text(text: str) -> str:
     # Strip a legacy requirement prefix, never identifiers inside URLs, branch
     # names, or user-selected model/profile names.
-    return re.sub(r"(?m)^R\d+(?:\s+|[：:]\s*)", "", user_text(text))
+    return re.sub(r"(?m)^R\d+(?:[^\S\r\n]+|[：:][^\S\r\n]*)", "", user_text(text))
 
 
 def is_prototype_approval(question) -> bool:
