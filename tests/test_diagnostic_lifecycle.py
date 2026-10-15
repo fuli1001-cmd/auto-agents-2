@@ -59,7 +59,8 @@ def test_waiting_and_paused_consumers_keep_logs(tmp_path, status):
     assert artifacts.read(log)
 
 
-def test_open_issues_and_explicit_recovery_outlive_cancellation(tmp_path):
+@pytest.mark.parametrize("issue_status", ["open", "stale"])
+def test_open_issues_and_explicit_recovery_outlive_cancellation(tmp_path, issue_status):
     store, rid, artifacts, resources = setup(tmp_path)
     log = artifacts.put("failed assertion details", "check_log")
     other = artifacts.put("no remaining consumer", "dependency_log")
@@ -67,6 +68,10 @@ def test_open_issues_and_explicit_recovery_outlive_cancellation(tmp_path):
     ledger = IssueLedger(store, artifacts)
     finding = Finding(severity="major", location="a.py", description="wrong", evidence="actual check", resolution="fix")
     ledger.record(rid, "scope", ReviewResult(approved=False, summary="failed", findings=[finding]), {"checks": [{"logs": [log]}]})
+    issues = store.get(rid, "issues")
+    for issue in issues.values():
+        issue["status"] = issue_status
+    store.checkpoint(rid, "issues", issues)
     store.checkpoint(rid, "recovery/required/operator", {"logs": [recovery]})
     store.checkpoint(rid, "checks", {"logs": [other]})
     store.update(rid, status="CANCELLED")

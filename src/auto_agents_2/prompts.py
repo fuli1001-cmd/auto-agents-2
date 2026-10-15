@@ -4,7 +4,7 @@ import json
 
 from .research import request_documents
 
-PROMPT_VERSION = "2026-10-15.3"
+PROMPT_VERSION = "2026-10-15.4"
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
     "gemini": "https://ai.google.dev/gemini-api/docs/prompting-strategies#gemini-3",
@@ -160,6 +160,15 @@ class PromptCompiler:
                      "appropriate implementation task before environment preparation; planning does not write these files.")
         if stage == "review":
             kind = context.get("review_kind", "implementation")
+            if kind == "recovery_diagnosis":
+                task += (" Classify CURRENT evidence separately from archived rollback proposals. A successful build/report "
+                         "closes that preparation problem even when product tests still fail. An integration failure may "
+                         "belong to an already accepted upstream task. Use repair with all existing responsible task_ids "
+                         "and repair_targets (task_id, owned source/test paths, supplied evidence_refs, reason). "
+                         "Reopening an existing task inside its allowed_paths does not require plan_patch. "
+                         "Use plan_patch only when task contracts themselves must change. Examine asynchronous "
+                         "interaction semantics before assigning a failing test to product code. An action is a proposal; "
+                         "only fresh controller checks and independent review can close issues or accept implementation.")
             task += {
                 "recovery_diagnosis": " Diagnose the supplied FailureRecord, not implementation acceptance. Return Diagnosis. Cite only controller-supplied evidence_refs. Inspect source and actual machine reports; model rollback text is a proposal, not fact. Distinguish collection/build/approval transmission from product defects. Prefer recheck for missing/stale evidence, repair for a defect within existing task scope (name task_ids), plan_patch only for changes to scopes/dependencies/acceptance or command contracts. A design/test mismatch requires explaining approved behaviour before proposing any test changes; protected tests remain independently reviewed. Actual human approval is required, but an old pending label does not invalidate a matching controller receipt. Genuine requirements/design/prototype changes use their corresponding gate. Use blocked with missing evidence when inconclusive; never fabricate consent or passing evidence.",
                 "plan_patch": " Review this local plan amendment against the previous plan and verified failure. Check that task scopes and dependencies suffice, all requirements/acceptance/checks survive, expected_tests never decreases, budgets keep their origins, no origin merge occurs, and affected tasks/reopen choices are conservative. Test target substitutions or deletions cannot conceal failures. Reject unnecessary changes or scope expansion without evidence. Product implementation need not exist for new repair tasks.",

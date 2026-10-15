@@ -183,6 +183,11 @@ def status(project: Project = Path("."), run_id: Annotated[str | None, typer.Opt
                                 "tokens": store.usage_summary(current["id"]) if current else {},
                                 "replanning": store.get(current["id"], "replanning/pending", {}) if current else {},
                                 "recovery": store.get(current["id"], "recovery/active", {}) if current else {},
+                                "issues": store.get(current["id"], "issues", {}) if current else {},
+                                "action_budgets": store.recovery_budgets(current["id"]) if current else {},
+                                "recovery_observations": {t.get("origin_id") or t["id"]: store.get(current["id"],
+                                    "recovery/observations/" + (t.get("origin_id") or t["id"]), [])
+                                    for t in (store.get(current["id"], "plan", {}) or {}).get("tasks", [])} if current else {},
                                 "plan_revision": store.get(current["id"], "plan_revision/current", {}) if current else {},
                                 "tasks": {t["id"]: store.get(current["id"], "task_state/" + t["id"], {})
                                           for t in (store.get(current["id"], "plan", {}) or {}).get("tasks", [])} if current else {},

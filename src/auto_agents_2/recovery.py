@@ -47,6 +47,13 @@ class FailureRecord(Record):
                    step=step, obligations=obligations, **kwargs)
 
 
+class RepairTarget(Record):
+    task_id: str
+    paths: list[str] = Field(min_length=1)
+    evidence_refs: list[str] = Field(min_length=1)
+    reason: str
+
+
 class RecoveryDecision(Record):
     version: Literal[1] = 1
     failure_id: str
@@ -55,6 +62,8 @@ class RecoveryDecision(Record):
     evidence_refs: list[str] = []
     reason: str
     budget_owner: str
+    budget_owners: list[str] = []
+    repair_targets: list[RepairTarget] = []
 
 
 class Diagnosis(Record):
@@ -62,6 +71,7 @@ class Diagnosis(Record):
     task_ids: list[str] = []
     evidence_refs: list[str] = Field(min_length=1)
     reason: str
+    repair_targets: list[RepairTarget] = []
 
 
 class RecoveryNeeded(AA2Error):
@@ -86,6 +96,14 @@ def current_failures(failure):
              "unpassed_test_ids": [case for case in row.get("test_ids", []) if case not in row.get("passed_test_ids", [])],
              "failure_reasons": row.get("failure_reasons", [])}
             for row in rows if row.get("exit_code") or row.get("failure_reasons")]
+
+
+def observation_identity(checks, review=None, environment_error=None):
+    """Distinguish current failures without timestamps, log prose or new budget IDs."""
+    return digest({"checks": [{k: row.get(k) for k in (
+        "cwd", "argv", "source_hash", "environment_hash", "command_hash", "input_hash", "checker_version",
+        "process_exit_code", "failure_reasons", "test_ids", "passed_test_ids")} for row in checks],
+        "review": review, "environment_error": environment_error})
 
 
 def evidence_references(failure, project=None):
@@ -148,9 +166,38 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None)
             raise AA2Error("Diagnosis names unknown tasks")
         if diagnosis.action == "repair" and not diagnosis.task_ids and failure.origin_id != "delivery":
             raise AA2Error("A repair diagnosis must identify existing task scopes")
-        if failure.task_id and diagnosis.action == "repair" and diagnosis.task_ids != [failure.task_id]:
-            raise AA2Error("Cross-task repair requires a reviewed plan patch")
+        if diagnosis.action == "repair" and set(diagnosis.task_ids) - {failure.task_id} and failure.origin_id != "delivery":
+            from .workspace import path_allowed
+            targets = {target.task_id: target for target in diagnosis.repair_targets}
+            if set(targets) != set(diagnosis.task_ids):
+                raise AA2Error("Cross-task repair requires evidence and owned paths for each existing task")
+            for task_id, target in targets.items():
+                if (not set(target.evidence_refs) <= set(evidence_references(failure))
+                        or not all(path in evidence_references(failure) and path_allowed(path, known[task_id].allowed_paths)
+                                   for path in target.paths)):
+                    raise AA2Error("Repair target is outside the evidenced existing task scope; amend the plan if necessary")
         action = "blocked" if diagnosis.action == "diagnose" else diagnosis.action
         tasks, refs, reason = diagnosis.task_ids, diagnosis.evidence_refs, diagnosis.reason
+    origins = {t.id: t.origin_id or t.id for t in plan.tasks} if plan else {}
+    owners = sorted({origins.get(t, failure.origin_id) for t in tasks}) if action == "repair" and tasks else [failure.origin_id]
     return RecoveryDecision(failure_id=failure.id, action=action, task_ids=tasks,
-                            evidence_refs=refs, reason=reason, budget_owner=failure.origin_id)
+                            evidence_refs=refs, reason=reason, budget_owner=failure.origin_id,
+                            budget_owners=owners,
+                            repair_targets=diagnosis.repair_targets if diagnosis else [])
+
+
+def failure_summary(checks):
+    """A short actionable summary; raw reports remain in status/evidence."""
+    lines = []
+    for row in checks:
+        if not row.get("exit_code") and not row.get("failure_reasons"):
+            continue
+        failed = [c for c in row.get("test_ids", []) if c not in row.get("passed_test_ids", [])]
+        lines.append(f"{row.get('cwd', '.')}：{' '.join(row.get('argv', []))}；"
+                     f"退出码 {row.get('process_exit_code')}；通过 {row.get('tests', 0)}/{len(row.get('test_ids', []))}")
+        lines.extend("  " + name for name in failed[:6])
+        if not failed:
+            lines.append("  " + ", ".join(row.get("failure_reasons", [])))
+        if row.get("report"):
+            lines.append("  报告：" + row["report"]["hash"])
+    return "\n".join(lines) or "当前尚无有效失败报告，需要重新核验。"

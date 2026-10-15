@@ -28,7 +28,7 @@ class Store:
             with sqlite3.connect(f"file:{self.path}?mode=ro", uri=True) as db:
                 meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
                 version = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] if meta else "0"
-                if version not in {"0", "1", "2"}:
+                if version not in {"0", "1", "2", "3"}:
                     raise AA2Error("Unsupported state database version")
             return
         if readonly:
@@ -104,9 +104,10 @@ class Store:
             raise AA2Error("Read-only state cannot migrate")
         with self.connect() as db:
             meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
-            if meta and db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2":
+            version = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] if meta else "0"
+            if version == "3":
                 return
-            backup = self.root / "state-v1.backup.sqlite"
+            backup = self.root / f"state-v{version if version != '0' else '1'}.backup.sqlite"
             if not backup.exists():
                 temporary = backup.with_suffix(".tmp")
                 with sqlite3.connect(temporary) as target:
@@ -131,16 +132,48 @@ class Store:
                 rid = row[0]
                 records = {r[0]: json.loads(r[1]) for r in db.execute(
                     "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
-                self._put(db, rid, "migration/v1", {"version": 1, "records": records})
-                if records.get("plan"):
-                    self._put(db, rid, "plan_revision/current", {"version": 1, "revision": 1})
-                done = records.get("develop/done", [])
-                for task in records.get("plan", {}).get("tasks", []):
-                    self._put(db, rid, "task_state/" + task["id"], {
-                        "version": 1, "revision": 1, "implementation": "accepted" if task["id"] in done else "pending",
-                        "evidence": "stale" if task["id"] in done else "absent"})
-            db.execute("UPDATE meta SET value='2' WHERE key='schema_version'")
-            self._event(db, None, "state.migrated", {"version": 2, "backup": str(backup)})
+                self._put(db, rid, f"migration/v{version if version != '0' else '1'}",
+                          {"version": int(version), "records": records})
+                if version in {"0", "1"}:
+                    if records.get("plan"):
+                        self._put(db, rid, "plan_revision/current", {"version": 1, "revision": 1})
+                    done = records.get("develop/done", [])
+                    for task in records.get("plan", {}).get("tasks", []):
+                        self._put(db, rid, "task_state/" + task["id"], {
+                            "version": 1, "revision": 1, "implementation": "accepted" if task["id"] in done else "pending",
+                            "evidence": "stale" if task["id"] in done else "absent"})
+                owners = {}
+                for key, value in records.items():
+                    if key.startswith("recovery/failures/") and value:
+                        owners[value["id"]] = value["origin_id"]
+                    elif key.startswith("recovery/delivery/") and value.get("failure"):
+                        owners[value["failure"]["id"]] = "delivery"
+                budgets = {}
+                for key, value in records.items():
+                    if key.startswith("recovery/diagnosis/") and key.rsplit("/", 1)[-1] in owners:
+                        owner = owners[key.rsplit("/", 1)[-1]]
+                        budgets[owner] = budgets.get(owner, 0) + value.get("round", 0)
+                for owner, count in budgets.items():
+                    key = "recovery/budgets/diagnosis/" + owner
+                    if key not in records:
+                        self._put(db, rid, key, {"round": count})
+                for key, value in records.items():
+                    if key.startswith("replanning/evidence/") and key != "replanning/evidence/contracts":
+                        self._put(db, rid, key, {**value, "comparable": False,
+                                               "comparison_reason": "legacy evidence requires revalidation"})
+            db.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
+            self._event(db, None, "state.migrated", {"version": 3, "backup": str(backup)})
+
+    def finish_recovery(self, rid, updates, pending):
+        """Dispatch and retire the obsolete question together; retain raw history."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for key, value in updates.items():
+                self._put(db, rid, key, value)
+            if pending:
+                db.execute("UPDATE questions SET superseded=1 WHERE run_id=? AND key=?",
+                           (rid, f"replan-stalled/{pending['evaluation']}"))
+            self._event(db, rid, "recovery.dispatched", {"pending_issues_retained": True})
 
     def _put(self, db, rid, key, value):
         db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
@@ -479,6 +512,12 @@ class Store:
                 "budgets": {key.removeprefix("rounds/"): value for key, value in rows.items()
                             if key.startswith("rounds/") and key != "rounds/delivery"}}
 
+    def recovery_budgets(self, rid):
+        with self.connect() as db:
+            return {row["key"]: json.loads(row["data"]) for row in db.execute(
+                "SELECT key,data FROM checkpoints WHERE run_id=? AND "
+                "(key LIKE 'recovery/budgets/%' OR key LIKE 'rounds/%' OR key LIKE 'budget_grants/%')", (rid,))}
+
     def delivery_evidence(self, rid):
         result = {}
         with self.connect() as db:
@@ -486,7 +525,7 @@ class Store:
                 key, value = row["key"], json.loads(row["data"])
                 if key.startswith("develop/task/"):
                     result[key] = {k: value[k] for k in ("commit", "checks", "review", "source_hash") if k in value}
-                elif key in {"capture", "clarify", "provider_research", "prototype", "prototype_approval", "design", "plan",
+                elif key in {"capture", "clarify", "provider_research", "prototype", "prototype_approval", "design", "plan", "issues",
                              "coverage_checks", "verify/identity", "verify/checks", "verify/review", "verify/visuals"} or key.startswith(
                                  ("rounds/", "budget_grants/", "plan_revision/", "task_state/", "recovery/", "migration/")):
                     result[key] = value

@@ -51,7 +51,14 @@ from .planning import ready_batch, validate_plan
 from .profiles import ProjectProfile
 from .progress import capture_output, observe_activity
 from .providers import Agent, ProviderRouter
-from .recovery import ExecutionContract, FailureRecord, RecoveryNeeded, check_failure, request_from
+from .recovery import (
+    ExecutionContract,
+    FailureRecord,
+    RecoveryNeeded,
+    check_failure,
+    observation_identity,
+    request_from,
+)
 from .recovery_controller import RecoveryController
 from .replanning import browser_criteria, check_criteria
 from .requirements import capture, validate_coverage
@@ -208,8 +215,45 @@ class WorkflowEngine:
 
     def _replan_checks(self, rid, scope, commands, results, work, environment):
         source = tree_hash(work)
-        self._replan_evidence(rid, scope, check_criteria(commands, results, source, environment.fingerprint),
-                              source_hash=source, environment_hash=environment.fingerprint)
+        updates = IssueLedger(self.store, self.artifacts).check_updates(
+            rid, scope.removeprefix("task/"), commands, results, work, environment)
+        updates[f"replanning/evidence/{scope}"] = {
+            "criteria": check_criteria(commands, results, source, environment.fingerprint),
+            "source_hash": source, "environment_hash": environment.fingerprint,
+            "comparable": all(row["valid"] for row in updates["recovery/observations/" + scope.removeprefix("task/")])}
+        if scope.startswith("task/"):
+            origin = scope.removeprefix("task/")
+            for task in self.store.get(rid, "plan", {}).get("tasks", []):
+                if (task.get("origin_id") or task["id"]) == origin:
+                    key = "task_state/" + task["id"]
+                    state = self.store.get(rid, key, {"version": 1, "revision": 1, "implementation": "pending"})
+                    observed = updates["recovery/observations/" + origin]
+                    verdict = ("valid" if observed and all(r["passed"] for r in observed) else
+                               "failed" if any(r["valid"] and not r["passed"] for r in observed) else "stale")
+                    updates[key] = {**state, "evidence": verdict}
+        elif scope == "final-checks" and updates[f"replanning/evidence/{scope}"]["comparable"]:
+            plan_data = self.store.get(rid, "plan")
+            if plan_data:
+                plan = PlanResult.model_validate(plan_data)
+                done = set(self.store.get(rid, "develop/done", []))
+                for task in plan.tasks:
+                    if task.id not in done:
+                        continue
+                    required = verification_commands(task.checks, work, plan.runtime_prepare)
+                    identities = {(tuple(c.argv), c.cwd) for c in required}
+                    selected = [c for c in commands if (tuple(c.argv), c.cwd) in identities]
+                    rows = [r for r in results if (tuple(r.argv), r.cwd) in identities]
+                    if identities != {(tuple(r.argv), r.cwd) for r in rows}:
+                        continue
+                    updates.update(IssueLedger(self.store, self.artifacts).check_updates(
+                        rid, task.origin_id or task.id, selected, rows, work, environment, previous=updates["issues"]))
+                    key = "task_state/" + task.id
+                    state = self.store.get(rid, key, {"version": 1, "revision": 1, "implementation": "accepted"})
+                    observed = updates["recovery/observations/" + (task.origin_id or task.id)]
+                    updates[key] = {**state, "evidence": "valid" if all(r["passed"] for r in observed) else "failed"}
+        self.store.checkpoints(rid, updates)
+        self.store.event(rid, "recovery.observed", {"scope": scope,
+            "checks": updates["recovery/observations/" + scope.removeprefix("task/")]})
 
     async def _grant_replan(self, rid, pending):
         decision = pending["decision"]
@@ -218,15 +262,12 @@ class WorkflowEngine:
             interaction["pause_on"] = "n"
             reason = pending["reason"]
             if pending.get("verification_recheck"):
-                latest = [{**{key: row.get(key) for key in (
-                    "cwd", "argv", "process_exit_code", "exit_code", "tests", "report_status", "failure_reasons")},
-                    "unpassed_test_ids": [case for case in row.get("test_ids", []) if case not in row.get("passed_test_ids", [])]}
-                    for row in pending["verification_recheck"]["checks"]]
-                reason = "最新控制器复测仍未通过：" + json.dumps(latest, ensure_ascii=False) + "\n原回退请求：" + reason
+                from .recovery import failure_summary
+                reason = "最新控制器复测仍未通过：\n" + failure_summary(pending["verification_recheck"]["checks"]) + "\n原回退请求：" + reason
             await self._ask(rid, f"replan-stalled/{pending['evaluation']}",
-                            f"连续 {decision['stalled']} 次回退未检测到可验证改进，已停止自动执行并保留现场。\n"
-                            f"回退目标：{pending['stage']}\n原因：{reason}\n"
-                            "请处理阻塞后确认再尝试一次，或暂停。确认不会清零历史计数。",
+                            f"计划/门禁历史连续 {decision['stalled']} 次未证实改进。\n"
+                            f"待授权动作：{pending['stage']} 修订\n原因：{reason}\n"
+                            "确认仅授权本次修订；历史计数不变。也可暂停。",
                             digest(pending), interaction)
             pending["granted"] = True
             self.store.checkpoint(rid, "replanning/pending", pending)
@@ -248,7 +289,10 @@ class WorkflowEngine:
             if proposal.get("replan_stage") == pending["stage"] and proposal.get("replan_reason") == pending["reason"]:
                 saved = self.store.get(rid, key, {})
                 work = self.store.root / "worktrees" / rid / f"{task.id}-p{pending['generation']}"
-                self.store.checkpoint(rid, key, {**saved, "workspace": saved.get("workspace", str(work))})
+                checks = pending.get("verification_recheck", {}).get("checks", saved.get("feedback", {}).get("checks", []))
+                source = tree_hash(work) if work.is_dir() else None
+                identity = {"source_hash": source} if checks and all(c.get("source_hash") == source for c in checks) else {}
+                self.store.checkpoint(rid, key, {**saved, **identity, "workspace": saved.get("workspace", str(work))})
                 failure = FailureRecord.create(kind="proposal", component="legacy_adapter", task_id=task.id,
                     origin_id=task.origin_id or task.id, step="task", obligations=task.requirement_ids,
                     evidence_refs=["replanning/pending", key, "invocation/" + key],
@@ -299,11 +343,13 @@ class WorkflowEngine:
             record = {"pending": pending, "task": saved, "invocation": invocation,
                       "workspace": str(work), "checker_version": CHECKER_VERSION}
             self.store.checkpoint(rid, recovery_key, record)
-            with observe_activity(self.store, rid, f"重新采集检查证据（{task.id}）"):
+            with observe_activity(self.store, rid, f"重新采集检查证据（{task.id}）") as activity:
                 environment = await self._environment(work, rid, plan)
                 checks = await self.verifier.run(task.checks, work, environment)
+                activity.finish("verified" if passed(checks) else "unpassed")
             record["checks"] = [row.model_dump() for row in checks]
             self.store.checkpoint(rid, recovery_key, record)
+            self._replan_checks(rid, f"task/{task.origin_id or task.id}", task.checks, checks, work, environment)
             if not reusable(task.checks, checks, work, environment, self.artifacts).allowed or tree_hash(work) != source:
                 self.store.checkpoint(rid, "replanning/pending", {**pending, "verification_recheck": {
                     "checks": record["checks"], "recovery_key": recovery_key, "checker_version": CHECKER_VERSION}})
@@ -356,11 +402,13 @@ class WorkflowEngine:
                       "workspace": str(work), "source_hash": source,
                       "verification_contract": self._verification_contract(commands)}
             self.store.checkpoint(rid, recovery_key, record)
-            with observe_activity(self.store, rid, f"补齐构建前置并复测（{task.id}）"):
+            with observe_activity(self.store, rid, f"补齐构建前置并复测（{task.id}）") as activity:
                 environment = await self._environment(work, rid, plan)
                 checks = await self.verifier.run(commands, work, environment)
+                activity.finish("verified" if passed(checks) else "unpassed")
             record["checks"] = [c.model_dump() for c in checks]
             self.store.checkpoint(rid, recovery_key, record)
+            self._replan_checks(rid, f"task/{task.origin_id or task.id}", commands, checks, work, environment)
             if tree_hash(work) != source or not reusable(commands, checks, work, environment, self.artifacts).allowed:
                 self.store.checkpoint(rid, "replanning/pending", {**pending, "verification_recheck": {
                     "checks": record["checks"], "recovery_key": recovery_key, "checker_version": CHECKER_VERSION,
@@ -1267,7 +1315,7 @@ class WorkflowEngine:
                 self.store.checkpoints(rid, {key: saved, counter_key: counters,
                     state_key: {**state, "implementation": "in_progress"}})
             previous_feedback = saved.get("feedback", saved)
-            feedback = {k: previous_feedback[k] for k in ("phase", "checks", "review", "environment_error", "candidate_error", "controller_recheck", "controller_approval_recheck", "controller_recovery", "failure", "baseline_refresh") if k in previous_feedback}
+            feedback = {k: previous_feedback[k] for k in ("phase", "checks", "review", "environment_error", "candidate_error", "controller_recheck", "controller_approval_recheck", "controller_recovery", "upstream_recovery", "failure", "baseline_refresh") if k in previous_feedback}
             feedback = json.loads(json.dumps(feedback))
             task_context = {**approval_context, "task": task.model_dump(), "specification": context["specification"],
                             "verification_contract": self._verification_contract(commands),
@@ -1382,8 +1430,26 @@ class WorkflowEngine:
                 failure_record = check_failure(commands, checks, task=task, evidence_ref=key)
                 failure_record.evidence["review"] = saved.get("review", {})
                 raise RecoveryNeeded(failure_record)
-        await self.recovery._grant(rid, f"round-budget/{task.origin_id or task.id}/{counters['round']}",
-                                  f"任务 {task.id} 已达到实现轮数上限。继续只增加一次实现机会，历史计数保持不变。")
+        latest = saved.get("checks", saved.get("feedback", {}).get("checks", []))
+        review, error = saved.get("review"), saved.get("environment_error")
+        observation = observation_identity(latest, review, error)
+        authorization = saved.get("feedback", {}).get("failure", {})
+        prior = authorization.get("evidence", {})
+        authorized = (authorization.get("origin_id") == (task.origin_id or task.id)
+            and saved.get("feedback", {}).get("controller_recovery", {}).get("action") == "repair"
+            and observation == observation_identity(prior.get("checks", []), prior.get("review"), prior.get("environment_error")))
+        if not authorized:
+            raise RecoveryNeeded(FailureRecord.create(kind="environment" if error else "checks", component="task_budget",
+                origin_id=task.origin_id or task.id, task_id=task.id, step="task_budget", obligations=task.requirement_ids,
+                evidence_refs=[key], evidence={"checks": latest, "review": review, "environment_error": error,
+                    "task": task.model_dump(), "budget": counters,
+                    "constraint": "Implementation budget is exhausted. Diagnose the current evidence first. "
+                                  "A recheck consumes no implementation round; repair requires a specific additional grant."}))
+        from .recovery import failure_summary
+        await self.recovery._grant(rid, f"round-budget/{task.origin_id or task.id}/{counters['round']}/{observation[:16]}",
+                                  f"任务 {task.id} 已达到实现轮数上限。独立诊断建议继续在原范围修复："
+                                  + saved["feedback"]["controller_recovery"]["reason"] + "\n" + failure_summary(latest)
+                                  + "\n确认只增加一次实现机会，历史计数保持不变。")
         self.store.checkpoint(rid, "budget_grants/" + (task.origin_id or task.id), counters["round"] + 1)
         return await self._task(rid, task, base, plan, context)
 

@@ -47,7 +47,8 @@ class Step:
         prefix = f"[{stamp}] {user_text(self.title)}"
         duration = max(0, int(now - self.started))
         if outcome:
-            state = {"success": "完成", "error": "失败", "interrupted": "已暂停"}.get(outcome, outcome)
+            state = {"success": "完成", "error": "失败", "interrupted": "已暂停",
+                     "verified": "检查通过", "unpassed": "复测结束，仍有检查未通过"}.get(outcome, outcome)
             return f"{prefix}｜{state}｜耗时 {duration}s"
         suffix = f"｜已运行 {duration}s"
         if self.total is not None:
@@ -126,10 +127,19 @@ class ProgressDisplay:
             self.message(f"provider 已切换：{data['to']}")
         elif kind == "recovery.requested":
             self.message(f"记录故障｜归属：{data['owner']}｜{data['component']}｜{data['kind']}")
+        elif kind == "recovery.observed":
+            checks = sorted(data["checks"], key=lambda row: row["passed"])
+            for row in checks:
+                label = "通过" if row["passed"] else "未通过" if row["valid"] else "待核验"
+                count = f"｜{row['passed_tests']}/{row['total_tests']} 用例通过" if row["total_tests"] else ""
+                self.message(f"检查证据｜{data['scope']}｜{row['cwd']}｜{' '.join(row['argv'])}｜{label}{count}")
+                if row["unpassed_test_ids"]:
+                    self.message("未通过用例：\n" + "\n".join(row["unpassed_test_ids"][:6]))
         elif kind == "recovery.decided":
-            action = {"recheck": "重新采集证据", "repair": "修复当前任务", "plan_patch": "局部计划修订",
+            action = {"recheck": "重新采集证据", "repair": "修复责任任务", "plan_patch": "局部计划修订",
                       "blocked": "缺少证据，等待处理"}.get(data["action"], STAGE_LABELS.get(data["action"], data["action"]))
-            self.message(f"恢复裁决｜{action}｜影响任务：{', '.join(data['task_ids']) or '最终验收'}｜预算归属：{data['budget_owner']}\n{data['reason']}")
+            owners = ", ".join(data.get("budget_owners", [])) or data["budget_owner"]
+            self.message(f"恢复裁决｜{action}｜影响任务：{', '.join(data['task_ids']) or '最终验收'}｜预算归属：{owners}\n{data['reason']}")
         elif kind == "plan.patch_activated":
             self.message(f"计划修订已生效｜版本 {data['revision']}｜复验任务：{', '.join(data['affected'])}")
         elif kind == "replan.assessed":
@@ -138,6 +148,8 @@ class ProgressDisplay:
                        f"连续 {data['stalled']} 次无可验证改进")
             if data["regressions"]:
                 outcome += f"｜{len(data['regressions'])} 项退步或缺失"
+            if data.get("deferred"):
+                outcome += f"｜{len(data['deferred'])} 个范围证据待复验"
             self.message(f"回退评估｜{STAGE_LABELS.get(data['stage'], data['stage'])}｜{outcome}")
         elif kind == "run.updated" and data.get("delivery_phase"):
             self.message("交付｜" + {"ready": "核对目标分支", "reintegrating": "隔离集成与复测", "publishing": "更新主目录",

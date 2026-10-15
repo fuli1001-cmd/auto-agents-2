@@ -12,8 +12,11 @@ from .util import digest
 
 def assess(previous: dict, observations: dict) -> tuple[dict, dict]:
     tracked = {scope: dict(values) for scope, values in previous.get("tracked", {}).items()}
-    gains, regressions = [], []
+    gains, regressions, deferred = [], [], []
     for scope in tracked.keys() | observations.keys():
+        if observations.get(scope, {}).get("comparable") is False:
+            deferred.append(scope)
+            continue
         actual = observations.get(scope, {}).get("criteria", {})
         if scope not in tracked:
             # A new contract is a baseline, not evidence of an improvement.
@@ -26,14 +29,14 @@ def assess(previous: dict, observations: dict) -> tuple[dict, dict]:
             elif current and not best:
                 gains.append([scope, criterion])
     baseline = not previous.get("evaluations")
-    improved = bool(gains) and not regressions and not baseline
+    improved = bool(gains) and not regressions and not deferred and not baseline
     if improved:
         for scope, criterion in gains:
             tracked[scope][criterion] = True
     stalled = 0 if baseline or improved else previous["stalled"] + 1
     state = {"tracked": tracked, "evaluations": previous.get("evaluations", 0) + 1, "stalled": stalled}
     decision = {"baseline": baseline, "improved": improved, "stalled": stalled,
-                "gains": gains if improved else [], "regressions": regressions}
+                "gains": gains if improved else [], "regressions": regressions, "deferred": sorted(deferred)}
     return state, decision
 
 

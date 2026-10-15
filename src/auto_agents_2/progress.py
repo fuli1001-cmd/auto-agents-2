@@ -51,7 +51,8 @@ def observe_activity(store, run_id, label):
         activity.finish("error")
         raise
     else:
-        activity.finish()
+        if not activity.finished:
+            activity.finish()
     finally:
         current_activity.reset(token)
 
@@ -62,6 +63,7 @@ class Activity:
         self.id = identifier("activity")
         self.last_published = 0.0
         self.last_output = None
+        self.finished = False
         self.store.event(run_id, "activity.started", {"activity": self.id, "label": label, "total": total})
 
     def output(self):
@@ -75,5 +77,8 @@ class Activity:
                                                           "last_output": self.last_output})
 
     def finish(self, outcome="success"):
+        if self.finished:
+            return
+        self.finished = True
         self.store.event(self.run_id, "activity.finished", {"activity": self.id, "outcome": outcome,
                                                           "last_output": self.last_output})

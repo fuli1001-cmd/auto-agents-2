@@ -1,0 +1,1064 @@
+{
+  "date": "2026-10-15",
+  "project": "/tmp/aa2-recovery-v3-demo/project",
+  "run_id": "run_f8a82b6d34f24434",
+  "status": "SUCCEEDED",
+  "outcome": "DELIVERED",
+  "target": "main",
+  "commit": "36644cb9820b45d9492a8d3cc57a60f652064c88",
+  "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+  "receipt_digest": "654f2ab5f71ad5020d26ba219d47b0dc90290355da1ec4f3d2b2defa7d57977a",
+  "snapshot": {
+    "source": "/home/fuli/projects/demo",
+    "project": "/tmp/aa2-recovery-v3-demo/project",
+    "run_id": "run_f8a82b6d34f24434",
+    "original_database": "/tmp/aa2-recovery-v3-demo/project-original-state.sqlite",
+    "database_hash": "4b94b9f713234b0db1794bf8b28d4841acd86690eb56b6d201201c44c7838403",
+    "source_hash": "aacd35b0823264cfd37f5f71381cf583c065bc886e8d86d07ec099842fb1c2a4",
+    "live_writes": 0
+  },
+  "live_source_and_checkpoints_unchanged": true,
+  "live_status_at_final_inspection": "PAUSED",
+  "live_state_note": "The original terminal answered n during validation; only its run/question state changed. No live run or code repair was performed by this validation.",
+  "original_approvals_preserved": [
+    {
+      "id": "question_635a858c6e3845c7",
+      "key": "prototype-approval",
+      "artifact_hash": "bb79ba3a59c488f31df408b6ced080581a0e05cce3c4252b130277dc5a1906d5",
+      "answer": "1"
+    }
+  ],
+  "runtime_versions": {
+    "python": "3.12.15",
+    "node": "v22.21.1"
+  },
+  "preserved_task_commits": {
+    "T001": "61cb9e40105bd45c75b6c272f732decb2afcc354",
+    "T002": "4663e6f018045ba19ec517f390b04d13e4387b13"
+  },
+  "final_task_rounds": {
+    "T001": {
+      "round": 3,
+      "stalled": 0,
+      "failure": "da29ab4dd2dcb44f0458bfac7b0a6b4c38d5546a14677e16cab761c3dda96947"
+    },
+    "T002": {
+      "round": 2,
+      "stalled": 0,
+      "failure": "d7731593efac588bf1a5008fa44ecebc197fc7f0f63c4282db9d967737bf078a"
+    },
+    "T003": {
+      "round": 6,
+      "stalled": 0,
+      "failure": "b04c0372cd4f349380e88dcf4981d7647c15670bb98b60f8af8083cb7c3fa397"
+    },
+    "T004": {
+      "round": 4,
+      "stalled": 0,
+      "failure": "3292731bd215c4bfe1ec52fe787790f656f0768ce723e7a96f231cbf01fbf072"
+    }
+  },
+  "grants": [
+    {
+      "id": "question_0c4d9f23810249c7",
+      "key": "round-budget/T003/4/0dda166d2d357f95",
+      "answer": "y"
+    },
+    {
+      "id": "question_4f0f414961b145d1",
+      "key": "round-budget/T003/4/history/question_4f0f414961b145d1",
+      "answer": "n"
+    },
+    {
+      "id": "question_442a0ff9508c49c7",
+      "key": "round-budget/T003/5/bdd22b2da898bcc8",
+      "answer": "y"
+    }
+  ],
+  "grant_authority": "Two explicit user approvals in this conversation, each authorizing one additional T003 implementation round; no other budget increase.",
+  "historical_plan_stalled": 7,
+  "replans": 6,
+  "plan_revision": {
+    "version": 1,
+    "revision": 1
+  },
+  "decisions": [
+    {
+      "version": 1,
+      "failure_id": "855f45001a83c48c6e06c559b5c41a257ef965fc603bad9b2758ca35598cd8a5",
+      "action": "repair",
+      "task_ids": [
+        "T003",
+        "T004"
+      ],
+      "evidence_refs": [
+        "checks[0]",
+        "6b7598c1d0fd39e1dc9839f8d5671a85ef4aa5bf550c3d787cc6f40557cd5bb9",
+        "85462769b10b08bcc5899c9f8c449417632f05ecf09ce6ac08430f328d95db54",
+        "frontend/src/components/DeleteDialog.tsx",
+        "frontend/src/components/TaskItem.tsx",
+        "frontend/src/hooks/useTasks.ts",
+        "frontend/e2e/task-flow.spec.ts",
+        "frontend/e2e/layout-keyboard.spec.ts"
+      ],
+      "reason": "当前构建成功且交付 pytest 18/18 通过，已关闭旧提案所述缺少 dist 的准备问题；不得继续按旧 README 替换提案声称没有构建或浏览器结果。当前 Playwright 为 12/16 通过，两个视口均有 B01、B07 失败，不能接受实现。人工批准 question_635a858c6e3845c7 对应产物 bb79ba3a59c488f31df408b6ced080581a0e05cce3c4252b130277dc5a1906d5 继续有效。修复均属于现有任务允许路径，无需调整任务契约或重走原型批准。本轮只读检查，未运行测试。",
+      "budget_owner": "T004",
+      "repair_targets": [
+        {
+          "task_id": "T003",
+          "paths": [
+            "frontend/src/components/DeleteDialog.tsx",
+            "frontend/src/App.test.tsx"
+          ],
+          "evidence_refs": [
+            "frontend/src/components/DeleteDialog.tsx",
+            "frontend/e2e/layout-keyboard.spec.ts",
+            "85462769b10b08bcc5899c9f8c449417632f05ecf09ce6ac08430f328d95db54"
+          ],
+          "reason": "重大：B07 第 77 行在两个视口均证明，从默认聚焦的“保留任务”按 Shift+Tab 未循环到确认按钮。DeleteDialog 仅处理 Escape，没有 Tab 边界处理。按模态键盘操作约定补齐正反向焦点循环，考虑禁用按钮及条件出现的重新加载按钮；保留默认取消焦点、Escape 和关闭后的焦点恢复。保留现有浏览器断言，由真实浏览器复核。"
+        },
+        {
+          "task_id": "T004",
+          "paths": [
+            "frontend/e2e/task-flow.spec.ts",
+            "README.md"
+          ],
+          "evidence_refs": [
+            "frontend/e2e/task-flow.spec.ts",
+            "frontend/src/components/TaskItem.tsx",
+            "frontend/src/hooks/useTasks.ts",
+            "frontend/e2e/failure-feedback.spec.ts",
+            "85462769b10b08bcc5899c9f8c449417632f05ecf09ce6ac08430f328d95db54",
+            "checks[0]",
+            "checks[1]"
+          ],
+          "reason": "重大：B01 第 24 行使用 check()，后续取消完成使用 uncheck()，隐含点击后立即改变 checked 的预期；批准契约要求 API 成功后才改变状态。TaskItem 的受控 checked 与 useTasks 的异步提交符合该契约，B04 已用 click() 加重试断言验证成功及失败语义。将 B01 双向切换改为单次真实点击，再等待目标状态或筛选移除；完整保留状态、删除线、API、筛选和两次刷新断言，禁止提前更新产品状态来迎合测试。更新 README 为当前实际证据。修复后重新构建并运行完整检查，保留 16 项浏览器用例及独立测试修改评审。"
+        }
+      ]
+    },
+    {
+      "version": 1,
+      "failure_id": "055b6f21b55f5d59b85c5cd7aa40f893650d95ccc28833882dcf21376a41c996",
+      "action": "repair",
+      "task_ids": [
+        "T003"
+      ],
+      "evidence_refs": [
+        "frontend/src/App.test.tsx",
+        "frontend/src/App.tsx",
+        "frontend/src/hooks/useTasks.ts",
+        "af917fd56247d143330218d07f0f0bc1b12ca6517eeef866e8e97931c759837f",
+        "docs/aa2/design.md"
+      ],
+      "reason": "实际 JUnit 确认 89 项中 88 项通过，唯一失败为 App.test.tsx:205 的编辑成功后焦点断言。源码在保存成功时发布焦点请求，由 App.tsx 的 useEffect 恢复；测试只等待编辑器从 DOM 消失，随后立即断言焦点，未等待该异步副作用，存在时序竞争。TD001-07 要求成功后恢复合理焦点，并不要求 DOM 更新与被动副作用同步完成。应申请 T003 定点修复额度，保留焦点预期及全部业务断言。人工批准已有 question_635a858c6e3845c7 与 artifact_hash=bb79ba3a59c488f31df408b6ced080581a0e05cce3c4252b130277dc5a1906d5 回执，无需改写设计。当前构建未执行，T004 的既有浏览器失败也仍未关闭；本诊断不代表实施验收通过，本轮未运行测试。",
+      "budget_owner": "T003",
+      "budget_owners": [
+        "T003"
+      ],
+      "repair_targets": [
+        {
+          "task_id": "T003",
+          "paths": [
+            "frontend/src/App.test.tsx"
+          ],
+          "evidence_refs": [
+            "frontend/src/App.test.tsx",
+            "frontend/src/App.tsx",
+            "frontend/src/hooks/useTasks.ts",
+            "af917fd56247d143330218d07f0f0bc1b12ca6517eeef866e8e97931c759837f",
+            "docs/aa2/design.md"
+          ],
+          "reason": "修复约第 199–205 行的异步同步边界：以 waitFor 等待服务器确认标题对应的编辑按钮获得焦点，或使用受控 Promise 并在异步 act 中完成响应。不得删除或放宽 toHaveFocus、草稿保留、请求次数及服务器返回值断言，不得模拟 focus 或 hook 状态。控制器随后重跑完整 Vitest 和构建并独立审查；若等待后仍失败，再调查产品焦点处理。"
+        }
+      ]
+    },
+    {
+      "version": 1,
+      "failure_id": "055b6f21b55f5d59b85c5cd7aa40f893650d95ccc28833882dcf21376a41c996",
+      "action": "repair",
+      "task_ids": [
+        "T003"
+      ],
+      "evidence_refs": [
+        "frontend/src/App.test.tsx",
+        "frontend/tsconfig.json",
+        "frontend/package.json",
+        "failure.evidence.checks[0]",
+        "failure.evidence.checks[1]",
+        "63798ad2d0cc335eaf0bdc1323d3759a8995c2a5fca3da2ac34b136dc37e7edf"
+      ],
+      "reason": "当前阻塞是测试源码的类型错误：App.test.tsx:389 向 Testing Library getByRole 传入不支持的 exact 属性，控制器构建实际退出码为 2，尚未生成成功构建产物。89 项 Vitest 通过不能替代类型检查。建议为原来源 T003 定点追加一轮修复额度；原样重查无法消除该错误，无需修改任务契约。人工批准已有 question_635a858c6e3845c7 和 artifact_hash bb79ba3a59c488f31df408b6ced080581a0e05cce3c4252b130277dc5a1906d5 支持，不受旧待批准标签影响。T004 两个视口的焦点循环及任务流程失败仍保持未关闭，须在修复、重新构建和集成后取得新浏览器证据。本轮仅检查源码和所提供的实际报告，未运行测试或修改文件。",
+      "budget_owner": "T003",
+      "budget_owners": [
+        "T003"
+      ],
+      "repair_targets": [
+        {
+          "task_id": "T003",
+          "paths": [
+            "frontend/src/App.test.tsx"
+          ],
+          "evidence_refs": [
+            "frontend/src/App.test.tsx",
+            "failure.evidence.checks[1]",
+            "failure.evidence.task.allowed_paths",
+            "failure.evidence.task.acceptance[8]"
+          ],
+          "reason": "修复第 389 行查询参数，例如使用 { name: /^删除任务：整理书单$/ }，删除无效的 exact 属性并保持名称完整匹配。保留 T003-K01 的全部焦点循环、禁用状态、重载后焦点恢复、请求次数及任务保留断言；不得排除测试文件的类型检查或使用类型抑制。修复后由控制器重新执行完整前端测试和包含 tsc 的生产构建，成功生成并记录 frontend/dist 后再继续下游验证。"
+        }
+      ]
+    }
+  ],
+  "protected_case_count": 293,
+  "protected_test_ids": [
+    "dev-proxy.spec.ts::[desktop-1280] T004-B08 Vite 业务别名通过同源 /api 代理读写隔离后端",
+    "dev-proxy.spec.ts::[mobile-375] T004-B08 Vite 业务别名通过同源 /api 代理读写隔离后端",
+    "failure-feedback.spec.ts::[desktop-1280] T004-B02 创建失败保留草稿，解锁后直接重试",
+    "failure-feedback.spec.ts::[desktop-1280] T004-B03 编辑失败保留原值和草稿，可直接保存重试",
+    "failure-feedback.spec.ts::[desktop-1280] T004-B04 状态切换失败保留未完成状态，可直接重试",
+    "failure-feedback.spec.ts::[desktop-1280] T004-B05 删除失败保留任务和确认框，可直接重试",
+    "failure-feedback.spec.ts::[desktop-1280] T004-B06 首次加载展示等待和失败状态，按钮可重试恢复",
+    "failure-feedback.spec.ts::[mobile-375] T004-B02 创建失败保留草稿，解锁后直接重试",
+    "failure-feedback.spec.ts::[mobile-375] T004-B03 编辑失败保留原值和草稿，可直接保存重试",
+    "failure-feedback.spec.ts::[mobile-375] T004-B04 状态切换失败保留未完成状态，可直接重试",
+    "failure-feedback.spec.ts::[mobile-375] T004-B05 删除失败保留任务和确认框，可直接重试",
+    "failure-feedback.spec.ts::[mobile-375] T004-B06 首次加载展示等待和失败状态，按钮可重试恢复",
+    "junit-duplicate/96f5f4dc3fb2c846c75ed618969796d71b7f0de010d00adbe317b1973524482f/1-of-2",
+    "junit-duplicate/96f5f4dc3fb2c846c75ed618969796d71b7f0de010d00adbe317b1973524482f/2-of-2",
+    "layout-keyboard.spec.ts::[desktop-1280] T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作",
+    "layout-keyboard.spec.ts::[mobile-375] T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作",
+    "src/App.test.tsx::T003：任务页面通过注入的 TaskApi 工作 > 创建使用统一空白及码点校验，成功采用服务器标题并清空输入",
+    "src/App.test.tsx::T003：任务页面通过注入的 TaskApi 工作 > 删除 404 可在模态框内重载，确认目标已消失后关闭弹窗",
+    "src/App.test.tsx::T003：任务页面通过注入的 TaskApi 工作 > 删除期间阻止重复事件和 Escape，失败保留弹窗并可直接重试，成功后恢复筛选焦点",
+    "src/App.test.tsx::T003：任务页面通过注入的 TaskApi 工作 > 删除默认聚焦保留任务，Escape 和按钮取消均不请求 API 并恢复原按钮焦点",
+    "src/App.test.tsx::T003：任务页面通过注入的 TaskApi 工作 > 在已完成筛选创建未完成任务时保留筛选，并把任务文本作为文本渲染",
+    "src/App.test.tsx::T003：任务页面通过注入的 TaskApi 工作 > 完成双向切换仅在成功后更新；失败保留状态，筛选结果和数量跟随成功响应",
+    "src/App.test.tsx::T003：任务页面通过注入的 TaskApi 工作 > 显示初次加载和失败，手动重试后恢复空列表及输入焦点",
+    "src/App.test.tsx::T003：任务页面通过注入的 TaskApi 工作 > 编辑 404 提供重载，缺失行不会丢弃未保存文本或自动重建任务",
+    "src/App.test.tsx::T003：任务页面通过注入的 TaskApi 工作 > 编辑校验及服务端失败保留原任务和草稿，重试后使用响应结果",
+    "src/App.test.tsx::T003：任务页面通过注入的 TaskApi 工作 > 网络结果不确定时不重放创建，重新加载核对后仍保留草稿",
+    "src/App.test.tsx::T003：任务页面通过注入的 TaskApi 工作 > 输入法组合不触发保存或取消，Ctrl+Enter 提交期间不能重复保存或关闭编辑器",
+    "src/App.test.tsx::T003：任务页面通过注入的 TaskApi 工作 > 连续创建只发一次请求；失败保留输入和原列表，直接重试成功",
+    "src/App.test.tsx::T003：任务页面通过注入的 TaskApi 工作 > 默认全部按 id 降序；筛选重算、编辑草稿跨筛选保留且只能开一个编辑器",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > DELETE 404 不能被误认为删除成功",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > DELETE 网络中断保留不确定状态且不重试",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > PATCH 网络中断保留不确定状态且不重试",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > POST 的错误成功状态也不被接受",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > POST 网络中断保留不确定状态且不重试",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 保留 404 的状态、错误码、消息与字段",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 保留 422 的状态、错误码、消息与字段",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 保留 500 的状态、错误码、消息与字段",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 保留 503 的状态、错误码、消息与字段",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 写请求的 AbortError 也不能证明服务端未提交",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 创建的非完整响应不能作为成功结果：{\"id\":0,\"title\":\"整理书单\",\"completed\":false}",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 创建的非完整响应不能作为成功结果：{\"id\":7,\"title\":\"整理书单\",\"completed\":0}",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 创建的非完整响应不能作为成功结果：{\"id\":7,\"title\":\"缺少状态\"}",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 创建的非完整响应不能作为成功结果：{\"id\":9007199254740992,\"title\":\"整理书单\",\"completed\":false}",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 容忍非 JSON 或不符合契约的 HTTP 错误：",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 容忍非 JSON 或不符合契约的 HTTP 错误：<html>代理错误</html>",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 容忍非 JSON 或不符合契约的 HTTP 错误：{\"detail\":\"未知格式\"}",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 容忍非 JSON 或不符合契约的 HTTP 错误：{\"detail\":{\"code\":\"BAD\",\"message\":\"bad\",\"fields\":[null]}}",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 容忍非 JSON 或不符合契约的 HTTP 错误：{broken",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 成功响应在读取正文时断开仍报告保存结果不确定",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 成功状态的非 JSON 仍是响应错误",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 拒绝无效的列表结构：null",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 拒绝无效的列表结构：{\"id\":7,\"title\":\"整理书单\",\"completed\":false}",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 拒绝无效的列表结构：{\"title\":\"缺少字段\"}",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 拒绝无效的列表结构：{}",
+    "src/api/tasks.test.ts::HTTP 错误、异常响应与结果不确定 > 读取失败与写入结果不确定采用不同分类和文案",
+    "src/api/tasks.test.ts::TD001-I02：HTTP 请求与完整任务响应 > DELETE 204 不读取响应体且没有请求体",
+    "src/api/tasks.test.ts::TD001-I02：HTTP 请求与完整任务响应 > GET 使用相对地址、透传信号、保留服务器顺序",
+    "src/api/tasks.test.ts::TD001-I02：HTTP 请求与完整任务响应 > GET 接受空数组",
+    "src/api/tasks.test.ts::TD001-I02：HTTP 请求与完整任务响应 > PATCH 只发送显式字段：{\"completed\":false}",
+    "src/api/tasks.test.ts::TD001-I02：HTTP 请求与完整任务响应 > PATCH 只发送显式字段：{\"completed\":true}",
+    "src/api/tasks.test.ts::TD001-I02：HTTP 请求与完整任务响应 > PATCH 只发送显式字段：{\"title\":\"新标题\",\"completed\":true}",
+    "src/api/tasks.test.ts::TD001-I02：HTTP 请求与完整任务响应 > PATCH 只发送显式字段：{\"title\":\"新标题\"}",
+    "src/api/tasks.test.ts::TD001-I02：HTTP 请求与完整任务响应 > POST 仅发送标题并使用 201 的完整服务器结果",
+    "src/api/tasks.test.ts::列表取消 > 已经取消的信号不发送请求",
+    "src/api/tasks.test.ts::列表取消 > 读取响应体期间取消，不返回过期列表",
+    "src/api/tasks.test.ts::列表取消 > 运行中的 GET 传递取消信号并分类为取消",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'all-explicit-whitespace'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'array'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'ascii-200'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'ascii-201'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'boolean'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'combining-200'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'combining-202'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'embedded-surrogate'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'emoji-200'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'emoji-201'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'emoji-one'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'empty'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'fullwidth-and-nbsp'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'internal-whitespace'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'lone-high-surrogate'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'lone-low-surrogate'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'no-unicode-normalization'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'non-trim-control'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'null'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'number'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'object'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'one'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'precomposed'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'trim-all-explicit-whitespace'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 'zero-width-space'",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 先修剪再计数，200 个 emoji 不受 UTF-16 单元数影响",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 提供和后端一致的校验文案：aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "src/domain/title.test.ts::TD001-T01：消费 T001 的全部共享标题向量 > 提供和后端一致的校验文案：null",
+    "src/hooks/useTasks.test.tsx::T003：异步状态协调 > StrictMode 的旧挂载读取不能覆盖当前挂载",
+    "src/hooks/useTasks.test.tsx::T003：异步状态协调 > 加载期间不写入，同一事件批次只接受一次写入，写入中不重载或改变筛选",
+    "src/hooks/useTasks.test.tsx::T003：异步状态协调 > 卸载后不应用或重放写入响应",
+    "src/hooks/useTasks.test.tsx::T003：异步状态协调 > 卸载时取消读取并忽略迟到响应",
+    "src/hooks/useTasks.test.tsx::T003：异步状态协调 > 同步限制单个编辑器，筛选不会覆盖草稿，取消不调用更新接口",
+    "src/hooks/useTasks.test.tsx::T003：异步状态协调 > 忽略不遵守 AbortSignal 的过期 GET，不覆盖后续成功写入",
+    "src/hooks/useTasks.test.tsx::T003：异步状态协调 > 替换 API 后，旧写入的响应和 finally 不能覆盖新状态或释放新写入锁",
+    "src/hooks/useTasks.test.tsx::T003：异步状态协调 > 过期 GET 的失败不能把新列表变成加载失败",
+    "task-flow.spec.ts::[desktop-1280] T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化",
+    "task-flow.spec.ts::[mobile-375] T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化",
+    "tests.test_api::test_bound_parameters_preserve_literal_title",
+    "tests.test_api::test_create_edit_toggle_filter_delete",
+    "tests.test_api::test_invalid_body_never_writes[PATCH-body10-completed]",
+    "tests.test_api::test_invalid_body_never_writes[PATCH-body11-completed]",
+    "tests.test_api::test_invalid_body_never_writes[PATCH-body12-completed]",
+    "tests.test_api::test_invalid_body_never_writes[PATCH-body13-completed]",
+    "tests.test_api::test_invalid_body_never_writes[PATCH-body14-completed]",
+    "tests.test_api::test_invalid_body_never_writes[PATCH-body15-completed]",
+    "tests.test_api::test_invalid_body_never_writes[PATCH-body16-completed]",
+    "tests.test_api::test_invalid_body_never_writes[PATCH-body17-body]",
+    "tests.test_api::test_invalid_body_never_writes[PATCH-body18-body]",
+    "tests.test_api::test_invalid_body_never_writes[PATCH-body6-body]",
+    "tests.test_api::test_invalid_body_never_writes[PATCH-body7-title]",
+    "tests.test_api::test_invalid_body_never_writes[PATCH-body8-title]",
+    "tests.test_api::test_invalid_body_never_writes[PATCH-body9-title]",
+    "tests.test_api::test_invalid_body_never_writes[POST-None-body]",
+    "tests.test_api::test_invalid_body_never_writes[POST-body0-title]",
+    "tests.test_api::test_invalid_body_never_writes[POST-body1-completed]",
+    "tests.test_api::test_invalid_body_never_writes[POST-body2-id]",
+    "tests.test_api::test_invalid_body_never_writes[POST-body3-body]",
+    "tests.test_api::test_invalid_body_never_writes[POST-body4-body]",
+    "tests.test_api::test_invalid_path[DELETE-%201]",
+    "tests.test_api::test_invalid_path[DELETE-+1]",
+    "tests.test_api::test_invalid_path[DELETE--1]",
+    "tests.test_api::test_invalid_path[DELETE-0]",
+    "tests.test_api::test_invalid_path[DELETE-1.0]",
+    "tests.test_api::test_invalid_path[DELETE-9223372036854775808]",
+    "tests.test_api::test_invalid_path[DELETE-9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999]",
+    "tests.test_api::test_invalid_path[DELETE-\\u0661]",
+    "tests.test_api::test_invalid_path[DELETE-abc]",
+    "tests.test_api::test_invalid_path[DELETE-true]",
+    "tests.test_api::test_invalid_path[PATCH-%201]",
+    "tests.test_api::test_invalid_path[PATCH-+1]",
+    "tests.test_api::test_invalid_path[PATCH--1]",
+    "tests.test_api::test_invalid_path[PATCH-0]",
+    "tests.test_api::test_invalid_path[PATCH-1.0]",
+    "tests.test_api::test_invalid_path[PATCH-9223372036854775808]",
+    "tests.test_api::test_invalid_path[PATCH-9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999]",
+    "tests.test_api::test_invalid_path[PATCH-\\u0661]",
+    "tests.test_api::test_invalid_path[PATCH-abc]",
+    "tests.test_api::test_invalid_path[PATCH-true]",
+    "tests.test_api::test_invalid_query[completed=%20true]",
+    "tests.test_api::test_invalid_query[completed=0]",
+    "tests.test_api::test_invalid_query[completed=1]",
+    "tests.test_api::test_invalid_query[completed=FALSE]",
+    "tests.test_api::test_invalid_query[completed=True]",
+    "tests.test_api::test_invalid_query[completed=]",
+    "tests.test_api::test_invalid_query[completed=null]",
+    "tests.test_api::test_invalid_query[completed=true&completed=false]",
+    "tests.test_api::test_invalid_query[completed=true&completed=true]",
+    "tests.test_api::test_invalid_query[completed=yes]",
+    "tests.test_api::test_malformed_json_and_non_object_bodies[PATCH-\"\\u5b57\\u7b26\\u4e32\"]",
+    "tests.test_api::test_malformed_json_and_non_object_bodies[PATCH-42]",
+    "tests.test_api::test_malformed_json_and_non_object_bodies[PATCH-null]",
+    "tests.test_api::test_malformed_json_and_non_object_bodies[PATCH-true]",
+    "tests.test_api::test_malformed_json_and_non_object_bodies[PATCH-{\"title\":\"\\u79d8\\u5bc6\\u8bf7\\u6c42\\u5185\\u5bb9\",}]",
+    "tests.test_api::test_malformed_json_and_non_object_bodies[PATCH-{\"title\":]",
+    "tests.test_api::test_malformed_json_and_non_object_bodies[POST-\"\\u5b57\\u7b26\\u4e32\"]",
+    "tests.test_api::test_malformed_json_and_non_object_bodies[POST-42]",
+    "tests.test_api::test_malformed_json_and_non_object_bodies[POST-null]",
+    "tests.test_api::test_malformed_json_and_non_object_bodies[POST-true]",
+    "tests.test_api::test_malformed_json_and_non_object_bodies[POST-{\"title\":\"\\u79d8\\u5bc6\\u8bf7\\u6c42\\u5185\\u5bb9\",}]",
+    "tests.test_api::test_malformed_json_and_non_object_bodies[POST-{\"title\":]",
+    "tests.test_api::test_title_messages",
+    "tests.test_api::test_unexpected_error_is_sanitized",
+    "tests.test_api::test_unknown_api_route_is_json",
+    "tests.test_config::test_default_is_module_relative",
+    "tests.test_config::test_dependency_declarations_match",
+    "tests.test_config::test_empty_environment_is_configuration_error[ ]",
+    "tests.test_config::test_empty_environment_is_configuration_error[\\t]",
+    "tests.test_config::test_empty_environment_is_configuration_error[]",
+    "tests.test_config::test_environment_and_explicit_path_priority",
+    "tests.test_config::test_import_and_factory_do_not_connect_or_create_directories",
+    "tests.test_config::test_invalid_timeout_is_rejected[-1]",
+    "tests.test_config::test_invalid_timeout_is_rejected[0]",
+    "tests.test_config::test_invalid_timeout_is_rejected[True]",
+    "tests.test_config::test_invalid_timeout_is_rejected[inf]",
+    "tests.test_config::test_invalid_timeout_is_rejected[nan]",
+    "tests.test_database::test_concurrent_startup_rechecks_version_after_lock",
+    "tests.test_database::test_each_operation_closes_its_own_connection",
+    "tests.test_database::test_initialization_failure_rolls_back_schema_and_version[commit]",
+    "tests.test_database::test_initialization_failure_rolls_back_schema_and_version[create]",
+    "tests.test_database::test_initialization_failure_rolls_back_schema_and_version[version]",
+    "tests.test_database::test_initialize_repeat_preserves_data_and_version",
+    "tests.test_database::test_repository_write_boundary_validates_before_connecting[create-42]",
+    "tests.test_database::test_repository_write_boundary_validates_before_connecting[create-None]",
+    "tests.test_database::test_repository_write_boundary_validates_before_connecting[create-\\ud800]",
+    "tests.test_database::test_repository_write_boundary_validates_before_connecting[create-]",
+    "tests.test_database::test_repository_write_boundary_validates_before_connecting[update-value4]",
+    "tests.test_database::test_repository_write_boundary_validates_before_connecting[update-value5]",
+    "tests.test_database::test_repository_write_boundary_validates_before_connecting[update-value6]",
+    "tests.test_database::test_repository_write_boundary_validates_before_connecting[update-value7]",
+    "tests.test_database::test_repository_write_boundary_validates_before_connecting[update-value8]",
+    "tests.test_database::test_repository_write_boundary_validates_before_connecting[update-value9]",
+    "tests.test_database::test_unrecognized_database_refuses_startup_without_changes[sql0]",
+    "tests.test_database::test_unrecognized_database_refuses_startup_without_changes[sql1]",
+    "tests.test_database::test_unrecognized_database_refuses_startup_without_changes[sql2]",
+    "tests.test_database::test_unrecognized_database_refuses_startup_without_changes[sql3]",
+    "tests.test_database::test_unrecognized_database_refuses_startup_without_changes[sql4]",
+    "tests.test_database::test_unrecognized_database_refuses_startup_without_changes[sql5]",
+    "tests.test_database::test_unrecognized_database_refuses_startup_without_changes[sql6]",
+    "tests.test_database::test_unrecognized_database_refuses_startup_without_changes[sql7]",
+    "tests.test_database::test_unrecognized_database_refuses_startup_without_changes[sql8]",
+    "tests.test_database::test_unrecognized_database_refuses_startup_without_changes[sql9]",
+    "tests.test_delivery::test_assets_cannot_escape_build",
+    "tests.test_delivery::test_factory_failure_cleans_owned_directory",
+    "tests.test_delivery::test_initialization_failure_cleans_owned_directory",
+    "tests.test_delivery::test_isolation_ignores_external_database_and_closes_lifespan",
+    "tests.test_delivery::test_missing_build_keeps_api_available",
+    "tests.test_delivery::test_normal_preview_exit_closes_before_cleanup",
+    "tests.test_delivery::test_occupied_port_does_not_create_database_or_fallback",
+    "tests.test_delivery::test_preview_rejects_invalid_binding[args0]",
+    "tests.test_delivery::test_preview_rejects_invalid_binding[args1]",
+    "tests.test_delivery::test_preview_rejects_invalid_binding[args2]",
+    "tests.test_delivery::test_preview_rejects_invalid_binding[args3]",
+    "tests.test_delivery::test_preview_rejects_invalid_binding[args4]",
+    "tests.test_delivery::test_preview_rejects_invalid_binding[args5]",
+    "tests.test_delivery::test_production_build_alias_assets_and_api_404",
+    "tests.test_delivery::test_real_preview_signal_shutdown_cleans_only_its_database[15]",
+    "tests.test_delivery::test_real_preview_signal_shutdown_cleans_only_its_database[2]",
+    "tests.test_delivery::test_runtime_probe_exits_with_real_versions_and_cleanup",
+    "tests.test_delivery::test_unbuilt_preview_fails_before_creating_database",
+    "tests.test_persistence::test_restart_preserves_create_edit_completion_and_deletion",
+    "tests.test_title::test_api_title_contract[all-explicit-whitespace]",
+    "tests.test_title::test_api_title_contract[array]",
+    "tests.test_title::test_api_title_contract[ascii-200]",
+    "tests.test_title::test_api_title_contract[ascii-201]",
+    "tests.test_title::test_api_title_contract[boolean]",
+    "tests.test_title::test_api_title_contract[combining-200]",
+    "tests.test_title::test_api_title_contract[combining-202]",
+    "tests.test_title::test_api_title_contract[embedded-surrogate]",
+    "tests.test_title::test_api_title_contract[emoji-200]",
+    "tests.test_title::test_api_title_contract[emoji-201]",
+    "tests.test_title::test_api_title_contract[emoji-one]",
+    "tests.test_title::test_api_title_contract[empty]",
+    "tests.test_title::test_api_title_contract[fullwidth-and-nbsp]",
+    "tests.test_title::test_api_title_contract[internal-whitespace]",
+    "tests.test_title::test_api_title_contract[lone-high-surrogate]",
+    "tests.test_title::test_api_title_contract[lone-low-surrogate]",
+    "tests.test_title::test_api_title_contract[no-unicode-normalization]",
+    "tests.test_title::test_api_title_contract[non-trim-control]",
+    "tests.test_title::test_api_title_contract[null]",
+    "tests.test_title::test_api_title_contract[number]",
+    "tests.test_title::test_api_title_contract[object]",
+    "tests.test_title::test_api_title_contract[one]",
+    "tests.test_title::test_api_title_contract[precomposed]",
+    "tests.test_title::test_api_title_contract[trim-all-explicit-whitespace]",
+    "tests.test_title::test_api_title_contract[zero-width-space]",
+    "tests.test_title::test_length_is_checked_after_trimming",
+    "tests.test_title::test_title_contract[all-explicit-whitespace]",
+    "tests.test_title::test_title_contract[array]",
+    "tests.test_title::test_title_contract[ascii-200]",
+    "tests.test_title::test_title_contract[ascii-201]",
+    "tests.test_title::test_title_contract[boolean]",
+    "tests.test_title::test_title_contract[combining-200]",
+    "tests.test_title::test_title_contract[combining-202]",
+    "tests.test_title::test_title_contract[embedded-surrogate]",
+    "tests.test_title::test_title_contract[emoji-200]",
+    "tests.test_title::test_title_contract[emoji-201]",
+    "tests.test_title::test_title_contract[emoji-one]",
+    "tests.test_title::test_title_contract[empty]",
+    "tests.test_title::test_title_contract[fullwidth-and-nbsp]",
+    "tests.test_title::test_title_contract[internal-whitespace]",
+    "tests.test_title::test_title_contract[lone-high-surrogate]",
+    "tests.test_title::test_title_contract[lone-low-surrogate]",
+    "tests.test_title::test_title_contract[no-unicode-normalization]",
+    "tests.test_title::test_title_contract[non-trim-control]",
+    "tests.test_title::test_title_contract[null]",
+    "tests.test_title::test_title_contract[number]",
+    "tests.test_title::test_title_contract[object]",
+    "tests.test_title::test_title_contract[one]",
+    "tests.test_title::test_title_contract[precomposed]",
+    "tests.test_title::test_title_contract[trim-all-explicit-whitespace]",
+    "tests.test_title::test_title_contract[zero-width-space]",
+    "tests.test_transactions::test_database_read_and_open_errors_are_sanitized[connect]",
+    "tests.test_transactions::test_database_read_and_open_errors_are_sanitized[read]",
+    "tests.test_transactions::test_failed_mutation_returns_error_and_rolls_back[commit-create]",
+    "tests.test_transactions::test_failed_mutation_returns_error_and_rolls_back[commit-delete]",
+    "tests.test_transactions::test_failed_mutation_returns_error_and_rolls_back[commit-update]",
+    "tests.test_transactions::test_failed_mutation_returns_error_and_rolls_back[write-create]",
+    "tests.test_transactions::test_failed_mutation_returns_error_and_rolls_back[write-delete]",
+    "tests.test_transactions::test_failed_mutation_returns_error_and_rolls_back[write-update]",
+    "tests.test_transactions::test_real_lock_timeout_returns_503_without_changes[create]",
+    "tests.test_transactions::test_real_lock_timeout_returns_503_without_changes[delete]",
+    "tests.test_transactions::test_real_lock_timeout_returns_503_without_changes[update]",
+    "tests.test_transactions::test_serialized_updates_preserve_unprovided_fields[first_patch0-second_patch0-\\u65b0\\u6807\\u9898-True]",
+    "tests.test_transactions::test_serialized_updates_preserve_unprovided_fields[first_patch1-second_patch1-\\u65b0\\u6807\\u9898-True]",
+    "tests.test_transactions::test_serialized_updates_preserve_unprovided_fields[first_patch2-second_patch2-\\u7b2c\\u4e8c\\u6b21-False]",
+    "tests.test_transactions::test_update_waiting_for_delete_cannot_resurrect_task"
+  ],
+  "distinct_passed_cases": 294,
+  "added_case_ids": [
+    "src/App.test.tsx::T003：任务页面通过注入的 TaskApi 工作 > T003-K01：删除错误后的重载按钮参与焦点循环，重载期间跳过禁用按钮"
+  ],
+  "final_checks": [
+    {
+      "argv": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "cwd": "frontend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 0,
+      "skipped": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "29ec990aff2750417a75c100bf65726d8d4d0c27cfeaf201342721e42ca0246b",
+      "checker_version": "verification-v6",
+      "report": {}
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "cwd": "backend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 189,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "d4d9d473e4c289026866cf876352c86b2e1d31dbeae129ad65cdb054871f221b",
+      "checker_version": "verification-v6",
+      "report": {
+        "hash": "38b84205279e8737cae9962be1ee600c0c60c30b640dcf30165b8ff726b4d0d6",
+        "kind": "junit",
+        "bytes": 21157
+      },
+      "archived_report": "recovery-lifecycle-final-1.xml"
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run"
+      ],
+      "cwd": "frontend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 89,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "ca7030737048f7bcb6f0f91371e86b5889f4d93470e1a6e8bb181fb5cf8c2370",
+      "checker_version": "verification-v6",
+      "report": {
+        "hash": "b6234c7d78a8edf0dbd77b05322fc6a8701ede29a1fce2699443e879756ea963",
+        "kind": "junit",
+        "bytes": 19710
+      },
+      "archived_report": "recovery-lifecycle-final-2.xml"
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "test:e2e"
+      ],
+      "cwd": "frontend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 16,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "34a20bab50ce9dfd305e95e9f3f9c2c261a30f55b6a49396c91eaaa8b991bdd4",
+      "checker_version": "verification-v6",
+      "report": {
+        "hash": "4c63410c9bbd311b5d992567641d85ec0be537e26a6a98e46c119217362c560e",
+        "kind": "junit",
+        "bytes": 4063
+      },
+      "archived_report": "recovery-lifecycle-final-3.xml"
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-c",
+        "import sys; assert sys.version_info >= (3, 12), '需要 Python 3.12 或更高版本'; print(sys.version)"
+      ],
+      "cwd": "backend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 0,
+      "skipped": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "c0e17cf6c8e0dbc4d0da2c41ac33a466c80cd1627dee5a9488d3b15a0dda7e82",
+      "checker_version": "verification-v6",
+      "report": {}
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "cwd": "backend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 189,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "eea2a81c4c8d7adea3bf2a2ff1175918fad0724c19585710feb9ec377a561065",
+      "checker_version": "verification-v6",
+      "report": {
+        "hash": "8e2144cbdc4529c7622e171f8e044eac40af52dda9c9f895ae26df67bf15cf9b",
+        "kind": "junit",
+        "bytes": 21157
+      },
+      "archived_report": "recovery-lifecycle-final-5.xml"
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "src/domain/title.test.ts",
+        "src/api/tasks.test.ts"
+      ],
+      "cwd": "frontend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 67,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "c6829468944a2d877114d312ce135a00acceb33042cd4c632f341946d853db98",
+      "checker_version": "verification-v6",
+      "report": {
+        "hash": "bdaf817bf6d4ebdfc6fa6c6969aa6fa99735bfcab54532016675e4f63094bbbb",
+        "kind": "junit",
+        "bytes": 14358
+      },
+      "archived_report": "recovery-lifecycle-final-6.xml"
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "cwd": "frontend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 0,
+      "skipped": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "8c23f8b13df41f76863f54f810e9de9e5f9ed23489bba02af581920f03b9a1b2",
+      "checker_version": "verification-v6",
+      "report": {}
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/test_delivery.py"
+      ],
+      "cwd": "backend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 18,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "ed44b8c500d0a31f599265e27ca994a52a1624c195ee4f0cd8022f035db2c9ee",
+      "checker_version": "verification-v6",
+      "report": {
+        "hash": "3c072ba37e74fd54db82cd44eaa8c93048d663eb218f7cd023eea4d16ec45682",
+        "kind": "junit",
+        "bytes": 2258
+      },
+      "archived_report": "recovery-lifecycle-final-8.xml"
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-m",
+        "tools.runtime_probe"
+      ],
+      "cwd": "backend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 0,
+      "skipped": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "8d28a90b62d34d2865dce0395efeb58e482fd0f5cfef82a08a6acbb19f72a0c7",
+      "checker_version": "verification-v6",
+      "report": {}
+    }
+  ],
+  "post_delivery_checks": [
+    {
+      "argv": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "cwd": "frontend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 0,
+      "skipped": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "29ec990aff2750417a75c100bf65726d8d4d0c27cfeaf201342721e42ca0246b",
+      "checker_version": "verification-v6",
+      "report": {}
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "cwd": "backend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 189,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "d4d9d473e4c289026866cf876352c86b2e1d31dbeae129ad65cdb054871f221b",
+      "checker_version": "verification-v6",
+      "report": {
+        "hash": "1619ec32e8f40b92cbdba543cf92fe7220f33d75657307c5843edaa60af3d7ad",
+        "kind": "junit",
+        "bytes": 21157
+      },
+      "archived_report": "recovery-lifecycle-repeat-1.xml"
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run"
+      ],
+      "cwd": "frontend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 89,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "ca7030737048f7bcb6f0f91371e86b5889f4d93470e1a6e8bb181fb5cf8c2370",
+      "checker_version": "verification-v6",
+      "report": {
+        "hash": "8f6f7b7e2b5968218d7ab7297441e83713718ac09c56da536867091035d4bc5a",
+        "kind": "junit",
+        "bytes": 19720
+      },
+      "archived_report": "recovery-lifecycle-repeat-2.xml"
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "test:e2e"
+      ],
+      "cwd": "frontend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 16,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "34a20bab50ce9dfd305e95e9f3f9c2c261a30f55b6a49396c91eaaa8b991bdd4",
+      "checker_version": "verification-v6",
+      "report": {
+        "hash": "60f9277176ae3a292dcde0560f2e628bf0a8f1739395a6ffcb8a45bd3f235d78",
+        "kind": "junit",
+        "bytes": 4050
+      },
+      "archived_report": "recovery-lifecycle-repeat-3.xml"
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-c",
+        "import sys; assert sys.version_info >= (3, 12), '需要 Python 3.12 或更高版本'; print(sys.version)"
+      ],
+      "cwd": "backend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 0,
+      "skipped": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "c0e17cf6c8e0dbc4d0da2c41ac33a466c80cd1627dee5a9488d3b15a0dda7e82",
+      "checker_version": "verification-v6",
+      "report": {}
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "cwd": "backend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 189,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "eea2a81c4c8d7adea3bf2a2ff1175918fad0724c19585710feb9ec377a561065",
+      "checker_version": "verification-v6",
+      "report": {
+        "hash": "3b4ff878a39e88da08ac9e1fcd4b65272d1aac38e08d30cb276f56f70ab4fd94",
+        "kind": "junit",
+        "bytes": 21157
+      },
+      "archived_report": "recovery-lifecycle-repeat-5.xml"
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--run",
+        "src/domain/title.test.ts",
+        "src/api/tasks.test.ts"
+      ],
+      "cwd": "frontend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 67,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "c6829468944a2d877114d312ce135a00acceb33042cd4c632f341946d853db98",
+      "checker_version": "verification-v6",
+      "report": {
+        "hash": "cd56938acbcd24268c5013d6c6e8ebc4c717cce68dc4ef32eb8d43805ecaa424",
+        "kind": "junit",
+        "bytes": 14351
+      },
+      "archived_report": "recovery-lifecycle-repeat-6.xml"
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "cwd": "frontend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 0,
+      "skipped": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "8c23f8b13df41f76863f54f810e9de9e5f9ed23489bba02af581920f03b9a1b2",
+      "checker_version": "verification-v6",
+      "report": {}
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/test_delivery.py"
+      ],
+      "cwd": "backend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 18,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "ed44b8c500d0a31f599265e27ca994a52a1624c195ee4f0cd8022f035db2c9ee",
+      "checker_version": "verification-v6",
+      "report": {
+        "hash": "e1744af54fc5a65f90a197d3158f08c02d3d99eeb57efae47d831e6dd218770e",
+        "kind": "junit",
+        "bytes": 2258
+      },
+      "archived_report": "recovery-lifecycle-repeat-8.xml"
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-m",
+        "tools.runtime_probe"
+      ],
+      "cwd": "backend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 0,
+      "skipped": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "source_hash": "3e882bc77eda8d474ebb8e7ded2d4686079ac9731c9ad6979c7708dd92c2b9af",
+      "environment_hash": "1e0b9f2fd6db48fdf2dd175e7a904e15bd912af9ac554d7a022911c7753c8334",
+      "command_hash": "8d28a90b62d34d2865dce0395efeb58e482fd0f5cfef82a08a6acbb19f72a0c7",
+      "checker_version": "verification-v6",
+      "report": {}
+    }
+  ],
+  "post_delivery_assessments_valid": true,
+  "protected_files": {
+    "frontend/e2e/layout-keyboard.spec.ts": true,
+    "frontend/e2e/failure-feedback.spec.ts": true,
+    "frontend/e2e/dev-proxy.spec.ts": true,
+    "backend/tests/test_delivery.py": true,
+    "frontend/src/api/tasks.test.ts": true,
+    "frontend/src/domain/title.test.ts": true
+  },
+  "derived_state_replay": {
+    "all_tasks_current": {
+      "T001": {
+        "version": 1,
+        "revision": 1,
+        "implementation": "accepted",
+        "evidence": "valid"
+      },
+      "T002": {
+        "version": 1,
+        "revision": 1,
+        "implementation": "accepted",
+        "evidence": "valid"
+      },
+      "T003": {
+        "version": 1,
+        "revision": 2,
+        "implementation": "accepted",
+        "evidence": "valid"
+      },
+      "T004": {
+        "version": 1,
+        "revision": 1,
+        "implementation": "accepted",
+        "evidence": "valid"
+      }
+    },
+    "budgets_preserved": true,
+    "original_receipt_preserved": true,
+    "replay_database": "/tmp/aa2-recovery-v3-demo/derived-state-replay/.aa2/state.sqlite",
+    "original_run_not_modified": true
+  },
+  "idempotent_resume": {
+    "exit_code": 0,
+    "new_agent_calls": 0,
+    "budgets_unchanged": true,
+    "receipt_unchanged": true,
+    "source_unchanged": true,
+    "head_matches": true,
+    "git_clean": true,
+    "private_refs": "",
+    "worktrees": "worktree /tmp/aa2-recovery-v3-demo/project\nHEAD 36644cb9820b45d9492a8d3cc57a60f652064c88\nbranch refs/heads/main"
+  },
+  "visual_checks": {
+    "candidate_actions": 84,
+    "delivered_actions": 84
+  },
+  "incremental_usage": {
+    "input_tokens": 15728244,
+    "output_tokens": 37841,
+    "total_tokens": 15766085,
+    "cached_tokens": 12035968,
+    "complete": true,
+    "unreported_attempts": 0
+  },
+  "cleanup_pending": false,
+  "validation_note": "The native run completed with supervised controller upgrades and two explicit extra-round grants. The duplicate-command observation index was corrected after the original final validation; a full post-delivery rerun and a separate database replay verified the correction without rewriting the original receipt."
+}

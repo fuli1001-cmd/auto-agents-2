@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,38 +47,63 @@ class ReuseDecision:
     reason: str
 
 
+@dataclass(frozen=True)
+class EvidenceAssessment:
+    valid: bool
+    passed: bool
+    reason: str
+
+
+def assess_observation(command, result, workspace, environment, artifacts=None):
+    """A trustworthy failing observation may close individual passing obligations."""
+    invalid = {"execution_inputs_changed", "source_changed", "incomplete_log_capture",
+               "test_report_missing", "test_report_invalid", "unsupported_test_runner"}
+    if (result.checker_version != CHECKER_VERSION or result.source_hash != tree_hash(workspace)
+            or result.environment_hash != (environment.fingerprint if environment else "host")
+            or result.command_hash != digest(command.model_dump())
+            or result.input_hash != input_identity(workspace, command)
+            or result.runtime_config_hash != runtime_configuration(workspace, command, environment)
+            or result.process_exit_code is None or result.timed_out
+            or invalid.intersection(result.failure_reasons)):
+        return EvidenceAssessment(False, False, "execution identity or complete evidence unavailable")
+    try:
+        report_failed = False
+        if artifacts:
+            for ref in result.logs:
+                if not ref.get("capture_complete", True):
+                    return EvidenceAssessment(False, False, "incomplete log capture")
+                if not artifacts.released(ref):
+                    artifacts.bytes(ref)
+            if result.test_runner:
+                from .test_reports import read_junit
+                if result.report_status != "valid" or not result.report:
+                    return EvidenceAssessment(False, False, "machine report unavailable")
+                cases = read_junit(artifacts.bytes(result.report))
+                report_failed = cases.failures
+                if (cases.ids != result.test_ids or cases.passed != result.passed_test_ids
+                        or cases.passed_count != result.tests or cases.skipped != result.skipped):
+                    return EvidenceAssessment(False, False, "machine report differs from observation")
+            for attachment in result.attachments:
+                artifacts.bytes(attachment["artifact"])
+        elif result.test_runner and (result.report_status != "valid" or not result.report):
+            return EvidenceAssessment(False, False, "machine report unavailable")
+        success = (not report_failed and not result.exit_code and not result.process_exit_code and not result.failure_reasons
+                   and result.tests >= max(command.expected_tests, int(bool(result.test_runner))))
+        if success and result.generated_outputs != output_hashes(command, workspace):
+            return EvidenceAssessment(False, False, "generated build outputs changed")
+    except (OSError, ValueError, KeyError, TypeError, ET.ParseError, VerificationPreparationError):
+        return EvidenceAssessment(False, False, "evidence artifact unavailable or changed")
+    return EvidenceAssessment(True, bool(success), "verified observation")
+
+
 def reusable(commands, results, workspace: Path, environment, artifacts=None):
     commands = verification_commands(commands, workspace)
     if len(commands) != len(results) or not results:
         return ReuseDecision(False, "missing command evidence")
-    source = tree_hash(workspace)
     for command, result in zip(commands, results):
-        if (result.checker_version != CHECKER_VERSION or result.source_hash != source
-                or result.environment_hash != environment.fingerprint
-                or result.command_hash != digest(command.model_dump())
-                or result.input_hash != input_identity(workspace, command)
-                or result.runtime_config_hash != runtime_configuration(workspace, command, environment)):
-            return ReuseDecision(False, "execution inputs, environment, command or checker changed")
-        if (result.timed_out or result.exit_code or result.failure_reasons
-                or result.process_exit_code != 0 or result.tests < command.expected_tests
-                or result.test_runner and (result.report_status != "valid" or not result.report or result.tests < 1)):
-            return ReuseDecision(False, "unsuccessful observation")
-        try:
-            if result.generated_outputs != output_hashes(command, workspace):
-                return ReuseDecision(False, "generated build outputs changed")
-        except (OSError, VerificationPreparationError):
-            return ReuseDecision(False, "generated build outputs unavailable")
-        if artifacts:
-            try:
-                for ref in result.logs:
-                    if not artifacts.released(ref):
-                        artifacts.bytes(ref)
-                if result.report:
-                    artifacts.bytes(result.report)
-                for attachment in result.attachments:
-                    artifacts.bytes(attachment["artifact"])
-            except (OSError, ValueError, KeyError, TypeError):
-                return ReuseDecision(False, "evidence artifact unavailable or changed")
+        assessment = assess_observation(command, result, workspace, environment, artifacts)
+        if not assessment.valid or not assessment.passed:
+            return ReuseDecision(False, assessment.reason if not assessment.valid else "unsuccessful observation")
     return ReuseDecision(True, "complete matching controller evidence")
 
 

@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="89" failures="0" errors="0" time="2.553009915">
+    <testsuite name="src/App.test.tsx" timestamp="2026-10-15T08:01:08.406Z" hostname="LAPTOP-UE3M8TAU" tests="14" failures="0" errors="0" skipped="0" time="2.120062396">
+        <testcase classname="src/App.test.tsx" name="T003：任务页面通过注入的 TaskApi 工作 &gt; 显示初次加载和失败，手动重试后恢复空列表及输入焦点" time="0.234064928">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="T003：任务页面通过注入的 TaskApi 工作 &gt; 创建使用统一空白及码点校验，成功采用服务器标题并清空输入" time="0.162395134">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="T003：任务页面通过注入的 TaskApi 工作 &gt; 连续创建只发一次请求；失败保留输入和原列表，直接重试成功" time="0.104505786">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="T003：任务页面通过注入的 TaskApi 工作 &gt; 网络结果不确定时不重放创建，重新加载核对后仍保留草稿" time="0.09420544">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="T003：任务页面通过注入的 TaskApi 工作 &gt; 默认全部按 id 降序；筛选重算、编辑草稿跨筛选保留且只能开一个编辑器" time="0.242288292">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="T003：任务页面通过注入的 TaskApi 工作 &gt; 编辑校验及服务端失败保留原任务和草稿，重试后使用响应结果" time="0.17682435">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="T003：任务页面通过注入的 TaskApi 工作 &gt; 输入法组合不触发保存或取消，Ctrl+Enter 提交期间不能重复保存或关闭编辑器" time="0.091306974">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="T003：任务页面通过注入的 TaskApi 工作 &gt; 完成双向切换仅在成功后更新；失败保留状态，筛选结果和数量跟随成功响应" time="0.171216558">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="T003：任务页面通过注入的 TaskApi 工作 &gt; 删除默认聚焦保留任务，Escape 和按钮取消均不请求 API 并恢复原按钮焦点" time="0.1554451">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="T003：任务页面通过注入的 TaskApi 工作 &gt; 删除期间阻止重复事件和 Escape，失败保留弹窗并可直接重试，成功后恢复筛选焦点" time="0.124922753">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="T003：任务页面通过注入的 TaskApi 工作 &gt; T003-K01：删除错误后的重载按钮参与焦点循环，重载期间跳过禁用按钮" time="0.194756064">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="T003：任务页面通过注入的 TaskApi 工作 &gt; 编辑 404 提供重载，缺失行不会丢弃未保存文本或自动重建任务" time="0.13379389">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="T003：任务页面通过注入的 TaskApi 工作 &gt; 删除 404 可在模态框内重载，确认目标已消失后关闭弹窗" time="0.107595594">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="T003：任务页面通过注入的 TaskApi 工作 &gt; 在已完成筛选创建未完成任务时保留筛选，并把任务文本作为文本渲染" time="0.123070502">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/api/tasks.test.ts" timestamp="2026-10-15T08:01:08.415Z" hostname="LAPTOP-UE3M8TAU" tests="37" failures="0" errors="0" skipped="0" time="0.135230312">
+        <testcase classname="src/api/tasks.test.ts" name="TD001-I02：HTTP 请求与完整任务响应 &gt; GET 使用相对地址、透传信号、保留服务器顺序" time="0.083541041">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="TD001-I02：HTTP 请求与完整任务响应 &gt; GET 接受空数组" time="0.001050666">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="TD001-I02：HTTP 请求与完整任务响应 &gt; POST 仅发送标题并使用 201 的完整服务器结果" time="0.001903739">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="TD001-I02：HTTP 请求与完整任务响应 &gt; PATCH 只发送显式字段：{&quot;title&quot;:&quot;新标题&quot;}" time="0.003028725">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="TD001-I02：HTTP 请求与完整任务响应 &gt; PATCH 只发送显式字段：{&quot;completed&quot;:true}" time="0.001908417">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="TD001-I02：HTTP 请求与完整任务响应 &gt; PATCH 只发送显式字段：{&quot;completed&quot;:false}" time="0.001491651">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="TD001-I02：HTTP 请求与完整任务响应 &gt; PATCH 只发送显式字段：{&quot;title&quot;:&quot;新标题&quot;,&quot;completed&quot;:true}" time="0.000941387">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="TD001-I02：HTTP 请求与完整任务响应 &gt; DELETE 204 不读取响应体且没有请求体" time="0.001850924">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 保留 404 的状态、错误码、消息与字段" time="0.006036669">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 保留 422 的状态、错误码、消息与字段" time="0.003304792">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 保留 503 的状态、错误码、消息与字段" time="0.001561297">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 保留 500 的状态、错误码、消息与字段" time="0.000851781">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; DELETE 404 不能被误认为删除成功" time="0.000881049">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 容忍非 JSON 或不符合契约的 HTTP 错误：&lt;html&gt;代理错误&lt;/html&gt;" time="0.001628288">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 容忍非 JSON 或不符合契约的 HTTP 错误：" time="0.001111305">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 容忍非 JSON 或不符合契约的 HTTP 错误：{broken" time="0.000837752">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 容忍非 JSON 或不符合契约的 HTTP 错误：{&quot;detail&quot;:&quot;未知格式&quot;}" time="0.00146617">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 容忍非 JSON 或不符合契约的 HTTP 错误：{&quot;detail&quot;:{&quot;code&quot;:&quot;BAD&quot;,&quot;message&quot;:&quot;bad&quot;,&quot;fields&quot;:[null]}}" time="0.000788995">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 拒绝无效的列表结构：null" time="0.000793553">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 拒绝无效的列表结构：{}" time="0.000530149">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 拒绝无效的列表结构：{&quot;id&quot;:7,&quot;title&quot;:&quot;整理书单&quot;,&quot;completed&quot;:false}" time="0.000476623">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 拒绝无效的列表结构：{&quot;title&quot;:&quot;缺少字段&quot;}" time="0.000470518">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 成功状态的非 JSON 仍是响应错误" time="0.000632102">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 创建的非完整响应不能作为成功结果：{&quot;id&quot;:7,&quot;title&quot;:&quot;缺少状态&quot;}" time="0.000646214">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 创建的非完整响应不能作为成功结果：{&quot;id&quot;:0,&quot;title&quot;:&quot;整理书单&quot;,&quot;completed&quot;:false}" time="0.000598795">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 创建的非完整响应不能作为成功结果：{&quot;id&quot;:9007199254740992,&quot;title&quot;:&quot;整理书单&quot;,&quot;completed&quot;:false}" time="0.000655046">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 创建的非完整响应不能作为成功结果：{&quot;id&quot;:7,&quot;title&quot;:&quot;整理书单&quot;,&quot;completed&quot;:0}" time="0.000790995">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; POST 的错误成功状态也不被接受" time="0.000959807">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 读取失败与写入结果不确定采用不同分类和文案" time="0.001821859">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; POST 网络中断保留不确定状态且不重试" time="0.000971474">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; PATCH 网络中断保留不确定状态且不重试" time="0.000736193">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; DELETE 网络中断保留不确定状态且不重试" time="0.00087741">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 写请求的 AbortError 也不能证明服务端未提交" time="0.000594205">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="HTTP 错误、异常响应与结果不确定 &gt; 成功响应在读取正文时断开仍报告保存结果不确定" time="0.000960181">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="列表取消 &gt; 已经取消的信号不发送请求" time="0.001042387">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="列表取消 &gt; 运行中的 GET 传递取消信号并分类为取消" time="0.002002586">
+        </testcase>
+        <testcase classname="src/api/tasks.test.ts" name="列表取消 &gt; 读取响应体期间取消，不返回过期列表" time="0.001244744">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/domain/title.test.ts" timestamp="2026-10-15T08:01:08.425Z" hostname="LAPTOP-UE3M8TAU" tests="30" failures="0" errors="0" skipped="0" time="0.014110066">
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;empty&apos;" time="0.00405956">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;all-explicit-whitespace&apos;" time="0.001123155">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;trim-all-explicit-whitespace&apos;" time="0.000440646">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;one&apos;" time="0.000696896">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;ascii-200&apos;" time="0.00031222">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;ascii-201&apos;" time="0.000206886">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;emoji-one&apos;" time="0.0001529">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;emoji-200&apos;" time="0.000206326">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;emoji-201&apos;" time="0.000375161">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;combining-200&apos;" time="0.000202787">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;combining-202&apos;" time="0.000116292">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;no-unicode-normalization&apos;" time="0.000211527">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;precomposed&apos;" time="0.000120519">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;internal-whitespace&apos;" time="0.000102686">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;non-trim-control&apos;" time="0.000090761">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;zero-width-space&apos;" time="0.00016829">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;fullwidth-and-nbsp&apos;" time="0.000116956">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;lone-high-surrogate&apos;" time="0.000094923">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;lone-low-surrogate&apos;" time="0.000117063">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;embedded-surrogate&apos;" time="0.000073499">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;null&apos;" time="0.000067365">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;number&apos;" time="0.000111138">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;boolean&apos;" time="0.000131163">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;array&apos;" time="0.000127382">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; &apos;object&apos;" time="0.000137044">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; 先修剪再计数，200 个 emoji 不受 UTF-16 单元数影响" time="0.000489515">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; 提供和后端一致的校验文案：" time="0.000384619">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; 提供和后端一致的校验文案：aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" time="0.000099247">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; 提供和后端一致的校验文案：" time="0.000354305">
+        </testcase>
+        <testcase classname="src/domain/title.test.ts" name="TD001-T01：消费 T001 的全部共享标题向量 &gt; 提供和后端一致的校验文案：null" time="0.000110993">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/hooks/useTasks.test.tsx" timestamp="2026-10-15T08:01:08.433Z" hostname="LAPTOP-UE3M8TAU" tests="8" failures="0" errors="0" skipped="0" time="0.283607141">
+        <testcase classname="src/hooks/useTasks.test.tsx" name="T003：异步状态协调 &gt; 忽略不遵守 AbortSignal 的过期 GET，不覆盖后续成功写入" time="0.0344246">
+        </testcase>
+        <testcase classname="src/hooks/useTasks.test.tsx" name="T003：异步状态协调 &gt; 过期 GET 的失败不能把新列表变成加载失败" time="0.0072501">
+        </testcase>
+        <testcase classname="src/hooks/useTasks.test.tsx" name="T003：异步状态协调 &gt; 加载期间不写入，同一事件批次只接受一次写入，写入中不重载或改变筛选" time="0.005616338">
+        </testcase>
+        <testcase classname="src/hooks/useTasks.test.tsx" name="T003：异步状态协调 &gt; 同步限制单个编辑器，筛选不会覆盖草稿，取消不调用更新接口" time="0.055367893">
+        </testcase>
+        <testcase classname="src/hooks/useTasks.test.tsx" name="T003：异步状态协调 &gt; 卸载时取消读取并忽略迟到响应" time="0.003403415">
+        </testcase>
+        <testcase classname="src/hooks/useTasks.test.tsx" name="T003：异步状态协调 &gt; 卸载后不应用或重放写入响应" time="0.055351434">
+        </testcase>
+        <testcase classname="src/hooks/useTasks.test.tsx" name="T003：异步状态协调 &gt; 替换 API 后，旧写入的响应和 finally 不能覆盖新状态或释放新写入锁" time="0.111211146">
+        </testcase>
+        <testcase classname="src/hooks/useTasks.test.tsx" name="T003：异步状态协调 &gt; StrictMode 的旧挂载读取不能覆盖当前挂载" time="0.008694602">
+        </testcase>
+    </testsuite>
+</testsuites>

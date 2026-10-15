@@ -1,0 +1,50 @@
+<testsuites id="" name="" tests="16" failures="0" skipped="0" errors="0" time="21.870656">
+<testsuite name="dev-proxy.spec.ts" timestamp="2026-10-15T08:13:28.168Z" hostname="mobile-375" tests="1" failures="0" skipped="0" time="0.908" errors="0">
+<testcase name="[mobile-375] T004-B08 Vite 业务别名通过同源 /api 代理读写隔离后端" classname="dev-proxy.spec.ts" time="0.908">
+</testcase>
+</testsuite>
+<testsuite name="failure-feedback.spec.ts" timestamp="2026-10-15T08:13:28.168Z" hostname="mobile-375" tests="5" failures="0" skipped="0" time="3.311" errors="0">
+<testcase name="[mobile-375] T004-B02 创建失败保留草稿，解锁后直接重试" classname="failure-feedback.spec.ts" time="0.617">
+</testcase>
+<testcase name="[mobile-375] T004-B03 编辑失败保留原值和草稿，可直接保存重试" classname="failure-feedback.spec.ts" time="0.861">
+</testcase>
+<testcase name="[mobile-375] T004-B04 状态切换失败保留未完成状态，可直接重试" classname="failure-feedback.spec.ts" time="0.641">
+</testcase>
+<testcase name="[mobile-375] T004-B05 删除失败保留任务和确认框，可直接重试" classname="failure-feedback.spec.ts" time="0.782">
+</testcase>
+<testcase name="[mobile-375] T004-B06 首次加载展示等待和失败状态，按钮可重试恢复" classname="failure-feedback.spec.ts" time="0.41">
+</testcase>
+</testsuite>
+<testsuite name="layout-keyboard.spec.ts" timestamp="2026-10-15T08:13:28.168Z" hostname="mobile-375" tests="1" failures="0" skipped="0" time="1.437" errors="0">
+<testcase name="[mobile-375] T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作" classname="layout-keyboard.spec.ts" time="1.437">
+</testcase>
+</testsuite>
+<testsuite name="task-flow.spec.ts" timestamp="2026-10-15T08:13:28.168Z" hostname="mobile-375" tests="1" failures="0" skipped="0" time="2.091" errors="0">
+<testcase name="[mobile-375] T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化" classname="task-flow.spec.ts" time="2.091">
+</testcase>
+</testsuite>
+<testsuite name="dev-proxy.spec.ts" timestamp="2026-10-15T08:13:28.168Z" hostname="desktop-1280" tests="1" failures="0" skipped="0" time="0.923" errors="0">
+<testcase name="[desktop-1280] T004-B08 Vite 业务别名通过同源 /api 代理读写隔离后端" classname="dev-proxy.spec.ts" time="0.923">
+</testcase>
+</testsuite>
+<testsuite name="failure-feedback.spec.ts" timestamp="2026-10-15T08:13:28.168Z" hostname="desktop-1280" tests="5" failures="0" skipped="0" time="3.519" errors="0">
+<testcase name="[desktop-1280] T004-B02 创建失败保留草稿，解锁后直接重试" classname="failure-feedback.spec.ts" time="0.77">
+</testcase>
+<testcase name="[desktop-1280] T004-B03 编辑失败保留原值和草稿，可直接保存重试" classname="failure-feedback.spec.ts" time="0.806">
+</testcase>
+<testcase name="[desktop-1280] T004-B04 状态切换失败保留未完成状态，可直接重试" classname="failure-feedback.spec.ts" time="0.689">
+</testcase>
+<testcase name="[desktop-1280] T004-B05 删除失败保留任务和确认框，可直接重试" classname="failure-feedback.spec.ts" time="0.805">
+</testcase>
+<testcase name="[desktop-1280] T004-B06 首次加载展示等待和失败状态，按钮可重试恢复" classname="failure-feedback.spec.ts" time="0.449">
+</testcase>
+</testsuite>
+<testsuite name="layout-keyboard.spec.ts" timestamp="2026-10-15T08:13:28.168Z" hostname="desktop-1280" tests="1" failures="0" skipped="0" time="1.389" errors="0">
+<testcase name="[desktop-1280] T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作" classname="layout-keyboard.spec.ts" time="1.389">
+</testcase>
+</testsuite>
+<testsuite name="task-flow.spec.ts" timestamp="2026-10-15T08:13:28.168Z" hostname="desktop-1280" tests="1" failures="0" skipped="0" time="2.29" errors="0">
+<testcase name="[desktop-1280] T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化" classname="task-flow.spec.ts" time="2.29">
+</testcase>
+</testsuite>
+</testsuites>

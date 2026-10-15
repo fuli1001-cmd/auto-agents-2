@@ -9,7 +9,14 @@ from auto_agents_2.errors import AA2Error
 from auto_agents_2.models import Command, ImplementationResult, PlanResult, RecoveryRequest, TaskSpec
 from auto_agents_2.plan_revision import PlanPatch, apply_patch, materialize_plan
 from auto_agents_2.planning import ready_batch
-from auto_agents_2.recovery import Diagnosis, FailureRecord, adjudicate, evidence_references, request_from
+from auto_agents_2.recovery import (
+    Diagnosis,
+    FailureRecord,
+    RepairTarget,
+    adjudicate,
+    evidence_references,
+    request_from,
+)
 from auto_agents_2.store import Store
 from auto_agents_2.workspace import git
 
@@ -245,7 +252,8 @@ async def test_reverification_never_dispatches_implementation_or_consumes_busine
 
 
 @pytest.mark.asyncio
-async def test_repair_t3_preserves_t1_t2_and_rechecks_t4_without_implementation(tmp_path):
+@pytest.mark.parametrize("detected_by", ["T3", "T4"])
+async def test_repair_t3_preserves_t1_t2_and_rechecks_t4_without_implementation(tmp_path, detected_by):
     from auto_agents_2.models import Change, ReviewResult
 
     class Agent(CodingAgent):
@@ -256,7 +264,8 @@ async def test_repair_t3_preserves_t1_t2_and_rechecks_t4_without_implementation(
                 self.implementations.append(context["task"]["id"])
                 return ImplementationResult(summary="repair part3", changes=[Change(path="part3.py", content="value = 3\n")])
             if schema is Diagnosis:
-                return Diagnosis(action="repair", task_ids=["T3"], evidence_refs=context["failure"]["evidence_refs"], reason="part3 regression")
+                return Diagnosis(action="repair", task_ids=["T3"], evidence_refs=context["failure"]["evidence_refs"], reason="part3 regression",
+                    repair_targets=[RepairTarget(task_id="T3", paths=["part3.py"], evidence_refs=["part3.py"], reason="owns implementation")])
             assert fresh
             return ReviewResult(approved=True, summary="actual task checks passed")
 
@@ -275,7 +284,7 @@ async def test_repair_t3_preserves_t1_t2_and_rechecks_t4_without_implementation(
         **{f"develop/task/T{i}": {"commit": base, "checks": []} for i in range(1, 5)},
         **{f"task_state/T{i}": {"version": 1, "revision": 1, "implementation": "accepted", "evidence": "valid"} for i in range(1, 5)},
         **{f"rounds/T{i}": {"round": 1, "stalled": 0, "failure": ""} for i in range(1, 5)}})
-    workflow.recovery.submit(rid, failure(kind="checks"))
+    workflow.recovery.submit(rid, failure(kind="checks", task_id=detected_by, origin_id=detected_by))
     await workflow.recovery.resume(rid)
     assert workflow.store.get(rid, "develop/done") == ["T1", "T2"]
     await workflow._develop(rid, integration, original, {"specification": {}})

@@ -4,7 +4,7 @@ import asyncio
 import shutil
 import time
 import xml.etree.ElementTree as ET
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .artifacts import ArtifactStore
 from .builds import output_hashes, verification_commands
@@ -43,14 +43,28 @@ class VerificationService:
         store = self.resources.store
         run = store.current(unfinished=True)
         activity = Activity(store, run["id"] if run else None, f"执行检查（{workspace.name}）", total=len(commands))
+        failed_outputs, unsafe_source = set(), False
         try:
             for command in commands:
+                blocked = unsafe_source or any(
+                    PurePosixPath(declared).is_relative_to(output) or PurePosixPath(output).is_relative_to(declared)
+                    for declared in command.inputs for output in failed_outputs)
+                if blocked:
+                    results.append(CheckResult(argv=command.argv, cwd=command.cwd, exit_code=1,
+                        process_exit_code=None, failure_reasons=["prerequisite_failed"], report_status="not_executed",
+                        output="Not executed: a declared prerequisite failed or the source changed during verification.",
+                        duration=0, source_hash=baseline, environment_hash=environment.fingerprint if environment else "host",
+                        command_hash=digest(command.model_dump()), checker_version=CHECKER_VERSION))
+                    failed_outputs.update(command.outputs)
+                    activity.progress(len(results), len(commands))
+                    continue
                 with self.resources.temporary("check") as scratch, self.resources.temporary("check-log") as log_root:
                     result = await self._check(command, workspace, environment, baseline, scratch, activity, log_root)
                     results.append(result)
                 activity.progress(len(results), len(commands))
                 if result.exit_code:
-                    break
+                    failed_outputs.update(command.outputs)
+                unsafe_source |= bool({"source_changed", "execution_inputs_changed"}.intersection(result.failure_reasons))
         except asyncio.CancelledError:
             activity.finish("interrupted")
             raise

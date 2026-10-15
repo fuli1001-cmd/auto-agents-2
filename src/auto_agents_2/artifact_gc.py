@@ -73,7 +73,7 @@ def collect_artifacts(store):
                 active = row["status"] not in {"SUCCEEDED", "CANCELLED"}
                 if row["key"] == "issues":
                     for issue in value.values():
-                        mark(issue, issue.get("status") == "open")
+                        mark(issue, issue.get("status") in {"open", "stale"})
                 else:
                     mark(value, active or row["key"].startswith("recovery/required/"))
             candidates = []

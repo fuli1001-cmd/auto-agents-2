@@ -82,10 +82,34 @@ async def test_failed_or_empty_build_cannot_consume_old_outputs(tmp_path, code, 
     (tmp_path / "frontend/dist/stale").write_text("preserve old build")
     verifier, environment = service(tmp_path)
     results = await verifier.run(verification_commands([check], tmp_path, [build]), tmp_path, environment)
-    assert len(results) == 1 and reason in results[0].failure_reasons
+    assert len(results) == 2 and reason in results[0].failure_reasons
+    assert results[1].process_exit_code is None and results[1].failure_reasons == ["prerequisite_failed"]
+    assert results[1].report_status == "not_executed"
     assert not passed(results) and not results[0].generated_outputs
     assert (tmp_path / "frontend/dist/stale").read_text() == "preserve old build"
     assert (tmp_path / "frontend/source.txt").read_text() == "current build"
+
+
+async def test_independent_failures_are_collected_in_one_observation(tmp_path):
+    build, consumer = fixture(tmp_path)
+    build.argv[-1] = "raise SystemExit(2)"
+    independent = Command(argv=[sys.executable, "-c", "raise SystemExit(3)"], cwd="backend")
+    verifier, environment = service(tmp_path)
+    rows = await verifier.run([independent, build, consumer], tmp_path, environment)
+    assert [r.process_exit_code for r in rows] == [3, 2, None]
+    assert rows[-1].failure_reasons == ["prerequisite_failed"]
+    assert not any(r.exit_code == 0 for r in rows)
+
+
+async def test_build_failure_does_not_hide_independent_unit_test_results(tmp_path):
+    build, consumer = fixture(tmp_path)
+    build.argv[-1] = "raise SystemExit(2)"
+    (tmp_path / "frontend/test_independent.py").write_text("def test_unit(): assert True\n")
+    independent = Command(argv=[sys.executable, "-m", "pytest", "-q", "test_independent.py"], cwd="frontend", expected_tests=1)
+    verifier, environment = service(tmp_path)
+    rows = await verifier.run([build, consumer, independent], tmp_path, environment)
+    assert rows[1].report_status == "not_executed"
+    assert rows[2].tests == 1 and rows[2].report_status == "valid" and rows[2].exit_code == 0
 
 
 def test_only_consuming_tasks_receive_builds_and_final_acceptance_prepares_first(tmp_path):

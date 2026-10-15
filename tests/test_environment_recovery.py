@@ -165,7 +165,7 @@ async def test_infrastructure_failure_keeps_applied_candidate_for_retry(tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("max_rounds,expected,rounds", [(4, RecoveryNeeded, 3), (2, Waiting, 2)])
+@pytest.mark.parametrize("max_rounds,expected,rounds", [(4, RecoveryNeeded, 3), (2, RecoveryNeeded, 2)])
 async def test_dependency_repair_preserves_round_and_stall_budgets(tmp_path, max_rounds, expected, rounds):
     agent = CodingAgent()
     workflow = engine(tmp_path, agent)
