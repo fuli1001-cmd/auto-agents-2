@@ -73,6 +73,7 @@ class EnvironmentConfig(Record):
 class DeliveryConfig(Record):
     target_branch: str = ""
     max_reintegrations: int = Field(default=2, ge=0)
+    max_runtime_retries: int = Field(default=3, ge=0)
 
 
 class Config(Record):
@@ -85,7 +86,7 @@ class Config(Record):
     cleanup: Cleanup = Cleanup()
     environment: EnvironmentConfig = EnvironmentConfig()
     delivery: DeliveryConfig = DeliveryConfig()
-    project_profile: Literal["auto", "python", "react", "next", "python-react", "python-next"] = "auto"
+    project_profile: Literal["auto", "python", "node", "python-node", "react", "next", "python-react", "python-next"] = "auto"
     verification: list[Command] = []
     sandbox_binary: str = "bwrap"
     sensitive_paths: list[str] = []
@@ -192,11 +193,14 @@ class ConfigStore:
                 file = home / f"{profile}.config.toml"
                 if not file.is_file():
                     raise ConfigurationError(f"Missing native profile: {file}")
-                settings = {}
-                if (home / "config.toml").exists():
-                    settings.update(tomllib.loads((home / "config.toml").read_text()))
-                settings.update(tomllib.loads(file.read_text()))
-                fingerprints.append(digest(file.read_bytes()))
+                try:
+                    settings = {}
+                    if (home / "config.toml").exists():
+                        settings.update(tomllib.loads((home / "config.toml").read_text()))
+                    settings.update(tomllib.loads(file.read_text()))
+                    fingerprints.append(digest(file.read_bytes()))
+                except (OSError, ValueError) as exc:
+                    raise ConfigurationError("Cannot read or parse native provider profile") from exc
                 profile = Profile(model=str(settings.get("model", "")),
                                   effort=str(settings.get("model_reasoning_effort", "")))
         if profile.file:
@@ -234,7 +238,7 @@ class ConfigStore:
                 elif setting == "model_reasoning_effort":
                     effort = value.strip().strip("\"'")
             i += 1
-        binary = shutil.which(os.path.expanduser(spec.binary), path=environment.get("PATH"))
+        binary = shutil.which(os.path.expanduser(spec.binary), path=environment.get("PATH", os.defpath))
         if not binary:
             raise ConfigurationError(f"Provider executable not found: {spec.binary}")
         public = {"provider": name, "kind": spec.kind, "level": level, "model": model,

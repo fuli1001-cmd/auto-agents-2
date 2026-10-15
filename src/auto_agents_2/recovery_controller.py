@@ -43,9 +43,10 @@ class RecoveryController:
         self.store.event(rid, "recovery.requested", {"failure": failure.id, "owner": failure.origin_id,
                                                      "component": failure.component, "kind": failure.kind})
 
-    async def delivery_decision(self, rid, work, feedback, scopes):
+    async def delivery_decision(self, rid, work, feedback, scopes, *, observation=None):
         """Same fact policy, with delivery journal authority and its existing scope/budget."""
-        observation = digest(feedback)
+        original_observation = observation
+        observation = digest([observation or tree_hash(work), feedback])
         key = "recovery/delivery/" + observation
         saved = self.store.get(rid, key)
         if saved and saved.get("decision", {}).get("action") == "repair":
@@ -57,11 +58,18 @@ class RecoveryController:
             results = [CheckResult.model_validate(c) for c in feedback["checks"]]
             commands = [Command(argv=c.argv, cwd=c.cwd) for c in results]
             kind = check_failure(commands, results).kind
+        checks = feedback.get("checks", feedback.get("runtime_failure", {}).get("checks", [])
+                              if isinstance(feedback.get("runtime_failure"), dict) else [])
+        recheck_identity = digest([tree_hash(work), sorted(scopes),
+            [{k: row.get(k) for k in ("argv", "cwd", "command_hash", "environment_hash", "input_hash",
+                                      "runtime_config_hash", "checker_version")} for row in checks]])
+        recheck_key = "recovery/delivery-rechecks/" + recheck_identity
+        already_rechecked = bool(self.store.get(rid, recheck_key))
         failure = FailureRecord.create(kind=kind, component="delivery", origin_id="delivery", step="delivery",
             obligations=sorted(scopes), evidence_refs=[evidence_ref], evidence={**feedback, "allowed_paths": scopes})
         count_key = "recovery/budgets/diagnosis/delivery"
         count = self.store.get(rid, count_key, self.store.get(rid, "recovery/diagnosis/" + failure.id, {"round": 0}))
-        decision = adjudicate(failure, attempts=max(count["round"], int(bool(saved))))
+        decision = adjudicate(failure, attempts=max(count["round"], int(bool(saved)), int(already_rechecked)))
         if feedback.get("conflicts"):
             decision = decision.model_copy(update={"action": "repair", "reason": "Repair recorded merge conflicts within controller scope"})
         if decision.action == "diagnose":
@@ -87,11 +95,17 @@ class RecoveryController:
                 rejection = {"diagnosis": diagnosis.model_dump(), "validation_error": str(exc)}
                 self.store.checkpoints(rid, {key: {"failure": failure.model_dump(), "diagnosis_feedback": rejection},
                     f"recovery/diagnosis-rejections/{failure.id}/{saved['round']}": rejection})
-                return await self.delivery_decision(rid, work, feedback, scopes)
+                return await self.delivery_decision(rid, work, feedback, scopes, observation=original_observation)
         if decision.action not in {"repair", "recheck"}:
             self.store.checkpoint(rid, key, {"failure": failure.model_dump(), "blocked_decision": decision.model_dump()})
             raise AA2Error("交付恢复需要核对已保留的发布记录：" + decision.reason)
-        self.store.checkpoint(rid, key, {"failure": failure.model_dump(), "decision": decision.model_dump()})
+        updates = {key: {"failure": failure.model_dump(), "decision": decision.model_dump()}}
+        if decision.action == "recheck":
+            if already_rechecked:
+                self.store.checkpoint(rid, key, {"failure": failure.model_dump(), "blocked_decision": decision.model_dump()})
+                raise AA2Error("同一交付输入已自动复验一次；保留证据并等待新的修复或输入")
+            updates[recheck_key] = {"observation": observation, "failure": failure.id}
+        self.store.checkpoints(rid, updates)
         self.store.event(rid, "recovery.decided", decision.model_dump())
         return decision.action
 
@@ -210,8 +224,7 @@ class RecoveryController:
         if decision.action == "blocked":
             await self._grant(rid, f"recovery-blocked/{failure.id}/{active['attempt']}",
                               "恢复仍缺少证据：" + decision.reason + "。补充证据后继续将重新诊断。")
-            self._finish(rid, active, {})
-            self.submit(rid, failure)
+            self._finish(rid, active, {}, successor=failure.model_dump())
             return
         if decision.action == "plan_patch":
             if not plan:
@@ -221,8 +234,7 @@ class RecoveryController:
             return
         if decision.action in {"clarify", "provider_research", "prototype", "design"}:
             # Only an independently adjudicated genuine gate change reaches this path.
-            self._finish(rid, active, {})
-            self.store.prepare_replan(rid, decision.action, decision.reason)
+            self._finish(rid, active, {}, replan=(decision.action, decision.reason))
             await engine._resume_replan(rid)
             return
         if decision.action not in {"repair", "recheck"}:
@@ -271,14 +283,14 @@ class RecoveryController:
         interaction["pause_on"] = "n"
         await self.engine._ask(rid, key, reason, digest([key, reason]), interaction)
 
-    def _finish(self, rid, active, updates):
+    def _finish(self, rid, active, updates, *, replan=None, successor=None):
         # State transition and completion receipt share a SQLite transaction.
         pending = self.store.get(rid, "replanning/pending")
         previous_tasks = {key: self.store.get(rid, key) for key in updates if key.startswith("develop/task/")}
         self.store.finish_recovery(rid, {**updates, "recovery/active": None,
             f"recovery/completed/{active['failure']['id']}/{active['attempt']}": {
                 **active, "phase": "dispatched", "legacy_pending": pending, "previous_tasks": previous_tasks},
-            "replanning/pending": None}, pending)
+            "replanning/pending": None}, pending, replan=replan, successor=successor)
 
     async def _patch(self, rid, active, failure, plan, work):
         engine = self.engine
@@ -359,6 +371,6 @@ class RecoveryController:
     def _reject_patch(self, rid, active, failure, identity, evidence):
         key = "recovery/patch-rejection/" + identity
         self.store.checkpoint(rid, key, evidence)
-        self._finish(rid, active, {})
-        self.submit(rid, failure.model_copy(update={"evidence": {**failure.evidence, **evidence},
-            "evidence_refs": [*failure.evidence_refs, key]}))
+        successor = failure.model_copy(update={"evidence": {**failure.evidence, **evidence},
+            "evidence_refs": [*failure.evidence_refs, key]})
+        self._finish(rid, active, {}, successor=successor.model_dump())

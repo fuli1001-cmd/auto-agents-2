@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from urllib.parse import parse_qs, urldefrag, urlsplit
+import ipaddress
+from urllib.parse import parse_qs, urldefrag, urljoin, urlsplit
 
 import httpx
 
 from .artifacts import ArtifactStore
 from .errors import AA2Error
 from .models import SourceEvidence
+from .network import PublicHTTPTransport, public_address
 from .requirements import MAX_REQUIREMENTS_BYTES, TextExtractor
 from .util import SECRET, now
 
@@ -18,6 +20,14 @@ def public_url(value: str):
         raise AA2Error("Research evidence must use public HTTP(S) documentation URLs")
     if any(SECRET.search(k) for k in parse_qs(url.query)):
         raise AA2Error("Research URLs must not contain credentials")
+    if url.hostname.rstrip(".").lower() == "localhost":
+        raise AA2Error("Research destination must be public")
+    try:
+        address = ipaddress.ip_address(url.hostname)
+    except ValueError:
+        return  # DNS addresses are checked again at connection time.
+    if not public_address(str(address)):
+        raise AA2Error("Research destination must be public")
 
 
 class ResearchService:
@@ -28,18 +38,25 @@ class ResearchService:
 
     async def capture(self, url: str) -> dict:
         public_url(url)
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
-            async with client.stream("GET", url) as response:
-                response.raise_for_status()
-                final = str(response.url)
+        async with httpx.AsyncClient(transport=PublicHTTPTransport(), trust_env=False, follow_redirects=False, timeout=30) as client:
+            final = url
+            for _ in range(6):
                 public_url(final)
-                data = bytearray()
-                async for chunk in response.aiter_bytes():
-                    data.extend(chunk)
-                    if len(data) > MAX_REQUIREMENTS_BYTES:
-                        raise AA2Error("Research response exceeds the supported acquisition size; no claim verified")
-                mime = response.headers.get("content-type", "")
-                encoding = response.encoding or "utf-8"
+                async with client.stream("GET", final) as response:
+                    if response.is_redirect and "location" in response.headers:
+                        final = urljoin(final, response.headers["location"])
+                        continue
+                    response.raise_for_status()
+                    data = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        data.extend(chunk)
+                        if len(data) > MAX_REQUIREMENTS_BYTES:
+                            raise AA2Error("Research response exceeds the supported acquisition size; no claim verified")
+                    mime = response.headers.get("content-type", "")
+                    encoding = response.encoding or "utf-8"
+                    break
+            else:
+                raise AA2Error("Research redirect limit exceeded")
         raw = self.artifacts.put(bytes(data), "research_response")
         text = bytes(data).decode(encoding)
         if "html" in mime:
@@ -62,6 +79,7 @@ class ResearchService:
 
         for source in sources:
             public_url(source.url)
+        for source in sources:
             url = urldefrag(source.url)[0]
             if url not in documents:
                 documents[url] = asyncio.create_task(fetch(url))

@@ -12,6 +12,8 @@ import json
 import time
 from pathlib import Path
 
+from manual_support import finalize
+
 from auto_agents_2.config import ConfigStore
 from auto_agents_2.models import Record
 from auto_agents_2.prompts import PROMPT_VERSION, PromptCompiler
@@ -63,8 +65,31 @@ def fixture():
              "retrieval": {"artifact": {"hash": digest(bodies[version])}, "snapshot": version, "extractor_version": "fixture-v1"},
              "excerpt": bodies[version]} for cid, version, claim, _ in cases]
     context = {"review_kind": "research", "retrieved_sources": rows,
-               "task": {"description": "Evaluate every claim against the complete inline fictional API fixture. These are owner-supplied frozen test specifications, not live URLs. Do not browse. Return supported=true only if that claim is fully supported for its own version, and cite the relevant exact rule. Include every claim_id exactly once. Missing live evidence cannot establish a live test."}}
+               "task": {"description": "Evaluate every claim against the complete inline fictional API fixture. These are owner-supplied frozen test specifications, not live URLs. Do not browse. Return supported=true only if that claim is fully supported for its own version, and cite the relevant exact rule. Include every claim_id exactly once. Each evidence string must consist only of the FIXTURE API VERSION N heading followed by the exact relevant sentence (including MANDATORY: where present). Missing live evidence cannot establish a live test."}}
     return context, {cid: expected for cid, _, _, expected in cases}
+
+
+RULES = {
+    "C1": (1, "Maximum page size: 100."),
+    "C2": (1, "MANDATORY: exports require scope export:read."),
+    "C3": (1, "Streaming exports are not supported."),
+    "C4": (1, "Live service availability has not been tested."),
+    "C5": (2, "Maximum page size: 200."),
+    "C6": (2, "MANDATORY: exports require BOTH export:read and project:member."),
+    "C7": (2, "MANDATORY: exports require BOTH export:read and project:member."),
+    "C8": (2, "Maximum page size: 200."),
+}
+
+
+def citations_valid(answer):
+    for item in answer.verdicts:
+        if item.claim_id not in RULES:
+            return False
+        version, rule = RULES[item.claim_id]
+        expected = f"FIXTURE API VERSION {version} " + rule
+        if " ".join(item.evidence.split()) != expected:
+            return False
+    return True
 
 
 async def evaluate(project: Path, output: Path):
@@ -75,20 +100,21 @@ async def evaluate(project: Path, output: Path):
     store = Store(project)
     run = store.admit("frozen research presentation comparison", config.load().model_dump(mode="json"))
     rid = run["id"]
-    router = ProviderRouter(config, store, SandboxRunner(store.root, config.load().sandbox_binary))
-    context, expected = fixture()
     observations = []
-    report = {"scope": "inline exact-snapshot body deduplication only; not end-to-end workflow equivalence",
-              "model": effective["model"], "effort": effective["effort"], "provider": effective["provider"],
-              "profile_fingerprint": effective["fingerprint"], "binary_hash": file_digest(Path(effective["binary"])),
-              "prompt_version": PROMPT_VERSION, "schema_hash": digest(Verdicts.model_json_schema()),
-              "fixture_hash": digest(context), "expected": expected, "observations": observations,
-              "isolated_sessions": True, "repetitions": 3}
+    report = {"observations": observations, "passed": False, "phase": "preparation"}
     try:
+        router = ProviderRouter(config, store, SandboxRunner(store.root, config.load().sandbox_binary))
+        context, expected = fixture()
+        observations = []
+        report = {"scope": "inline exact-snapshot body deduplication only; not end-to-end workflow equivalence",
+                  "model": effective["model"], "effort": effective["effort"], "provider": effective["provider"],
+                  "profile_fingerprint": effective["fingerprint"], "binary_hash": file_digest(Path(effective["binary"])),
+                  "prompt_version": PROMPT_VERSION, "schema_hash": digest(Verdicts.model_json_schema()),
+                  "fixture_hash": digest(context), "expected": expected, "observations": observations,
+                  "isolated_sessions": True, "repetitions": 3}
         for repetition in range(3):
             for variant in (("A", "B") if repetition % 2 == 0 else ("B", "A")):
                 router.compiler = PreviousPresentation() if variant == "A" else PromptCompiler()
-                prompt, _ = router.compiler.compile("review", context, effective["model"], effective["prompt_profile"])
                 before = store.usage_summary(rid)
                 started = time.monotonic()
                 async with asyncio.timeout(180):
@@ -96,9 +122,9 @@ async def evaluate(project: Path, output: Path):
                                                 f"evaluation/{repetition}/{variant}", True)
                 after = store.usage_summary(rid)
                 actual = {item.claim_id: item.supported for item in answer.verdicts}
-                correct = len(answer.verdicts) == len(expected) and actual == expected
+                correct = len(answer.verdicts) == len(expected) and actual == expected and citations_valid(answer)
                 observations.append({"repetition": repetition, "variant": variant, "correct": correct,
-                                     "prompt_characters": len(prompt), "seconds": time.monotonic() - started,
+                                     "prompt_characters": store.get(rid, f"materials/evaluation/{repetition}/{variant}")["prompt_characters"], "seconds": time.monotonic() - started,
                                      "usage": {k: after[k] - before[k] for k in after if k != "complete"},
                                      "usage_complete": after["complete"], "answer": answer.model_dump()})
                 write_json(output, report)
@@ -107,11 +133,10 @@ async def evaluate(project: Path, output: Path):
         store.update(rid, status="SUCCEEDED" if report["passed"] else "PAUSED")
     except BaseException as exc:
         report.update(passed=False, error_type=type(exc).__name__)
-        store.update(rid, status="PAUSED")
+        finalize(lambda: store.update(rid, status="PAUSED"))
         raise
     finally:
-        report["total_usage"] = store.usage_summary(rid)
-        write_json(output, report)
+        finalize(lambda: report.update(total_usage=store.usage_summary(rid)), lambda: write_json(output, report))
     if not report["passed"]:
         raise AssertionError("Presentation comparison did not satisfy the fixed oracle")
     resources = ResourceManager(store, config.load().cleanup)

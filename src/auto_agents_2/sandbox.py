@@ -96,39 +96,59 @@ class SandboxRunner:
             shutil.rmtree(scratch)
 
     async def spawn(self, argv, cwd, env, writable, readable=None, overlays=None, hidden=None):
-        executable = shutil.which(argv[0], path=env.get("PATH"))
+        executable = shutil.which(argv[0], path=env.get("PATH", os.defpath))
         if not executable:
             raise PolicyViolation(f"Executable unavailable in selected environment: {argv[0]}")
         argv = [executable, *argv[1:]]
         env = {**env, "GIT_OPTIONAL_LOCKS": "0"}
-        command = self.command(argv, cwd, writable, readable, overlays, hidden)
+        command = await asyncio.to_thread(self.command, argv, cwd, writable, readable, overlays, hidden)
         process = await asyncio.create_subprocess_exec(
             *command, cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             start_new_session=True, limit=8 * 1024 * 1024)
-        process_root = self.root / "processes"
-        process_root.mkdir(parents=True, exist_ok=True)
-        write_json(process_root / f"{process.pid}.json", {
-            "pid": process.pid, "start": process_start(process.pid), "cwd": str(cwd),
-        })
+        try:
+            process_root = self.root / "processes"
+            process_root.mkdir(parents=True, exist_ok=True)
+            write_json(process_root / f"{process.pid}.json", {
+                "pid": process.pid, "start": process_start(process.pid), "cwd": str(cwd),
+            })
+        except BaseException as exc:
+            try:
+                await self.stop(process)
+            except Exception as cleanup_error:
+                exc.add_note("Process cleanup also failed: " + type(cleanup_error).__name__)
+            raise
         return process
 
     async def stop(self, process):
         if process.returncode is None:
             try:
                 os.killpg(process.pid, signal.SIGTERM)
-                await asyncio.wait_for(process.wait(), 2)
-            except (ProcessLookupError, asyncio.TimeoutError):
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                await process.wait()
+            except ProcessLookupError:
+                pass
+            # Observe the child watcher, not Process.wait(): paused pipe transports
+            # can keep wait() pending even after the kernel has reaped the child.
+            deadline = asyncio.get_running_loop().time() + 2
+            while process.returncode is None and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.02)
         # A leader can exit before its children. The owned process group still needs reaping.
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        deadline = asyncio.get_running_loop().time() + 2
+        while process.returncode is None and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.02)
+        if process.returncode is None:
+            raise PolicyViolation("Child termination could not be confirmed; process recovery record retained")
+        # On failed/cancelled capture, no reader may remain to resume a full pipe.
+        # Closing it also wakes an existing reader; successful capture is already EOF.
+        for stream in (process.stdout, process.stderr):
+            if stream is not None and not stream.at_eof():
+                transport = getattr(stream, "_transport", None)
+                if transport is not None:
+                    transport.close()
+        await asyncio.wait_for(process.wait(), 2)
         (self.root / "processes" / f"{process.pid}.json").unlink(missing_ok=True)
 
     def reap_orphans(self):
@@ -138,11 +158,11 @@ class SandboxRunner:
         for file in directory.glob("*.json"):
             data = json.loads(file.read_text())
             pid = data["pid"]
-            if process_start(pid) == data["start"] and data["start"] and os.getpgid(pid) == pid:
-                try:
+            try:
+                if process_start(pid) == data["start"] and data["start"] and os.getpgid(pid) == pid:
                     os.killpg(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            except ProcessLookupError:
+                pass
             file.unlink(missing_ok=True)
 
 

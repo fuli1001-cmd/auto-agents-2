@@ -29,6 +29,9 @@ def test_progress_compares_fixed_obligations_and_never_rewards_cycles():
     state, decision = assess(state, observation(a=True, b=False, c=False))
     assert not decision["improved"] and state["stalled"] == 2
     state, decision = assess(state, observation(a=True, b=True, c=False))
+    assert not decision["improved"] and state["stalled"] == 3
+    # B was already observed passing during a regression. Only an unseen gain counts.
+    state, decision = assess(state, observation(a=True, b=True, c=True))
     assert decision["improved"] and state["stalled"] == 0
     # Removing C, or adding a trivial pass, cannot manufacture improvement.
     state, decision = assess(state, observation(a=True, b=True, invented=True))

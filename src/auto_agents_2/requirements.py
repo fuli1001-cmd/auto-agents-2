@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import codecs
+import re
+from email.message import Message
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -27,7 +30,7 @@ class TextExtractor(HTMLParser):
         if tag in {"td", "th"}:
             self.parts.append(" | ")
         if tag == "a":
-            self.links.append(dict(attrs).get("href", ""))
+            self.links.append(dict(attrs).get("href") or "")
         anchor = dict(attrs).get("id")
         if anchor:
             self.parts.append(f" [#{anchor}] ")
@@ -43,6 +46,26 @@ class TextExtractor(HTMLParser):
             self.parts.append(data)
 
 
+def decode_response(raw: bytes, content_type: str) -> str:
+    encoding = None
+    for marks, codec in (((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE), "utf-32"),
+                         ((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE), "utf-16"),
+                         ((codecs.BOM_UTF8,), "utf-8-sig")):
+        if raw.startswith(marks):
+            encoding = codec
+            break
+    message = Message()
+    message["content-type"] = content_type
+    encoding = encoding or message.get_content_charset()
+    if not encoding and "html" in content_type.lower():
+        match = re.search(rb"<meta\b[^>]*charset\s*=\s*[\"']?\s*([a-zA-Z0-9._-]+)", raw[:4096], re.I)
+        encoding = match[1].decode("ascii") if match else None
+    try:
+        return raw.decode(encoding or "utf-8-sig")
+    except (LookupError, UnicodeError) as exc:
+        raise AA2Error("Requirements response has unsupported or invalid text encoding") from exc
+
+
 async def capture(source: str, artifacts: ArtifactStore) -> dict:
     if source.startswith(("https://", "http://")):
         async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
@@ -56,7 +79,7 @@ async def capture(source: str, artifacts: ArtifactStore) -> dict:
                     chunks.append(chunk)
                 raw = b"".join(chunks)
                 kind = response.headers.get("content-type", "")
-        text = raw.decode("utf-8-sig")
+        text = decode_response(raw, kind)
         if "html" in kind:
             parser = TextExtractor()
             parser.feed(text)

@@ -119,9 +119,24 @@ def redact(value: Any, key: str = "") -> Any:
 
 
 def scrub_text(text: str, secrets: list[str] | None = None) -> str:
-    for secret in secrets or []:
-        if secret and len(secret) > 3:
-            text = text.replace(secret, "<redacted>")
+    # Match against the original text: replacing a short value must not expose
+    # the suffix of a longer or partially overlapping credential.
+    values = {part for secret in secrets or [] if secret and len(secret) > 3
+              for part in (secret, *secret.splitlines()) if part}
+    spans = []
+    for value in values:
+        start = text.find(value)
+        while start >= 0:
+            spans.append((start, start + len(value)))
+            start = text.find(value, start + 1)
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    for start, end in reversed(merged):
+        text = text[:start] + "<redacted>" + text[end:]
     text = re.sub(r"(?i)(authorization:\s*bearer\s+)\S+", r"\1<redacted>", text)
     text = re.sub(r"(https?://)[^\s/@:]+:[^\s/@]+@", r"\1<redacted>@", text)
     text = re.sub(r"(?i)([?&](?:api[_-]?key|token|password|secret|access_token)=)[^&\s]+", r"\1<redacted>", text)

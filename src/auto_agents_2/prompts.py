@@ -4,7 +4,7 @@ import json
 
 from .research import request_documents
 
-PROMPT_VERSION = "2026-10-15.4"
+PROMPT_VERSION = "2026-10-15.5"
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
     "gemini": "https://ai.google.dev/gemini-api/docs/prompting-strategies#gemini-3",
@@ -129,13 +129,6 @@ class PromptCompiler:
         }.get(family, "Follow the task contract precisely.")
         data = json.dumps(request_documents(context), ensure_ascii=False, indent=2)
         task = ROLES.get(stage, ROLES["review"])
-        if stage in {"plan", "implement"} or stage == "review" and context.get("review_kind") in {"plan", "plan_patch", "test_changes"}:
-            task += (" New npm lockfile creation belongs to EnvironmentManager. When package-lock.json is absent, "
-                     "propose package.json and let the controller run real npm install --package-lock-only before npm ci. "
-                     "Do not hand-author or return a generated package-lock.json for this initial resolution, "
-                     "and never fabricate package versions, integrity hashes or dependency graphs. "
-                     "A plan may require the resulting lock as an acceptance artifact but must identify its controller producer; "
-                     "its absence from a pre-application proposal is not a defect. Existing locks remain protected changes.")
         if stage in {"clarify", "coverage_review"}:
             task += (" Coverage 'changed' includes new unmet requirements with no existing implementation. "
                      "'unknown' means uncertainty about existing behaviour, not the absence of a new feature. "
@@ -153,6 +146,13 @@ class PromptCompiler:
                     "List only changed/new tasks in upsert_tasks. No removal without replacement coverage under the same origin. "
                     "Use null for unchanged delivery contracts. Scope expansion requires explicit justification and independent review. "
                     "Preparation/check-only changes require re-verification, not reimplementation. document is the resulting full plan document.")
+        if stage in {"plan", "implement"} or stage == "review" and context.get("review_kind") in {"plan", "plan_patch", "test_changes"}:
+            task += (" New npm lockfile creation belongs to EnvironmentManager. When package-lock.json is absent, "
+                     "propose package.json and let the controller run real npm install --package-lock-only before npm ci. "
+                     "Do not hand-author or return a generated package-lock.json for this initial resolution, "
+                     "and never fabricate package versions, integrity hashes or dependency graphs. "
+                     "A plan may require the resulting lock as an acceptance artifact but must identify its controller producer; "
+                     "its absence from a pre-application proposal is not a defect. Existing locks remain protected changes.")
         if stage == "plan" or stage == "review" and context.get("review_kind") == "plan":
             task += (" environment_file and requirements_file are workspace-root-relative file PATHS, "
                      "such as environment.yml and requirements.txt, never file contents or package lists. "

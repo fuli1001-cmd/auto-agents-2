@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath
 from .errors import AA2Error, PolicyViolation, VerificationPreparationError
 from .models import Command
 from .util import contained, digest
-from .workspace import git, input_entry
+from .workspace import git, input_entry, repository_workspace
 
 BUILD_CONTRACT_VERSION = 1
 
@@ -35,9 +35,9 @@ def normalized(command: Command, workspace: Path) -> Command:
             if path.is_relative_to(source) or source.is_relative_to(path):
                 raise VerificationPreparationError(f"Build input overlaps its output: {declared} / {output}")
         try:
-            tracked = git(workspace, "ls-files", "--", output)
-        except AA2Error:
-            tracked = ""
+            tracked = git(workspace, "ls-files", "-z", "--", output) if repository_workspace(workspace) else ""
+        except AA2Error as exc:
+            raise VerificationPreparationError("Cannot verify build output ownership") from exc
         if tracked:
             raise PolicyViolation(f"Build output contains tracked source: {output}")
     outputs = [contained(workspace, path).relative_to(workspace).as_posix() for path in outputs]
@@ -49,8 +49,8 @@ def normalized(command: Command, workspace: Path) -> Command:
 def generated_entry(path: Path, workspace: Path):
     # Next's runtime cache and tracing are mutable; server code and build manifests
     # remain part of the immutable output identity.
-    excluded = {"cache", "trace"} if path.name == ".next" else set()
-    return input_entry(path, workspace, excluded=excluded)
+    omitted = {path / "cache", path / "trace"} if path.name == ".next" else set()
+    return input_entry(path, workspace, excluded=set(), omitted=omitted)
 
 
 def output_hashes(command: Command, workspace: Path) -> dict[str, str]:
@@ -97,6 +97,10 @@ def verification_commands(commands: list[Command], workspace: Path, preparations
     producers = {}
     for command in [*prepare, *checks]:
         for output in command.outputs:
+            for owned, producer in producers.items():
+                if (producer.model_dump() != command.model_dump()
+                        and (PurePosixPath(output).is_relative_to(owned) or PurePosixPath(owned).is_relative_to(output))):
+                    raise VerificationPreparationError(f"Conflicting producers for {output} and {owned}")
             previous = producers.get(output)
             if previous and previous.model_dump() != command.model_dump():
                 raise VerificationPreparationError(f"Conflicting producers for {output}")

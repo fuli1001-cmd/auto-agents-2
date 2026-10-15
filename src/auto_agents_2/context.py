@@ -22,9 +22,9 @@ class ContextBuilder:
                 continue  # Already supplied as stage artifacts; avoid duplicating them in every prompt.
             if scopes and path.name != "AGENTS.md" and not path_allowed(relative, scopes):
                 continue
-            if path.stat().st_size > 100000 and path.name != "AGENTS.md":
-                continue
             try:
+                if path.stat().st_size > 100000 and path.name != "AGENTS.md":
+                    continue
                 content = path.read_bytes().decode("utf-8")
             except (UnicodeError, OSError):
                 continue

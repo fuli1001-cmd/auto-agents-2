@@ -12,6 +12,7 @@ jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 markdown-it-py==4.2.0
 mdurl==0.1.2
+packaging==26.2
 prompt-toolkit==3.0.53
 pydantic==2.14.1
 pydantic-core==2.50.1

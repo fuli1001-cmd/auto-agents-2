@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
+import stat
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
@@ -28,6 +30,25 @@ from .store import Store
 from .test_reports import is_python, read_junit, report_command, test_runner
 from .util import SECRET, contained, digest, scrub_text
 from .workspace import tree_hash
+
+MAX_REPORT_BYTES = 32 * 1024 * 1024
+
+
+def report_bytes(directory: Path) -> bytes:
+    """Read the sandbox's report once, without privileged symlink traversal."""
+    parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open("junit.xml", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_REPORT_BYTES:
+                raise ValueError("Report must be a bounded regular file")
+            data = stream.read(MAX_REPORT_BYTES + 1)
+            if len(data) > MAX_REPORT_BYTES:
+                raise ValueError("Report exceeds supported parsing capacity")
+            return data
+    finally:
+        os.close(parent)
 
 
 class VerificationService:
@@ -102,7 +123,7 @@ class VerificationService:
                         requested = str(local)
                 resolved = shutil.which(requested, path=env["PATH"])
                 allowed = (environment.prefix.resolve(), workspace.resolve())
-                if not resolved or not any(Path(resolved).absolute().is_relative_to(p) for p in allowed):
+                if not resolved or not any(Path(resolved).resolve().is_relative_to(p) for p in allowed):
                     raise PolicyViolation("Verification executable is not owned by the selected environment or workspace")
                 argv[0] = resolved
             if not Path(argv[0]).is_file():
@@ -171,16 +192,16 @@ class VerificationService:
         test_ids, passed_test_ids, report = [], [], {}
         reasons = []
         report_status = "not_required" if not runner else "missing"
-        if runner and report_file.is_file():
-            report = self.artifacts.put_file(report_file, "junit")
+        if runner and (report_file.exists() or report_file.is_symlink()):
             try:
-                with report_file.open("rb") as stream:
-                    cases = read_junit(stream.read(32 * 1024 * 1024 + 1))
+                raw = report_bytes(scratch)
+                report = self.artifacts.put(raw, "junit")
+                cases = read_junit(raw)
                 test_ids, passed_test_ids = cases.ids, cases.passed
                 tests, skipped, report_status = cases.passed_count, cases.skipped, "valid"
                 if cases.failures:
                     reasons.append("test_report_failed")
-            except (ET.ParseError, ValueError) as exc:
+            except (ET.ParseError, ValueError, OSError) as exc:
                 report_status = "invalid"
                 output += "\nJUnit report rejected: " + scrub_text(str(exc), secrets)
         attachments = []

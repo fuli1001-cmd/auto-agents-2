@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from browser_fixtures import prototype_rows
 
 from auto_agents_2.config import ConfigStore
 from auto_agents_2.engine import Replan, WorkflowEngine
@@ -214,7 +215,11 @@ async def test_prototype_waits_for_versioned_human_approval_and_external_reply(t
 
     async def browser(*args):
         browser_calls.append(args)
-        return [{"status": 200, "viewport": 390}]
+        if isinstance(args[0], str):
+            return []  # Browser installation stub, which produces no visual evidence.
+        directory = args[0] if isinstance(args[0], Path) else args[1] / "design/prototypes"
+        actions = args[2] if isinstance(args[0], Path) and len(args) > 2 else []
+        return prototype_rows(directory, actions, workflow.artifacts)
 
     async def research(*args):
         return [{"url": "https://fixture.invalid/DESIGN.md", "excerpt": "Simple monochrome counter"}]

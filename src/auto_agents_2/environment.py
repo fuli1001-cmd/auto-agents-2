@@ -20,6 +20,7 @@ from .errors import AA2Error, DependencyResolutionError, RetryableInfrastructure
 from .evidence import RUNTIME_CACHES
 from .logs import capture_diagnostics
 from .progress import capture_output
+from .readview import sensitive_values
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
 from .store import Store
@@ -54,6 +55,23 @@ class Environment:
         return env
 
 
+def node_dependency_inputs(workspace):
+    manifests = sorted(p for p in files(workspace) if p.name in {"package.json", ".npmrc"})
+    dependency_inputs = [(p.relative_to(workspace).as_posix(), digest(p.read_bytes())) for p in manifests]
+    for manifest in manifests:
+        if manifest.name != "package.json":
+            continue
+        data = json.loads(manifest.read_text())
+        for section in ("dependencies", "devDependencies", "optionalDependencies"):
+            for value in data.get(section, {}).values():
+                if isinstance(value, str) and value.startswith("file:"):
+                    path = (manifest.parent / value.removeprefix("file:")).resolve()
+                    if not path.is_relative_to(workspace.resolve()) or not path.exists():
+                        raise AA2Error("Local npm dependency must exist inside the execution workspace")
+                    dependency_inputs.append((path.relative_to(workspace).as_posix(), input_entry(path, workspace)))
+    return dependency_inputs
+
+
 class EnvironmentManager:
     def __init__(self, config: ConfigStore, sandbox: SandboxRunner):
         self.config, self.sandbox = config, sandbox
@@ -75,12 +93,18 @@ class EnvironmentManager:
         if conda_file:
             try:
                 conda_document = yaml.safe_load(conda_file.read_text())
+                if not isinstance(conda_document, dict):
+                    raise ValueError("Expected a mapping")
                 dependencies = conda_document.get("dependencies", [])
+                if not isinstance(dependencies, list):
+                    raise ValueError("Expected a dependency list")
                 for dependency in dependencies:
                     if isinstance(dependency, dict):
                         if set(dependency) != {"pip"} or not isinstance(dependency["pip"], list):
                             raise ValueError("Unsupported Conda dependency section")
                         extra_pip.extend(dependency["pip"])
+                    elif not isinstance(dependency, str):
+                        raise ValueError("Invalid Conda dependency")
                 if not all(isinstance(line, str) for line in extra_pip):
                     raise ValueError("Invalid pip entries")
                 conda_document["dependencies"] = [d for d in dependencies if isinstance(d, str)]
@@ -94,7 +118,8 @@ class EnvironmentManager:
                                                                   if k.startswith(("PIP_", "CONDA_"))}),
                               "conda": conda_file.read_text() if conda_file else "",
                               "requirements": inputs.requirements, "constraints": inputs.constraints,
-                              "private_source": [str(workspace), tree_hash(workspace)] if local else None})
+                              "private_source": [str(workspace), tree_hash(workspace)] if local else None,
+                              **({"source_copy_version": 2} if local else {})})
         location = self.root / "environment-records" / fingerprint / "instance.json"
         run = self.store.current(unfinished=True)
         async with async_file_lock(self.root / "environment-locks" / f"{fingerprint}.lock"):
@@ -162,7 +187,7 @@ class EnvironmentManager:
                     stdout, stderr = await capture_output(process)
                 else:
                     stdout, stderr, logs = await capture_diagnostics(process, self.resources, ArtifactStore(self.root),
-                                                                     [v for k, v in env.items() if SECRET.search(k)])
+                        [v for k, v in env.items() if SECRET.search(k)] + sensitive_values(workspace))
                     run = self.store.current(unfinished=True)
                     operation = current_diagnostics.get()
                     if operation:
@@ -216,7 +241,7 @@ class EnvironmentManager:
                     argv = [conda, "env", "create", "-p", str(prefix), "-f", str(conda_file)]
                 else:
                     argv = [conda, "create", "-y", "--copy", "-p", str(prefix), f"python={cfg.python_version}", "pip", "pytest"]
-                    if profile in {"react", "next", "python-react", "python-next"}:
+                    if profile in {"node", "python-node", "react", "next", "python-react", "python-next"}:
                         argv += [f"nodejs={cfg.node_version}", "--channel", "conda-forge"]
                 reads = [Path(conda).resolve().parent.parent]
                 if conda_file:
@@ -234,7 +259,11 @@ class EnvironmentManager:
                     pip_file = scratch / "dependencies.txt"
                     atomic_write(pip_file, "\n".join(dependencies) + "\n")
                 if pip_file:
-                    await self._command([str(prefix / "bin/python"), "-m", "pip", "install", "-r", str(pip_file)],
+                    saved_pip = records / "pip.lock"
+                    if replay_lock and not saved_pip.is_file():
+                        raise AA2Error("Recorded pip resolution is missing; preserving the previous environment identity")
+                    constraints = ["-c", str(saved_pip)] if saved_pip.is_file() and not local else []
+                    await self._command([str(prefix / "bin/python"), "-m", "pip", "install", "-r", str(pip_file), *constraints],
                                         install_workspace, env, [prefix, scratch], [prefix, pip_file.parent, *reads])
                 await self._command([str(prefix / "bin/python"), "-m", "pip", "check"],
                                     workspace, env, [scratch], [prefix], timeout=60)
@@ -245,11 +274,18 @@ class EnvironmentManager:
                 frozen = await self._command([str(prefix / "bin/python"), "-m", "pip", "freeze"], workspace, env, [scratch], [prefix], timeout=30)
                 explicit = await self._command([conda, "list", "--explicit", "-p", str(prefix)], workspace, env,
                                                [scratch], [prefix, *reads], timeout=30)
+                if not local and (records / "pip.lock").is_file():
+                    def resolution(text):
+                        return sorted(line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#"))
+                    if resolution(frozen) != resolution((records / "pip.lock").read_text()):
+                        raise AA2Error("Reconstructed pip resolution differs from the saved lock; previous records retained")
                 atomic_write(prefix / "aa2-pip.lock", frozen)
                 atomic_write(prefix / "aa2-conda.lock", explicit)
                 if not local:
-                    atomic_write(records / "pip.lock", frozen)
-                    atomic_write(records / "conda.lock", explicit)
+                    if not (records / "pip.lock").exists():
+                        atomic_write(records / "pip.lock", frozen)
+                    if not (records / "conda.lock").exists():
+                        atomic_write(records / "conda.lock", explicit)
                 write_json(ready, {"fingerprint": fingerprint, "private": local,
                                    "pip_hash": digest(frozen), "conda_hash": digest(explicit),
                                    "integrity": self.integrity(prefix)})
@@ -267,6 +303,7 @@ class EnvironmentManager:
             npm = str(environment.prefix / "bin/npm")
             if not Path(npm).exists():
                 raise AA2Error("Node runtime is missing from the selected project environment")
+            dependency_inputs = node_dependency_inputs(workspace)
             lock = workspace / "package-lock.json"
             with self.resources.temporary("node") as scratch:
                 variables = environment.variables(scratch)
@@ -276,17 +313,13 @@ class EnvironmentManager:
                         raise AA2Error("发布版本缺少 package-lock.json，必须在隔离工作区补齐并重新验收")
                     staging = scratch / "resolve"
                     staging.mkdir()
-                    for file in files(workspace):
-                        if file.name in {"package.json", ".npmrc"}:
-                            target = staging / file.relative_to(workspace)
-                            target.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copyfile(file, target)
+                    copy_execution_source(workspace, staging)
                     await self._command([npm, "install", "--package-lock-only", "--ignore-scripts"], staging,
                                         variables, [scratch, package_cache], [environment.prefix], timeout=900)
                     atomic_write(lock, (staging / "package-lock.json").read_bytes(), 0o644)
                 modules = workspace / "node_modules"
                 marker = self.root / "node-records" / (digest(str(workspace)) + ".json")
-                identity = digest(["node-install-v2", environment.fingerprint,
+                identity = digest(["node-install-v3", environment.fingerprint, dependency_inputs,
                                    self.config.load().environment.playwright_browsers,
                                    (workspace / "package.json").read_text(), lock.read_text()])
                 try:

@@ -47,7 +47,7 @@ source .aa2/runtime.sh
 配置可显式指定目标和主分支并发变化的重集成上限：
 
 ```json
-"delivery": {"target_branch": "main", "max_reintegrations": 2}
+"delivery": {"target_branch": "main", "max_reintegrations": 2, "max_runtime_retries": 3}
 ```
 
 工作目录有未提交或未跟踪修改时会等待，请自行提交或移到其它目录后继续。aa2 不自动暂存、重置或包含这些修改。成功后回收内部工作区和 Git 引用，不保留 `aa2/<run-id>` 分支；不会推送远端。当前运行环境、正式规格和验收证据保留。

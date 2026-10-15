@@ -30,9 +30,8 @@ def assess(previous: dict, observations: dict) -> tuple[dict, dict]:
                 gains.append([scope, criterion])
     baseline = not previous.get("evaluations")
     improved = bool(gains) and not regressions and not deferred and not baseline
-    if improved:
-        for scope, criterion in gains:
-            tracked[scope][criterion] = True
+    for scope, criterion in gains:
+        tracked[scope][criterion] = True
     stalled = 0 if baseline or improved else previous["stalled"] + 1
     state = {"tracked": tracked, "evaluations": previous.get("evaluations", 0) + 1, "stalled": stalled}
     decision = {"baseline": baseline, "improved": improved, "stalled": stalled,

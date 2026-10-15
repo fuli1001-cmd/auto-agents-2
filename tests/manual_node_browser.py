@@ -10,6 +10,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from manual_support import finalize
+
 from auto_agents_2.config import ConfigStore
 from auto_agents_2.environment import Environment, EnvironmentManager
 from auto_agents_2.models import Command
@@ -46,30 +48,33 @@ async def main(prefix, modules):
     config.initialize()
     store = Store(root)
     rid = store.admit("fixture://hermetic-browser", {})["id"]
-    work = root / "workspace"
-    work.mkdir()
-    shutil.copytree(modules, work / "node_modules", symlinks=True,
-                    ignore=shutil.ignore_patterns(".vite", ".vite-temp", ".cache", ".tmp"))
-    write_json(work / "package.json", {"name": "aa2-node-browser", "type": "module",
-                                      "scripts": {"test:e2e": "playwright test"}})
-    (work / "playwright.config.mjs").write_text("export default {testMatch:'browser.spec.js',use:{headless:true}};\n")
-    (work / "browser.spec.js").write_text("const HTML=" + json.dumps(HTML) + ";\n" + TEST)
-    environment = Environment(prefix.resolve(), "browser-smoke-runtime")
-    sandbox = SandboxRunner(store.root)
     try:
+        work = root / "workspace"
+        work.mkdir()
+        shutil.copytree(modules, work / "node_modules", symlinks=True,
+                        ignore=shutil.ignore_patterns(".vite", ".vite-temp", ".cache", ".tmp"))
+        write_json(work / "package.json", {"name": "aa2-node-browser", "type": "module",
+                                          "scripts": {"test:e2e": "playwright test"}})
+        (work / "playwright.config.mjs").write_text("export default {testMatch:'browser.spec.js',use:{headless:true}};\n")
+        (work / "browser.spec.js").write_text("const HTML=" + json.dumps(HTML) + ";\n" + TEST)
+        environment = Environment(prefix.resolve(), "browser-smoke-runtime")
+        sandbox = SandboxRunner(store.root)
         await EnvironmentManager(config, sandbox).prepare_node_browsers(work, environment)
         service = VerificationService(store.root, sandbox)
         result = (await service.run([Command(argv=["npm", "run", "test:e2e", "--", "--workers=1"],
                                             expected_tests=1, timeout=120)], work, environment))[0]
         write_json(root / "results.json", result.model_dump())
         store.checkpoint(rid, "checks/browser", result.model_dump())
-        assert result.exit_code == 0 and result.tests == 1, result.output
+        if not (result.exit_code == 0 and result.tests == 1):
+            raise RuntimeError(result.output)
         screenshots = [a for a in result.attachments if a["path"].endswith("page.png")]
-        assert screenshots and service.artifacts.bytes(screenshots[0]["artifact"]).startswith(b"\x89PNG")
+        if not (screenshots and service.artifacts.bytes(screenshots[0]["artifact"]).startswith(b"\x89PNG")):
+            raise RuntimeError('Manual verification failed')
         store.update(rid, status="SUCCEEDED")
         print("Passed: actual Chromium launch, HTTP page, ordinary click, assertion, archived screenshot", flush=True)
-    except BaseException:
-        store.update(rid, status="PAUSED")
+    except BaseException as exc:
+        finalize(lambda: store.update(rid, status="PAUSED"),
+                 lambda error_type=type(exc).__name__: write_json(root / "failure.json", {"passed": False, "error_type": error_type}))
         raise
 
 

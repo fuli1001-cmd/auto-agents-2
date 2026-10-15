@@ -15,14 +15,19 @@ def bundle(prompt: str, schema: dict, files: list[Path], images: list[Path], cap
     rows = []
     for purpose, paths in (("context", files), ("image", images)):
         for path in paths:
-            if not path.is_file() or path.is_symlink():
-                raise ProviderError("Required material is missing or unsafe; acceptance cannot proceed")
+            try:
+                if not path.is_file() or path.is_symlink():
+                    raise ProviderError("Required material is missing or unsafe; acceptance cannot proceed")
+                body = path.read_bytes()
+            except OSError as exc:
+                raise ProviderError("Required material is unreadable; acceptance cannot proceed") from exc
             rows.append({"purpose": purpose, "required": True, "presentation": "attachment",
-                         "location": str(path), "hash": digest(path.read_bytes()),
+                         "location": str(path), "hash": digest(body),
                          "delivery_state": "controller_readable", "omissions": []})
     characters = len(prompt) + len(json.dumps(schema, ensure_ascii=False, indent=2) + "\n")
     return {"version": 1, "capability": capability, "materials": rows,
             "prompt_hash": digest(prompt), "schema_hash": digest(schema), "characters": characters,
+            "prompt_characters": len(prompt), "schema_characters": characters - len(prompt),
             "soft_target": DEFAULT_PROMPT_TARGET, "over_target": characters > DEFAULT_PROMPT_TARGET,
             "presentation": "conservative_self_contained", "omitted_mandatory_content": [],
             "usage_scope": "prompt_and_schema_characters_only; excludes_native_history_tools_images"}

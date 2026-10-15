@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -53,16 +55,20 @@ class ResourceManager:
     def finish_delivery(self, rid: str):
         """Called under the controller lock. A failed GC never revokes a delivery."""
         from .workspace import git
-        receipt = self.store.get(rid, "delivery/receipt")
-        if not receipt or self.store.run(rid)["status"] != "SUCCEEDED":
+        try:
+            receipt = self.store.get(rid, "delivery/receipt")
+            completed = self.store.run(rid)["status"] == "SUCCEEDED"
+        except (OSError, sqlite3.Error):
+            return  # complete_delivery already durably set cleanup_pending.
+        if not receipt or not completed:
             return
         from .util import digest
         if digest({k: v for k, v in receipt.items() if k != "digest"}) != receipt["digest"]:
             raise PolicyViolation("Delivery receipt integrity mismatch; preserving resources")
         errors = []
-        self.release_run(rid)
-        errors.extend(self.collect()["errors"])
         try:
+            self.release_run(rid)
+            errors.extend(self.collect()["errors"])
             with self.store.connect() as db:
                 remaining = db.execute("SELECT 1 FROM resources WHERE run_id=? AND kind='worktree' AND state!='removed'", (rid,)).fetchone()
             if remaining:
@@ -83,9 +89,12 @@ class ResourceManager:
                 for prefix in ("clarify_context", "replan_feedback", "readme", "delivery/journal"):
                     db.execute("DELETE FROM checkpoints WHERE run_id=? AND key=?", (rid, prefix))
             self.collect_artifacts()
-        except (OSError, AA2Error) as exc:
+        except (OSError, AA2Error, sqlite3.Error) as exc:
             errors.append(str(exc))
-        self.store.update(rid, cleanup_pending=bool(errors), cleanup_errors=errors)
+        try:
+            self.store.update(rid, cleanup_pending=bool(errors), cleanup_errors=errors)
+        except (OSError, sqlite3.Error):
+            pass  # The durable pending flag remains set for a later retry.
 
     def finish_pending(self):
         for run in self.store.successful():
@@ -99,9 +108,10 @@ class ResourceManager:
     def collect_artifacts_safely(self):
         try:
             return self.collect_artifacts()
-        except (OSError, AA2Error) as exc:
+        except (OSError, AA2Error, sqlite3.Error) as exc:
             result = {"removed": 0, "bytes": 0, "errors": [str(exc)]}
-            self.store.event(None, "artifacts.cleanup_failed", result)
+            from .progress import safe_event
+            safe_event(self.store, None, "artifacts.cleanup_failed", result)
             return result
 
     def retire_worktree(self, path: Path, recovery_ref: str):
@@ -120,13 +130,23 @@ class ResourceManager:
     def temporary(self, label: str):
         path = self.store.root / "tmp" / identifier(label)
         path.mkdir(parents=True)
-        run = self.store.current(unfinished=True)
-        rid = self.register(path, "temporary", run["id"] if run else None)
+        rid = None
         try:
+            run = self.store.current(unfinished=True)
+            rid = self.register(path, "temporary", run["id"] if run else None)
             yield path
         finally:
-            self.release(rid)
-            self.collect()
+            original = sys.exception()
+            try:
+                if rid is None:
+                    shutil.rmtree(path)
+                else:
+                    self.release(rid)
+                    self.collect()
+            except (OSError, sqlite3.Error, AA2Error) as exc:
+                if original is None:
+                    raise
+                original.add_note("Temporary resource cleanup also failed: " + type(exc).__name__)
 
     def collect(self, dry_run: bool = False) -> dict:
         result = {"removed": 0, "bytes": 0, "candidates": [], "errors": []}
@@ -139,8 +159,16 @@ class ResourceManager:
                     (refs=0 OR run_id IN (SELECT id FROM runs WHERE status IN ('SUCCEEDED','CANCELLED')))
                     AND path NOT IN (SELECT path FROM delivery_pins)
                     ORDER BY touched""")]
+                retained = [dict(r) for r in db.execute("SELECT * FROM resources WHERE state!='removed'")]
+                pins = [Path(row[0]) for row in db.execute("SELECT path FROM delivery_pins")]
             sizes = {r["path"]: tree_size(Path(r["path"])) for r in rows}
-            cache_size = sum(sizes[r["path"]] for r in rows if r["kind"] in {"cache", "environment"})
+            cache_roots = sorted((Path(r["path"]) for r in retained if r["kind"] in {"cache", "environment"}),
+                                 key=lambda p: len(p.parts))
+            counted = []
+            for path in cache_roots:
+                if not any(path.is_relative_to(parent) for parent in counted):
+                    counted.append(path)
+            cache_size = sum(tree_size(path) for path in counted)
             pressure = shutil.disk_usage(self.store.root).free < self.policy.min_free_bytes
             for row in rows:
                 path = Path(row["path"])
@@ -157,6 +185,10 @@ class ResourceManager:
                     result["errors"].append(f"Unsafe resource: {path}")
                     continue
                 size = sizes[row["path"]]
+                if any(Path(r["path"]) != path and Path(r["path"]).is_relative_to(path) for r in retained):
+                    continue  # Registered descendants must be reclaimed under their own policy first.
+                if any(path.is_relative_to(p) for p in [*pins, *(Path(r["path"]) for r in retained if r["refs"] > 0)]):
+                    continue
                 result["candidates"].append(str(path))
                 if dry_run:
                     continue
@@ -164,8 +196,16 @@ class ResourceManager:
                     with self.store.connect() as db:
                         db.execute("BEGIN IMMEDIATE")
                         fresh = db.execute("SELECT refs FROM resources WHERE id=?", (row["id"],)).fetchone()
-                        if fresh[0] != 0 or db.execute("SELECT 1 FROM delivery_pins WHERE path=?", (row["path"],)).fetchone():
+                        if not fresh or fresh[0] != 0 or db.execute("SELECT 1 FROM delivery_pins WHERE path=?", (row["path"],)).fetchone():
                             continue
+                        protected = [Path(r["path"]) for r in db.execute(
+                            "SELECT path FROM resources WHERE state!='removed' AND refs>0 UNION SELECT path FROM delivery_pins")]
+                        if any(p.is_relative_to(path) or path.is_relative_to(p) for p in protected):
+                            continue
+                        descendants = [Path(r[0]) for r in db.execute("SELECT path FROM resources WHERE state!='removed' AND id!=?", (row["id"],))]
+                        if any(p.is_relative_to(path) for p in descendants):
+                            continue
+                        size = tree_size(path)
                         db.execute("UPDATE resources SET state='collecting' WHERE id=?", (row["id"],))
                         # Paths were created under controller-owned roots, never user directories.
                         if row["kind"] == "worktree" and path.exists():
@@ -179,10 +219,11 @@ class ResourceManager:
                     result["removed"] += 1
                     result["bytes"] += size
                     cache_size -= size if row["kind"] in {"cache", "environment"} else 0
-                except (OSError, AA2Error) as exc:
+                except (OSError, AA2Error, sqlite3.Error) as exc:
                     result["errors"].append(str(exc))
         if not dry_run and (result["removed"] or result["errors"]):
-            self.store.event(None, "resources.collected", result)
+            from .progress import safe_event
+            safe_event(self.store, None, "resources.collected", result)
         return result
 
 

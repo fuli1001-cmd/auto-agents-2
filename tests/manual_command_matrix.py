@@ -11,6 +11,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from manual_support import finalize
+
 from auto_agents_2.environment import Environment
 from auto_agents_2.models import Command
 from auto_agents_2.sandbox import SandboxRunner
@@ -20,6 +22,8 @@ from auto_agents_2.verification import VerificationService
 
 
 async def main(prefix, installations):
+    if not installations:
+        raise ValueError("At least one NODE_MODULES installation is required")
     root = Path(tempfile.mkdtemp(prefix="aa2-command-matrix-"))
     print(f"Evidence: {root}", flush=True)
     store = Store(root)
@@ -37,12 +41,11 @@ async def main(prefix, installations):
                         for name in ("vitest", "playwright")}
             (work / "vitest.config.js").write_text("export default {test:{include:['*.test.js']}};\n")
             (work / "playwright.config.js").write_text("export default {testMatch:'browser.spec.js'};\n")
-            (work / "selected.test.js").write_text(
-                "import {test,expect} from 'vitest';\n"
-                "test.each([1,2])('same title', value=>expect(value).toBeGreaterThan(0));\n"
-                "test('npm context',()=>{ if(process.env.npm_lifecycle_event) {"
-                "expect(process.env.npm_lifecycle_event).toBe('test');"
-                "expect(process.env.npm_package_name).toBe('aa2-command-matrix'); }});\n")
+            base_tests = ("import {test,expect} from 'vitest';\n"
+                          "test.each([1,2])('same title', value=>expect(value).toBeGreaterThan(0));\n")
+            npm_test = ("test('npm context',()=>{"
+                        "expect(process.env.npm_lifecycle_event).toBe('test');"
+                        "expect(process.env.npm_package_name).toBe('aa2-command-matrix'); });\n")
             (work / "other.test.js").write_text("import {test,expect} from 'vitest'; test('must not select',()=>expect(1).toBe(2));\n")
             (work / "skipped.test.js").write_text("import {test} from 'vitest'; test.skip('unimplemented',()=>{});\n")
             (work / "browser.spec.js").write_text("import {test,expect} from '@playwright/test';\n"
@@ -63,12 +66,13 @@ async def main(prefix, installations):
                 ("report-path-existing", "vitest", ["--run", "--outputFile", "user-report.xml"], 3, True),
                 ("report-map-existing", "vitest", ["--run", "--outputFile.junit=user-report.xml"], 3, True),
                 ("name-filter", "vitest", ["--run", "-t", "same title"], 2, True),
-                ("direct", "vitest", ["run", "--run"], 3, True),
+                ("direct", "vitest", ["run", "--run"], 2, True),
                 ("failed-hook", "vitest", ["--run"], 3, False),
                 ("failed-test", "vitest", ["--run"], 0, False),
                 ("skip-only", "vitest", ["--run"], 0, False),
             ]
             for label, script, args, expected, accepted in cases:
+                (work / "selected.test.js").write_text(base_tests + ("" if label == "direct" else npm_test))
                 package = {"name": "aa2-command-matrix", "private": True, "type": "module",
                            "scripts": {"pretest": "node hook.mjs", "test": script,
                                        "posttest": "node hook.mjs" + (" fail" if label == "failed-hook" else "")}}
@@ -81,15 +85,21 @@ async def main(prefix, installations):
                 write_json(root / "results.json", observations)
                 store.checkpoint(rid, f"check/{index}/{label}", result.model_dump())
                 print(versions, label, result.exit_code, result.tests, result.failure_reasons, flush=True)
-                assert result.report_status == "valid" and result.tests == expected, result.output
-                assert (result.exit_code == 0) == accepted, result.output
+                if not (result.report_status == "valid" and result.tests == expected):
+                    raise RuntimeError(result.output)
+                if not ((result.exit_code == 0) == accepted):
+                    raise RuntimeError(result.output)
                 if label != "direct":
-                    assert "hook:pretest" in result.output
+                    if "hook:pretest" not in result.output:
+                        raise RuntimeError('Manual verification failed')
                     if accepted or label == "failed-hook":
-                        assert "hook:posttest" in result.output
+                        if "hook:posttest" not in result.output:
+                            raise RuntimeError('Manual verification failed')
                 if label == "failed-hook":
-                    assert result.process_exit_code == 17 and "process_failed" in result.failure_reasons
-                assert (work / "user-report.xml").read_text() == "preserve existing report"
+                    if not (result.process_exit_code == 17 and "process_failed" in result.failure_reasons):
+                        raise RuntimeError('Manual verification failed')
+                if not ((work / "user-report.xml").read_text() == "preserve existing report"):
+                    raise RuntimeError('Manual verification failed')
             write_json(work / "package.json", {"name": "aa2-command-matrix", "type": "module", "scripts": {
                 "test": "playwright test --reporter=list --output=test-results/original"}})
             for mode in ("npm", "direct"):
@@ -101,13 +111,14 @@ async def main(prefix, installations):
                 write_json(root / "results.json", observations)
                 store.checkpoint(rid, f"check/{index}/playwright-{mode}", result.model_dump())
                 print(versions, "playwright-" + mode, result.exit_code, result.tests, flush=True)
-                assert result.exit_code == 0 and result.tests == 1, result.output
+                if not (result.exit_code == 0 and result.tests == 1):
+                    raise RuntimeError(result.output)
         store.update(rid, status="SUCCEEDED")
     except BaseException:
         store.update(rid, status="PAUSED")
         raise
     finally:
-        write_json(root / "results.json", observations)
+        finalize(lambda: write_json(root / "results.json", observations))
 
 
 if __name__ == "__main__":

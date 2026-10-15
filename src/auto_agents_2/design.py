@@ -15,11 +15,12 @@ import httpx
 
 from .errors import AA2Error, PrototypeBrowserError
 from .evidence import NODE_RUNTIME_CACHES
+from .network import PreviewProxy
 from .progress import capture_output, current_activity
 from .sandbox import SandboxRunner
 from .util import atomic_write, digest, scrub_text
 
-PROTOTYPE_BROWSER_VERSION = 2
+PROTOTYPE_BROWSER_VERSION = 3
 
 
 class DesignCatalog:
@@ -143,6 +144,56 @@ def prototype_routes(directory: Path, actions) -> list[tuple[str, str]]:
     return list(routes.items())
 
 
+class PreviewContext:
+    def __init__(self, context, proxy):
+        self.context, self.proxy = context, proxy
+
+    def __getattr__(self, name):
+        return getattr(self.context, name)
+
+    async def close(self):
+        try:
+            await self.context.close()
+        finally:
+            await self.proxy.close()
+
+
+async def preview_context(browser, origin, errors, width, height):
+    """Apply the same network boundary to every page, popup and socket."""
+    expected = urlsplit(origin)
+    def local(url):
+        parsed = urlsplit(url)
+        scheme = {"ws": "http", "wss": "https"}.get(parsed.scheme, parsed.scheme)
+        return scheme == expected.scheme and parsed.hostname == expected.hostname and parsed.port == expected.port
+
+    proxy = await PreviewProxy(origin, errors).start()
+    context = None
+    try:
+        context = await browser.new_context(viewport={"width": width, "height": height}, service_workers="block",
+                                            proxy={"server": proxy.url, "bypass": "<-loopback>"})
+        context.on("close", proxy.stop)
+        async def route(request):
+            if local(request.request.url):
+                await request.continue_()
+            else:
+                errors.append("Preview attempted external request")
+                await request.abort()
+        async def websocket(socket):
+            if local(socket.url):
+                socket.connect_to_server()
+            else:
+                errors.append("Preview attempted external WebSocket request")
+                await socket.close()
+        await context.route("**/*", route)
+        await context.route_web_socket("**/*", websocket)
+        return PreviewContext(context, proxy)
+    except BaseException:
+        if context is not None:
+            await context.close()
+        await proxy.close()
+        raise
+
+
 async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[dict]:
     """Render static pages in a real browser; save screenshots before human approval."""
     try:
@@ -167,16 +218,10 @@ async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[d
             try:
                 for route, resolved in routes:
                     for width, height in ((1440, 900), (390, 844)):
-                        page = await browser.new_page(viewport={"width": width, "height": height})
                         errors = []
+                        context = await preview_context(browser, server.url, errors, width, height)
+                        page = await context.new_page()
                         page.on("pageerror", lambda error: errors.append(scrub_text(str(error))))
-                        async def local_only(request):
-                            if urlsplit(request.request.url).netloc == urlsplit(server.url).netloc:
-                                await request.continue_()
-                            else:
-                                errors.append("Prototype attempted external request: " + request.request.url)
-                                await request.abort()
-                        await page.route("**/*", local_only)
                         completed = []
                         row = {"page": unquote(urlsplit(resolved).path).lstrip("/"), "route": route,
                                "resolved_route": resolved, "viewport": width, "status": 0,
@@ -200,7 +245,7 @@ async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[d
                         if activity:
                             activity.output()
                             activity.progress(len(results), len(routes) * 2)
-                        await page.close()
+                        await context.close()
                         if errors or not 200 <= row["status"] < 400:
                             raise PrototypeBrowserError("Prototype browser checks failed: " + json.dumps(row), results)
             finally:
@@ -244,13 +289,13 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
             tail.append(line.decode(errors="replace")[-2000:])
             del tail[:-30]
 
-    drains = [asyncio.create_task(drain(process.stdout)), asyncio.create_task(drain(process.stderr))]
-    results = []
-    activity = current_activity.get()
-    if activity:
-        activity.progress(0, len(spec.routes) * 2)
-    output.mkdir(parents=True, exist_ok=True)
+    drains, results = [], []
     try:
+        drains = [asyncio.create_task(drain(process.stdout)), asyncio.create_task(drain(process.stderr))]
+        activity = current_activity.get()
+        if activity:
+            activity.progress(0, len(spec.routes) * 2)
+        output.mkdir(parents=True, exist_ok=True)
         async with httpx.AsyncClient(timeout=2, trust_env=False) as client:
             for _ in range(60):
                 if process.returncode is not None:
@@ -271,24 +316,44 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
                     if not route.startswith("/") or route.startswith("//"):
                         raise AA2Error("Preview routes must be local paths")
                     for width, height in ((1440, 900), (390, 844)):
-                        page = await browser.new_page(viewport={"width": width, "height": height})
-                        errors = []
-                        page.on("pageerror", lambda error: errors.append(str(error)))
-                        response = await page.goto(f"http://127.0.0.1:{port}{route}", wait_until="networkidle")
-                        completed = await exercise(page, spec.actions, route)
-                        screenshot = output / f"route-{index}-{width}.png"
-                        await page.screenshot(path=str(screenshot), full_page=True)
-                        results.append({"route": route, "viewport": width, "errors": errors,
-                                        "status": response.status if response else 0, "screenshot": str(screenshot), "actions": completed})
-                        if activity:
-                            activity.output()
-                            activity.progress(len(results), len(spec.routes) * 2)
-                        await page.close()
+                        errors, completed = [], []
+                        row = {"route": route, "viewport": width, "errors": errors, "status": 0, "actions": completed}
+                        results.append(row)
+                        context = await preview_context(browser, f"http://127.0.0.1:{port}", errors, width, height)
+                        try:
+                            page = await context.new_page()
+                            page.on("pageerror", lambda error: errors.append(scrub_text(str(error))))
+                            try:
+                                response = await page.goto(f"http://127.0.0.1:{port}{route}", wait_until="networkidle")
+                                row["status"] = response.status if response else 0
+                                await exercise(page, spec.actions, route, completed)
+                            except Exception as exc:
+                                errors.append(scrub_text(str(exc)))
+                                sequence = [a for a in spec.actions if a.route == route]
+                                if len(completed) < len(sequence):
+                                    row["failed_action"] = sequence[len(completed)].model_dump()
+                            try:
+                                screenshot = output / f"route-{index}-{width}.png"
+                                await page.screenshot(path=str(screenshot), full_page=True)
+                                row["screenshot"] = str(screenshot)
+                            except Exception as exc:
+                                errors.append(scrub_text(str(exc)))
+                            if activity:
+                                activity.output()
+                                activity.progress(len(results), len(spec.routes) * 2)
+                        finally:
+                            await context.close()
+                        if errors or not 200 <= row["status"] < 400:
+                            raise PrototypeBrowserError("Implemented UI browser checks failed", results)
             finally:
                 await browser.close()
-        if any(r["errors"] or r["status"] >= 400 for r in results):
-            raise AA2Error("Implemented UI browser checks failed: " + json.dumps(results))
+        if not results:
+            raise PrototypeBrowserError("Implemented UI browser checks produced no evidence", results)
         return results
+    except PrototypeBrowserError:
+        raise
+    except Exception as exc:
+        raise PrototypeBrowserError("Application browser check failed: " + scrub_text(str(exc)), results) from exc
     finally:
         await sandbox.stop(process)
         await asyncio.gather(*drains, return_exceptions=True)

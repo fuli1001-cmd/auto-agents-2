@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 from .diagnostics import adopt_logs
@@ -25,7 +25,7 @@ class Store:
         self.path = self.root / "state.sqlite"
         if self.path.exists() and not _initialize:
             # Readers and engine construction must never perform a migration.
-            with sqlite3.connect(f"file:{self.path}?mode=ro", uri=True) as db:
+            with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)) as db:
                 meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
                 version = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] if meta else "0"
                 if version not in {"0", "1", "2", "3"}:
@@ -82,14 +82,14 @@ class Store:
 
     @contextmanager
     def connect(self):
-        db = (sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=15) if self.readonly
+        db = (sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=15) if self.readonly
               else sqlite3.connect(self.path, timeout=15))
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys=ON")
-        if not self.readonly:
-            db.execute("PRAGMA journal_mode=WAL")
-            db.execute("PRAGMA synchronous=FULL")
         try:
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA foreign_keys=ON")
+            if not self.readonly:
+                db.execute("PRAGMA journal_mode=WAL")
+                db.execute("PRAGMA synchronous=FULL")
             yield db
             db.commit()
         except BaseException:
@@ -110,7 +110,7 @@ class Store:
             backup = self.root / f"state-v{version if version != '0' else '1'}.backup.sqlite"
             if not backup.exists():
                 temporary = backup.with_suffix(".tmp")
-                with sqlite3.connect(temporary) as target:
+                with closing(sqlite3.connect(temporary)) as target:
                     db.backup(target)
                 temporary.replace(backup)
                 with backup.open("rb") as stream:
@@ -164,7 +164,7 @@ class Store:
             db.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
             self._event(db, None, "state.migrated", {"version": 3, "backup": str(backup)})
 
-    def finish_recovery(self, rid, updates, pending):
+    def finish_recovery(self, rid, updates, pending, *, replan=None, successor=None):
         """Dispatch and retire the obsolete question together; retain raw history."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -173,6 +173,18 @@ class Store:
             if pending:
                 db.execute("UPDATE questions SET superseded=1 WHERE run_id=? AND key=?",
                            (rid, f"replan-stalled/{pending['evaluation']}"))
+            if replan is not None:
+                next_plan = self._prepare_replan(db, rid, *replan)
+                self._put(db, rid, "replanning/pending", {**next_plan, "controller_owned": True})
+            if successor is not None:
+                count_key = "recovery/count/" + successor["id"]
+                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, count_key)).fetchone()
+                count = (json.loads(row[0]) if row else 0) + 1
+                self._put(db, rid, count_key, count)
+                self._put(db, rid, "recovery/active", {"version": 1, "failure": successor, "attempt": count})
+                self._put(db, rid, f"recovery/failures/{successor['id']}/{count}", successor)
+                self._event(db, rid, "recovery.requested", {"failure": successor["id"], "owner": successor["origin_id"],
+                    "component": successor["component"], "kind": successor["kind"]})
             self._event(db, rid, "recovery.dispatched", {"pending_issues_retained": True})
 
     def _put(self, db, rid, key, value):
@@ -325,21 +337,24 @@ class Store:
         """Journal the decision and counters together, before asking or invalidating."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            rows = {r["key"]: json.loads(r["data"]) for r in db.execute(
-                "SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'replanning/%'", (rid,))}
-            if rows.get("replanning/pending"):
-                return rows["replanning/pending"]
-            observations = {key.removeprefix("replanning/evidence/"): value for key, value in rows.items()
-                            if key.startswith("replanning/evidence/")}
-            state, decision = assess(rows.get("replanning/progress", {}), observations)
-            body = json.loads(db.execute("SELECT data FROM runs WHERE id=?", (rid,)).fetchone()[0])
-            pending = {"stage": stage, "reason": reason, "decision": decision,
-                       "evaluation": state["evaluations"], "generation": body.get("replans", 0), "granted": False}
-            for key, data in (("replanning/progress", state), ("replanning/pending", pending)):
-                db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
-                           (rid, key, json.dumps(data, ensure_ascii=False)))
-            self._event(db, rid, "replan.assessed", {"stage": stage, **decision})
-            return pending
+            return self._prepare_replan(db, rid, stage, reason)
+
+    def _prepare_replan(self, db, rid, stage, reason):
+        rows = {r["key"]: json.loads(r["data"]) for r in db.execute(
+            "SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'replanning/%'", (rid,))}
+        if rows.get("replanning/pending"):
+            return rows["replanning/pending"]
+        observations = {key.removeprefix("replanning/evidence/"): value for key, value in rows.items()
+                        if key.startswith("replanning/evidence/")}
+        state, decision = assess(rows.get("replanning/progress", {}), observations)
+        body = json.loads(db.execute("SELECT data FROM runs WHERE id=?", (rid,)).fetchone()[0])
+        pending = {"stage": stage, "reason": reason, "decision": decision,
+                   "evaluation": state["evaluations"], "generation": body.get("replans", 0), "granted": False}
+        for key, data in (("replanning/progress", state), ("replanning/pending", pending)):
+            db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
+                       (rid, key, json.dumps(data, ensure_ascii=False)))
+        self._event(db, rid, "replan.assessed", {"stage": stage, **decision})
+        return pending
 
     def complete_replan(self, rid, stages, recovery_refs):
         """Finish a journalled rollback atomically; crash recovery cannot double count."""

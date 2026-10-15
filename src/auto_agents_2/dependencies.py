@@ -6,6 +6,9 @@ import shlex
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote, unquote, urlsplit
+
+from packaging.requirements import InvalidRequirement, Requirement
 
 from .errors import AA2Error
 from .util import contained
@@ -34,7 +37,11 @@ class PipInputs:
 
     def rendered(self, source: Path) -> tuple[str, str]:
         # Placeholder paths bind local dependencies to the owned immutable source copy.
-        return tuple("\n".join(lines).replace("{AA2_SOURCE}", str(source)) + "\n"
+        def render(line):
+            line = line.replace("{AA2_SOURCE_URI}", source.as_uri())
+            return re.sub(r"\{AA2_SOURCE\}/(.*?)(?=\s+;|$)",
+                          lambda match: shlex.quote(str(source / match[1])), line)
+        return tuple("\n".join(render(line) for line in lines) + "\n"
                      for lines in (self.requirements, self.constraints))
 
 
@@ -47,19 +54,42 @@ def pip_inputs(workspace: Path, explicit: str = "", additional=()) -> PipInputs:
         # Keep URLs/options/markers verbatim; only local path operands are rebound.
         direct = re.match(r"^(.*?\s+@\s+)(.+)$", value)
         operand = direct[2] if direct else value
-        operand = operand.strip('"\'')
+        marker = ""
+        if direct:
+            try:
+                requirement = Requirement(value)
+            except InvalidRequirement as exc:
+                raise AA2Error("Invalid direct pip requirement") from exc
+            operand = requirement.url or ""
+            marker = " ; " + str(requirement.marker) if requirement.marker else ""
+        else:
+            quote_char = ""
+            for index, char in enumerate(operand):
+                if char in {"'", '"'}:
+                    quote_char = "" if quote_char == char else char if not quote_char else quote_char
+                elif char == ";" and not quote_char:
+                    operand, marker = operand[:index], " ; " + operand[index + 1:].strip()
+                    break
+        operand = operand.strip()
+        if len(operand) > 1 and operand[0] == operand[-1] and operand[0] in {"'", '"'}:
+            operand = operand[1:-1]
+        extras = re.search(r"\[[A-Za-z0-9_,. -]+\]$", operand)
+        suffix = extras[0] if extras else ""
+        operand = operand[:extras.start()] if extras else operand
         local = operand.startswith(("./", "../", "/", "file:")) or operand == "." or (base / operand).exists()
         if local:
-            operand = operand.removeprefix("file://").removeprefix("file:")
-            suffix = ""
-            if "[" in operand:
-                operand, suffix = operand.split("[", 1)
-                suffix = "[" + suffix
+            if operand.startswith("file:"):
+                url = urlsplit(operand)
+                if url.netloc not in {"", "localhost"} or url.query or url.fragment:
+                    raise AA2Error("Local dependency must use a local file URL")
+                operand = unquote(url.path)
             path = (base / operand).resolve()
             if not path.is_relative_to(workspace.resolve()) or not path.exists():
                 raise AA2Error("Local dependency must exist inside the execution workspace")
             result.local = True
-            value = (direct[1] if direct else "") + "{AA2_SOURCE}/" + path.relative_to(workspace.resolve()).as_posix() + suffix
+            relative = path.relative_to(workspace.resolve()).as_posix()
+            value = ((direct[1] + "{AA2_SOURCE_URI}/" + quote(relative, safe="/")) if direct else
+                     "{AA2_SOURCE}/" + relative) + suffix + marker
         elif editable:
             result.local = True  # VCS editable installs also cannot share mutable bindings.
         return ("-e " if editable else "") + value
@@ -92,7 +122,9 @@ def pip_inputs(workspace: Path, explicit: str = "", additional=()) -> PipInputs:
             if selected:
                 read(selected, base)
             elif (base / "pyproject.toml").is_file():
-                path = base / "pyproject.toml"
+                path = (base / "pyproject.toml").resolve()
+                if not path.is_relative_to(workspace.resolve()) or not path.is_file():
+                    raise AA2Error("Missing or external project metadata")
                 raw = path.read_text()
                 result.manifests[path.relative_to(workspace).as_posix()] = raw
                 project = tomllib.loads(raw).get("project", {})
@@ -114,33 +146,37 @@ def copy_execution_source(workspace: Path, destination: Path):
     import os
     import shutil
 
-    from .workspace import EXCLUDED, files, git
+    from .workspace import EXCLUDED, files, git, repository_workspace
     paths = set(files(workspace))
-    try:
+    if repository_workspace(workspace):
         paths.update(workspace / name for name in git(workspace, "ls-files", "-z").split("\0") if name)
-    except AA2Error:
-        pass
+    directories = {parent for path in paths for parent in path.parents if parent.is_relative_to(workspace)}
     for directory, folders, names in os.walk(workspace, followlinks=False):
+        directories.add(Path(directory))
         paths.update(Path(directory, name) for name in folders + names
-                     if name not in EXCLUDED and Path(directory, name).is_symlink())
+                     if name not in EXCLUDED and name != ".env" and not name.startswith(".env.")
+                     and Path(directory, name).is_symlink())
         folders[:] = [name for name in folders if name not in EXCLUDED and not Path(directory, name).is_symlink()]
     copied = set()
     def copy(path):
         if path in copied:
             return
         copied.add(path)
+        if path not in paths and path not in directories:
+            raise AA2Error("Editable link targets must be selected execution inputs")
         target = destination / path.relative_to(workspace)
         if path.is_symlink():
             resolved = path.resolve()
             if not resolved.is_relative_to(workspace.resolve()):
                 raise AA2Error("Editable source links must remain within the execution workspace")
-            copy(resolved)
+            if resolved.exists():
+                copy(resolved)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.symlink_to(os.path.relpath(destination / resolved.relative_to(workspace), target.parent))
         elif path.is_dir():
             target.mkdir(parents=True, exist_ok=True)
             for child in path.iterdir():
-                if child.name not in {".git", ".aa2"}:
+                if child in paths or child in directories:
                     copy(child)
         elif path.is_file():
             target.parent.mkdir(parents=True, exist_ok=True)

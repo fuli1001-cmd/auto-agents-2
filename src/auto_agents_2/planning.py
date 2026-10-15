@@ -49,7 +49,7 @@ def conflict(a: TaskSpec, b: TaskSpec) -> bool:
         # Distinct literal directory prefixes prove disjointness even for glob scopes.
         def prefix(value):
             parts = []
-            for part in value.split("/"):
+            for part in value.rstrip("/").split("/"):
                 if any(c in part for c in "*?["):
                     break
                 parts.append(part)

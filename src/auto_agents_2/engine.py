@@ -144,7 +144,12 @@ class WorkflowEngine:
             self.store.update(rid, status="RUNNING")
             if self.store.get(rid, "replanning/evidence/contracts") is None:
                 self._replan_evidence(rid, "contracts", {"coverage": False, "prototype_scope": False, "plan": False})
-            collector = asyncio.create_task(self._collect_periodically(rid, asyncio.current_task()))
+            owner = asyncio.current_task()
+            collector = asyncio.create_task(self._collect_periodically(rid, owner))
+            def supervise_monitor(task):
+                if not task.cancelled() and task.exception() is not None:
+                    owner.cancel()
+            collector.add_done_callback(supervise_monitor)
             try:
                 while True:
                     try:
@@ -507,9 +512,15 @@ class WorkflowEngine:
                 owner.cancel()
                 return
             elapsed += 1
-            if elapsed >= self.config.load().cleanup.interval_seconds:
-                self.resources.collect()
-                self.resources.collect_artifacts_safely()
+            try:
+                if elapsed >= self.config.load().cleanup.interval_seconds:
+                    self.resources.collect()
+                    self.resources.collect_artifacts_safely()
+                    elapsed = 0
+            except Exception as exc:
+                # Maintenance cannot remove the only cancellation observer.
+                from .progress import safe_event
+                safe_event(self.store, rid, "maintenance.failed", {"error_type": type(exc).__name__})
                 elapsed = 0
 
     async def _ask(self, rid, key, prompt, artifact_hash="", interaction=None) -> str:
@@ -667,7 +678,7 @@ class WorkflowEngine:
         actions = [action.model_dump() for action in document.browser_actions]
         identity = prototype_identity(work, actions)
         evidence = {**identity, "review": review, "visuals": visuals, "browser_version": PROTOTYPE_BROWSER_VERSION}
-        if not self.approvals.automation_current(evidence, identity, actions, PROTOTYPE_BROWSER_VERSION):
+        if not self.approvals.automation_current(evidence, identity, actions, PROTOTYPE_BROWSER_VERSION, expected_routes=self.approvals.routes(work, actions)):
             raise Replan("prototype", "原型审批缺少完整浏览器证据或独立审查，需要重新核验")
         human = self.approvals.human(rid, work, actions)
         if not human:
@@ -694,9 +705,9 @@ class WorkflowEngine:
         verification_key = "candidate/prototype-approval-checks/" + digest([
             binding["identity"], self.store.get(rid, "clarify", {}), PROTOTYPE_BROWSER_VERSION])
         checked = self.store.get(rid, verification_key, {})
-        if self.approvals.automation_current(checked, binding, actions, PROTOTYPE_BROWSER_VERSION):
+        if self.approvals.automation_current(checked, binding, actions, PROTOTYPE_BROWSER_VERSION, expected_routes=self.approvals.routes(work, actions)):
             previous = checked
-        if self.approvals.automation_current(previous, binding, actions, PROTOTYPE_BROWSER_VERSION):
+        if self.approvals.automation_current(previous, binding, actions, PROTOTYPE_BROWSER_VERSION, expected_routes=self.approvals.routes(work, actions)):
             review, visuals = previous["review"], previous["visuals"]
         else:
             report = await self._prototype_browser_report(rid, work, document)
@@ -1641,11 +1652,16 @@ class WorkflowEngine:
     async def _reintegrate_delivery(self, rid, journal):
         work = Path(journal["work"])
         incoming = journal["incoming"]
+        unfinished = self.store.get(rid, "candidate/delivery-repair", {})
+        if unfinished and not unfinished.get("commit") and unfinished.get("phase") != "rejected":
+            if not all(key in unfinished for key in ("feedback", "scopes", "trigger", "base_source")):
+                raise AA2Error("Legacy unfinished delivery repair lacks its input identity; preserve and reconcile it before continuing")
+            await self._delivery_repair(rid, work, unfinished["feedback"], unfinished["scopes"], observation=unfinished["trigger"])
         if journal.get("runtime_failure"):
-            failure = digest(journal["runtime_failure"])
+            failure = digest([journal["candidate"], journal["runtime_failure"], journal.get("runtime_attempt_id")])
             if self.store.get(rid, "delivery/runtime_repaired") != failure:
                 await self._delivery_repair(rid, work, {"runtime_failure": journal["runtime_failure"]},
-                                            [p for p in git(work, "ls-files", "-z").split("\0") if p])
+                                            [p for p in git(work, "ls-files", "-z").split("\0") if p], observation="runtime/" + failure)
                 self.store.checkpoint(rid, "delivery/runtime_repaired", failure)
         # A cancelled merge remains isolated and can be continued using its conflict index.
         if not self.workspaces.is_ancestor(incoming, git(work, "rev-parse", "HEAD")):
@@ -1658,11 +1674,9 @@ class WorkflowEngine:
                     if not unmerged:
                         raise
             if unmerged:
-                await self._delivery_repair(rid, work, {"conflicts": unmerged, "incoming": incoming}, unmerged)
+                await self._delivery_repair(rid, work, {"conflicts": unmerged, "incoming": incoming}, unmerged,
+                                            observation="merge/" + digest([incoming, journal["candidate"]]))
         plan = PlanResult.model_validate(journal["plan"]) if journal["plan"] else None
-        checks = self._candidate_checks(plan, work) if plan else IntakeResult.model_validate(self.store.get(rid, "clarify")).verification
-        if not checks:
-            checks = self.config.load().verification
         while True:
             environment = await self._environment(work, rid, plan)
             self._export_environment(work, environment)
@@ -1670,10 +1684,16 @@ class WorkflowEngine:
             checkout_policy = self.workspaces.normalize_checkout(work, candidate)
             self.store.checkpoint(rid, "verify/checkout_policy", checkout_policy)
             before = tree_hash(work)
+            checks = (self._candidate_checks(plan, work) if plan else
+                      IntakeResult.model_validate(self.store.get(rid, "clarify")).verification)
+            checks = checks or self.config.load().verification
+            observation = identifier("delivery-verification")
+            self.store.checkpoint(rid, "delivery/verification-observation", {
+                "id": observation, "candidate": candidate, "source_hash": before})
             evidence = await self.verifier.run(checks, work, environment)
             if not passed(evidence):
                 await self._delivery_repair(rid, work, {"checks": [c.model_dump() for c in evidence]},
-                                            [p for p in git(work, "ls-files", "-z").split("\0") if p])
+                                            [p for p in git(work, "ls-files", "-z").split("\0") if p], observation=observation)
                 continue
             visuals = []
             approval_context = {}
@@ -1682,7 +1702,8 @@ class WorkflowEngine:
                     approval_context["prototype_approval"] = await self._ensure_prototype_approval(rid, work)
                 except Replan as exc:
                     await self._delivery_repair(rid, work, {"prototype_feedback": exc.reason},
-                        [p for p in git(work, "ls-files", "design/prototypes", "DESIGN.md").splitlines() if p])
+                        [p for p in git(work, "ls-files", "-z", "--", "design/prototypes", "DESIGN.md").split("\0") if p],
+                        observation=observation)
                     continue
                 await self._ensure_browser(rid, work)
                 with observe_activity(self.store, rid, "集成后界面浏览器验收"):
@@ -1695,7 +1716,7 @@ class WorkflowEngine:
                 ReviewResult, work, rid, f"reintegration-review/{journal['reintegrations']}", fresh=True)
             if not review.approved:
                 await self._delivery_repair(rid, work, {"review": review.model_dump()},
-                                            [p for p in git(work, "ls-files", "-z").split("\0") if p])
+                                            [p for p in git(work, "ls-files", "-z").split("\0") if p], observation=observation)
                 continue
             if (tree_hash(work) != before or git(work, "rev-parse", "HEAD") != candidate
                     or git(work, "diff", "--name-only", "HEAD")):
@@ -1713,12 +1734,21 @@ class WorkflowEngine:
                     "source_hash": before, "validation": identity,
                     "environment": {"prefix": str(environment.prefix), "fingerprint": environment.fingerprint}}
 
-    async def _delivery_repair(self, rid, work, feedback, scopes):
-        if await self.recovery.delivery_decision(rid, work, feedback, scopes) == "recheck":
-            return
+    async def _delivery_repair(self, rid, work, feedback, scopes, *, observation=None):
         key = "rounds/delivery"
-        identity = digest([feedback, scopes])
         pending_key = "candidate/delivery-repair"
+        previous = self.store.get(rid, pending_key, {})
+        feedback_identity = digest([feedback, scopes])
+        resuming = (previous.get("feedback_identity") == feedback_identity
+                    and not previous.get("commit") and previous.get("phase") != "rejected")
+        if resuming:
+            source = prepared_before_hash(work, previous["patch"]) if previous.get("patch") else tree_hash(work)
+            if source != previous.get("base_source"):
+                raise AA2Error("Delivery repair candidate changed; preserving the pending patch and user changes")
+        trigger = observation or (previous.get("trigger") if resuming else digest([tree_hash(work), feedback_identity]))
+        identity = digest([trigger, feedback_identity])
+        if await self.recovery.delivery_decision(rid, work, feedback, scopes, observation=identity) == "recheck":
+            return
         while True:
             pending = self.store.get(rid, pending_key, {})
             rejection = pending.get("rejection", {})
@@ -1728,9 +1758,14 @@ class WorkflowEngine:
                     raise AA2Error("主分支集成修复预算耗尽，请人工核对规划")
                 if pending:
                     self.artifacts.put(pending, "delivery-repair-history")
-                pending = {"identity": identity, "round": count + 1, "rejection": rejection}
+                pending = {"identity": identity, "trigger": trigger, "feedback_identity": feedback_identity,
+                           "feedback": feedback, "scopes": scopes,
+                           "base_source": tree_hash(work), "round": count + 1, "rejection": rejection}
                 self.store.checkpoints(rid, {key: {"round": count + 1}, pending_key: pending})
             if pending.get("commit"):
+                if (pending.get("result_source") != tree_hash(work)
+                        or git(work, "rev-parse", "HEAD") != pending["commit"]):
+                    raise AA2Error("Completed delivery repair changed before resumption; preserving user changes")
                 return
             count = pending["round"]
             context = {"task": {"description": "Repair the isolated reintegration without weakening accepted behaviour", "allowed_paths": scopes},
@@ -1778,6 +1813,7 @@ class WorkflowEngine:
             self.store.checkpoint(rid, pending_key, pending)
             apply_prepared(work, pending["patch"])
             pending["commit"] = self.workspaces.checkpoint(work, f"refs/aa2/{rid}/candidate", "aa2: reviewed integration repair")
+            pending["result_source"] = tree_hash(work)
             self.store.checkpoint(rid, pending_key, pending)
             return
 

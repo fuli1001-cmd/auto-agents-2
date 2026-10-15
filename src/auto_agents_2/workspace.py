@@ -26,7 +26,21 @@ def git(root: Path, *args: str, input: str | None = None, env: dict | None = Non
                             capture_output=True, env=env, timeout=120)
     if result.returncode:
         raise AA2Error(result.stderr.strip() or "Git operation failed")
-    return result.stdout.strip()
+    # NUL-delimited names and leading/trailing pathname whitespace are data.
+    return result.stdout if "-z" in args else result.stdout.removesuffix("\n")
+
+
+def repository_workspace(root: Path) -> bool:
+    """Distinguish explicit filesystem snapshots from a broken Git checkout."""
+    if not root.is_dir():
+        return False
+    for parent in (root, *root.parents):
+        marker = parent / ".git"
+        if marker.is_file() or marker.is_symlink():
+            return True
+        if marker.is_dir() and (parent == root or (marker / "HEAD").exists() or (marker / "objects").exists()):
+            return True
+    return False
 
 
 def files(root: Path):
@@ -43,9 +57,12 @@ def file_digest(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def input_entry(path: Path, root: Path, seen=frozenset(), excluded=None):
+def input_entry(path: Path, root: Path, seen=frozenset(), excluded=None, *, omitted=frozenset(), overlay=None):
     """Execution identity, deliberately independent of the model's read policy."""
     excluded = EXCLUDED if excluded is None else excluded
+    overlay = overlay or {}
+    if path in overlay:
+        return overlay[path] if overlay[path] is not None else ["missing"]
     if path in seen:
         return ["cycle", str(path)]
     try:
@@ -56,12 +73,14 @@ def input_entry(path: Path, root: Path, seen=frozenset(), excluded=None):
         target = os.readlink(path)
         resolved = path.parent / target
         resolved = Path(os.path.abspath(resolved))
-        return ["link", target, input_entry(resolved, root, seen | {path}, excluded)]
+        return ["link", target, input_entry(resolved, root, seen | {path}, excluded, omitted=omitted, overlay=overlay)]
     if stat.S_ISREG(info.st_mode):
         return ["file", bool(info.st_mode & 0o111), file_digest(path)]
     if stat.S_ISDIR(info.st_mode):
-        return ["directory", [(p.name, input_entry(p, root, seen | {path}, excluded))
-                              for p in sorted(path.iterdir()) if p.name not in excluded]]
+        children = set(path.iterdir()) | {p for p, value in overlay.items() if p.parent == path and value is not None}
+        return ["directory", [(p.name, input_entry(p, root, seen | {path}, excluded, omitted=omitted, overlay=overlay))
+                              for p in sorted(children) if p.name not in excluded and p not in omitted
+                              and not (p in overlay and overlay[p] is None)]]
     raise PolicyViolation(f"Unsupported execution input type: {path.name}")
 
 
@@ -80,11 +99,9 @@ def _tree_paths(root: Path):
         folders[:] = [f for f in folders if f not in EXCLUDED and not Path(directory, f).is_symlink()]
     # Tracked inputs remain relevant even when hidden from model material or normally generated.
     tracked = set()
-    try:
+    if repository_workspace(root):
         tracked.update(p for p in git(root, "ls-files", "-z").split("\0") if p)
         paths.update(tracked)
-    except AA2Error:
-        pass
     return paths, tracked
 
 
@@ -100,14 +117,15 @@ def prepared_before_hash(root: Path, prepared: list[dict]) -> str:
     for item in prepared:
         _, path = write_path(root, item["path"])
         if item["before"] is None:
-            if path in tracked:
-                overrides[path] = ["missing"]
-            else:
+            overrides[root / path] = None
+            if path not in tracked:
                 paths.discard(path)
+            for directory in item.get("created_parents", []):
+                overrides[root / directory] = None
         else:
             paths.add(path)
-            overrides[path] = ["file", bool(item.get("mode", 0o644) & 0o111), item["before"]]
-    return digest(["execution-v2", [(p, overrides[p] if p in overrides else input_entry(root / p, root)) for p in sorted(paths)]])
+            overrides[root / path] = ["file", bool(item.get("mode", 0o644) & 0o111), item["before"]]
+    return digest(["execution-v2", [(p, input_entry(root / p, root, overlay=overrides)) for p in sorted(paths)]])
 
 
 def write_path(root: Path, relative: str) -> tuple[Path, str]:
@@ -148,11 +166,6 @@ def prepare_changes(root: Path, changes: list[Change], scopes: list[str], *, pro
                           or path.name.startswith("test_") or path.name.endswith(("_test.py", ".snap"))
                           or ".test." in path.name or ".spec." in path.name):
             raise ProtectedChange(f"Test/rule change requires independent authorization: {change.path}")
-        # An existing package manifest's scripts are part of the verification boundary.
-        if protected and path.name == "package.json" and path.exists():
-            import json
-            if change.operation != "write" or json.loads(path.read_text()).get("scripts") != json.loads(change.content).get("scripts"):
-                raise ProtectedChange("package.json script changes require independent authorization")
         if path.exists() and not path.is_file():
             raise PolicyViolation(f"Expected regular file: {canonical}")
         original = path.read_bytes() if previous is None and path.is_file() else None
@@ -173,6 +186,8 @@ def prepare_changes(root: Path, changes: list[Change], scopes: list[str], *, pro
             item = {"path": canonical, "mode": stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644, "operation": change.operation, "content": content,
                     "before": digest(original) if original is not None else None,
                     "after": None if change.operation == "delete" else digest(content)}
+            item["created_parents"] = [p.relative_to(root).as_posix() for p in path.parents
+                                       if p != root and p.is_relative_to(root) and not p.exists()]
             by_path[path] = item
             prepared.append(item)
     return prepared

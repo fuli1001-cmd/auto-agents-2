@@ -3,6 +3,7 @@ import copy
 import sqlite3
 
 import pytest
+from browser_fixtures import PNG
 from test_manifest_references import plan
 from test_workflow import CodingAgent, engine
 
@@ -49,6 +50,9 @@ def approval_fixture(tmp_path, monkeypatch, *, legacy=True, answer="1"):
     actions = [a.model_dump() for a in document.browser_actions]
     visuals = [{"route": "/index.html", "viewport": width, "status": 200, "errors": [], "actions": actions}
                for width in (1440, 390)]
+    image = workflow.artifacts.put(PNG, "screenshot")
+    for row in visuals:
+        row["image_artifact"] = image
     identity = prototype_identity(tmp_path, actions)
     question = workflow.store.request(rid, "prototype-approval", "Approve the displayed prototype",
         identity["legacy_hash"] if legacy else identity["identity"],

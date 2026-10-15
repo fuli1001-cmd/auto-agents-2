@@ -159,6 +159,8 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None)
     if (failure.kind in {"evidence", "build"} or collection_failure) and attempts == 0:
         action, reason = "recheck", "重新准备声明的构建产物并采集原始检查证据"
     if diagnosis:
+        if len({target.task_id for target in diagnosis.repair_targets}) != len(diagnosis.repair_targets):
+            raise AA2Error("Duplicate repair-target task IDs")
         if not set(diagnosis.evidence_refs) <= set(evidence_references(failure)):
             raise AA2Error("Diagnosis cites evidence not supplied by the controller")
         known = {t.id: t for t in plan.tasks} if plan else {}

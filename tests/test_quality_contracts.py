@@ -213,8 +213,7 @@ async def test_research_keeps_raw_redirect_links_and_shared_fetch(tmp_path, monk
             return httpx.Response(302, headers={"location": "/doc"})
         return httpx.Response(200, headers={"content-type": "text/html; charset=utf-8"},
                               content=b'<table><tr><td>v2</td><td>supported</td></tr></table><a href="/limits">limits</a>')
-    client = httpx.AsyncClient
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(respond), **kw))
+    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda: httpx.MockTransport(respond))
     artifacts = ArtifactStore(Store(tmp_path).root)
     result = await ResearchService(artifacts).verify([SourceEvidence(url="https://docs.example/start#one", claim="first", version="2"),
                                                     SourceEvidence(url="https://docs.example/start#two", claim="second", version="3")])
@@ -313,9 +312,9 @@ async def test_declared_generated_input_invalidates_cached_check(tmp_path):
     environment = Environment(Path(sys.prefix), "fixture")
     command = Command(argv=[sys.executable, "-c", "pass"], inputs=["dist/input"])
     checks = await VerificationService(store.root, SandboxRunner(store.root)).run([command], tmp_path, environment)
-    assert reusable([command], checks, tmp_path, environment).allowed
+    assert reusable([command], checks, tmp_path, environment, ArtifactStore(store.root)).allowed
     (tmp_path / "dist/input").write_text("changed")
-    assert not reusable([command], checks, tmp_path, environment).allowed
+    assert not reusable([command], checks, tmp_path, environment, ArtifactStore(store.root)).allowed
 
 
 @pytest.mark.asyncio
@@ -669,6 +668,6 @@ async def test_changed_execution_variable_invalidates_cached_evidence(tmp_path, 
     monkeypatch.setenv("AA2_FIXTURE_FEATURE", "good")
     command = Command(argv=[sys.executable, "-c", "import os; assert os.environ['AA2_FIXTURE_FEATURE'] == 'good'"])
     checks = await VerificationService(store.root, SandboxRunner(store.root)).run([command], tmp_path, environment)
-    assert reusable([command], checks, tmp_path, environment).allowed
+    assert reusable([command], checks, tmp_path, environment, ArtifactStore(store.root)).allowed
     monkeypatch.setenv("AA2_FIXTURE_FEATURE", "changed")
-    assert not reusable([command], checks, tmp_path, environment).allowed
+    assert not reusable([command], checks, tmp_path, environment, ArtifactStore(store.root)).allowed

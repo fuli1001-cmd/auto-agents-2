@@ -65,11 +65,15 @@ async def main(prefix):
                 print(json.dumps({"runner": name, "scenario": scenario, "process_exit_code": result.process_exit_code,
                                   "exit_code": result.exit_code, "tests": result.tests, "skipped": result.skipped,
                                   "reasons": result.failure_reasons}), flush=True)
-                assert result.report_status == "valid", result.output
-                assert (result.exit_code == 0) == (scenario == "passing"), result.output
-                assert result.tests == (1 if scenario == "passing" else 0)
+                if not (result.report_status == "valid"):
+                    raise RuntimeError(result.output)
+                if not ((result.exit_code == 0) == (scenario == "passing")):
+                    raise RuntimeError(result.output)
+                if not (result.tests == (1 if scenario == "passing" else 0)):
+                    raise RuntimeError('Manual verification failed')
                 if name == "playwright" and scenario != "skip_only":
-                    assert any(verifier.artifacts.bytes(a["artifact"]) == b"fixture attachment" for a in result.attachments)
+                    if not (any(verifier.artifacts.bytes(a["artifact"]) == b"fixture attachment" for a in result.attachments)):
+                        raise RuntimeError('Manual verification failed')
         store.update(rid, status="SUCCEEDED")
     except BaseException:
         store.update(rid, status="PAUSED")

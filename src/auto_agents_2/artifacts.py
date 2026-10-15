@@ -96,26 +96,42 @@ class ArtifactStore:
     @contextmanager
     def reading(self, value, run_id):
         """Pin a model invocation's evidence until its consumer finishes or is cancelled."""
-        leases, queue, visited = [], list(references(value)), set()
+        leases, queue, traversed, pinned = [], [(ref, True) for ref in references(value)], set(), set()
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             while queue:
-                ref = queue.pop()
+                ref, declared = queue.pop()
                 sha = ref["hash"]
-                if sha in visited:
+                kinds = {row[0] for row in db.execute("SELECT kind FROM artifact_kinds WHERE hash=?", (sha,))}
+                if not declared and not kinds and not db.execute("SELECT 1 FROM artifact_owners WHERE hash=?", (sha,)).fetchone():
+                    continue  # Opaque research examples cannot invent required artifacts.
+                if ref.get("kind") in LOG_KINDS or kinds & LOG_KINDS:
+                    if sha not in pinned:
+                        pinned.add(sha)
+                        if (self.root / sha[:2] / sha).is_file():
+                            self.bytes(ref)
+                            lease = identifier("reader")
+                            leases.append(lease)
+                            db.execute("INSERT INTO diagnostic_holds VALUES(?,?,?,?)", (lease, sha, run_id, "reader"))
+                            db.execute("DELETE FROM retired_diagnostics WHERE hash=?", (sha,))
+                        elif not db.execute("SELECT 1 FROM retired_diagnostics WHERE hash=?", (sha,)).fetchone():
+                            raise ValueError("Required diagnostic artifact is unavailable")
+                if sha in traversed or ref.get("kind") in LOG_KINDS:
                     continue
-                visited.add(sha)
-                if ref.get("kind") in LOG_KINDS:
-                    if (self.root / sha[:2] / sha).is_file():
-                        lease = identifier("reader")
-                        leases.append(lease)
-                        db.execute("INSERT INTO diagnostic_holds VALUES(?,?,?,?)", (lease, sha, run_id, "reader"))
-                        db.execute("DELETE FROM retired_diagnostics WHERE hash=?", (sha,))
-                elif db.execute("SELECT 1 FROM artifact_edges WHERE parent=?", (sha,)).fetchone():
+                traversed.add(sha)
+                edges = list(db.execute("SELECT child FROM artifact_edges WHERE parent=?", (sha,)))
+                if not kinds and not edges and not ("kind" in ref and "bytes" in ref):
+                    continue  # An inline content fingerprint is not an artifact reference.
+                raw = self.bytes(ref)
+                if raw.lstrip().startswith((b"{", b"[")) or edges:
                     try:
-                        queue.extend(references(self.json(ref)))
-                    except (OSError, ValueError, UnicodeError):
-                        pass
+                        nested = json.loads(raw)
+                    except (ValueError, UnicodeError):
+                        if edges:
+                            raise ValueError("Structured evidence dependencies cannot be verified") from None
+                    else:
+                        # Retention only. Provider exposure still requires registered edges.
+                        queue.extend((child, bool(edges)) for child in references(nested))
         try:
             yield
         finally:

@@ -5,8 +5,8 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-from .diagnostics import references
-from .models import ReviewResult
+from .errors import AA2Error
+from .models import BrowserAction, ReviewResult
 from .util import digest
 from .workspace import legacy_tree_hash, tree_hash
 
@@ -22,14 +22,18 @@ def prototype_identity(work: Path, actions: list[dict]) -> dict:
             "identity": digest([content, actions_hash])}
 
 
-def exact_actions(actions: list[dict], visuals: list[dict]) -> bool:
-    if not visuals or any(not 200 <= row.get("status", 0) < 400 or row.get("errors") for row in visuals):
+def exact_actions(actions: list[dict], visuals: list[dict], *, expected_routes: list[str]) -> bool:
+    if (not expected_routes or not visuals or any(not isinstance(row, dict) or
+            not isinstance(row.get("status"), int) or not 200 <= row["status"] < 400 or row.get("errors") for row in visuals)):
         return False
     expected = defaultdict(list)
     for action in actions:
         expected[action["route"]].append(action)
+    if not set(expected) <= set(expected_routes) or len(visuals) != len(set(expected_routes)) * 2:
+        return False
     for width in (1440, 390):
-        for route, sequence in expected.items():
+        for route in expected_routes:
+            sequence = expected[route]
             rows = [row for row in visuals if row.get("viewport") == width
                     and (row.get("route") or "/" + row.get("page", "")) == route]
             if len(rows) != 1 or rows[0].get("actions") != sequence:
@@ -41,6 +45,15 @@ def exact_actions(actions: list[dict], visuals: list[dict]) -> bool:
 class PrototypeApprovals:
     def __init__(self, store, artifacts):
         self.store, self.artifacts = store, artifacts
+
+    @staticmethod
+    def routes(work, actions):
+        from .design import prototype_routes
+        try:
+            return [route for route, _ in prototype_routes(work / "design/prototypes",
+                [BrowserAction.model_validate(action) for action in actions])]
+        except (AA2Error, OSError, ValueError):
+            return []
 
     @staticmethod
     def _approved(question):
@@ -84,7 +97,7 @@ class PrototypeApprovals:
             else:
                 # Legacy questions bound only the old content digest. Exact executed
                 # action sequences supply the original action contract, never prose.
-                if (not exact_actions(actions, candidate.get("visuals", []))
+                if (not exact_actions(actions, candidate.get("visuals", []), expected_routes=self.routes(work, actions))
                         or (work / "DESIGN.md").is_symlink()
                         or (work / "design").is_symlink() or (work / "design/prototypes").is_symlink()
                         or any(p.is_symlink() for p in (work / "design/prototypes").rglob("*"))):
@@ -107,18 +120,25 @@ class PrototypeApprovals:
                 "decision": "approve", "artifact_hash": question["artifact_hash"], "binding": kind,
                 "content_hash": binding["hash"], "actions_hash": binding["actions_hash"]}
 
-    def automation_current(self, record, binding, actions, browser_version):
+    def automation_current(self, record, binding, actions, browser_version, *, expected_routes):
+        if not isinstance(record, dict):
+            return False
         if (any(record.get(key) != binding[key] for key in ("hash", "identity", "actions_hash"))
-                or record.get("browser_version") != browser_version or not record.get("review", {}).get("approved")
-                or not exact_actions(actions, record.get("visuals", []))):
+                or record.get("browser_version") != browser_version
+                or not exact_actions(actions, record.get("visuals", []), expected_routes=expected_routes)):
             return False
         try:
-            ReviewResult.model_validate(record["review"])
-            for ref in references(record.get("visuals", [])):
-                self.artifacts.bytes(ref)
-            if any(row.get("screenshot") and not row.get("image_artifact") for row in record.get("visuals", [])):
-                return False  # Old paths are not durable, content-addressed evidence.
-        except (OSError, ValueError, KeyError):
+            if not ReviewResult.model_validate(record["review"]).approved:
+                return False
+            for row in record["visuals"]:
+                ref = row.get("image_artifact")
+                if (not isinstance(ref, dict) or ref.get("kind") != "screenshot"
+                        or not isinstance(ref.get("hash"), str) or not isinstance(ref.get("bytes"), int)):
+                    return False
+                raw = self.artifacts.bytes(ref)
+                if len(raw) != ref["bytes"] or not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+                    return False
+        except (OSError, ValueError, KeyError, TypeError):
             return False
         return True
 
@@ -127,7 +147,7 @@ class PrototypeApprovals:
         binding = prototype_identity(work, actions)
         human = self.human(rid, work, actions, record)
         if (human and human["content_hash"] == binding["hash"] and human["actions_hash"] == binding["actions_hash"]
-                and self.automation_current(record, binding, actions, browser_version)):
+                and self.automation_current(record, binding, actions, browser_version, expected_routes=self.routes(work, actions))):
             return {**record, "human": human}
         return None
 
@@ -138,7 +158,7 @@ class PrototypeApprovals:
         previous = self.store.get(rid, "prototype_approval", {})
         record = {**binding, "human": human, "review": review, "visuals": visuals,
                   "browser_version": browser_version, "context_version": APPROVAL_CONTEXT_VERSION}
-        if not self.automation_current(record, binding, actions, browser_version):
+        if not self.automation_current(record, binding, actions, browser_version, expected_routes=self.routes(work, actions)):
             raise ValueError("Prototype approval requires complete browser evidence and an independent review")
         updates = {"prototype_approval": record}
         if previous and previous != record:

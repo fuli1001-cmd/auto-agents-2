@@ -60,23 +60,33 @@ async def smoke(root, framework):
     try:
         environment = await workflow._environment(work, rid, plan)
         checks = await workflow.verifier.run(plan.final_checks, work, environment)
-        assert passed(checks), [c.model_dump() for c in checks]
+        if not (passed(checks)):
+            raise RuntimeError([c.model_dump() for c in checks])
         workflow.store.checkpoint(rid, "verify/checks", [c.model_dump() for c in checks])
         workflow.store.checkpoint(rid, "verify/identity", tree_hash(work))
         candidate = workflow.workspaces.checkpoint(work, f"refs/aa2/{rid}/candidate", "verified smoke candidate")
         result = await workflow.delivery.finish(rid, candidate=candidate, work=work, environment=environment, plan=plan)
-        assert result["status"] == "SUCCEEDED"
-        assert not work.exists()
-        assert environment.prefix.exists()
-        assert not git(project, "for-each-ref", "refs/aa2", "refs/heads/aa2")
-        assert not git(project, "status", "--porcelain")
+        if not (result["status"] == "SUCCEEDED"):
+            raise RuntimeError('Manual verification failed')
+        if not (not work.exists()):
+            raise RuntimeError('Manual verification failed')
+        if not (environment.prefix.exists()):
+            raise RuntimeError('Manual verification failed')
+        if not (not git(project, "for-each-ref", "refs/aa2", "refs/heads/aa2")):
+            raise RuntimeError('Manual verification failed')
+        if not (not git(project, "status", "--porcelain")):
+            raise RuntimeError('Manual verification failed')
         after_gc = await workflow.verifier.run([probe], project, environment)
-        assert passed(after_gc)
+        if not (passed(after_gc)):
+            raise RuntimeError('Manual verification failed')
         receipt = workflow.store.get(rid, "delivery/receipt")
         write_json(root / f"{framework}-result.json", {"receipt": receipt, "after_gc": [c.model_dump() for c in after_gc]})
         print(f"Passed {framework}: primary source, frozen dependencies, runtime probes, GC pins", flush=True)
-    except BaseException:
-        workflow.store.update(rid, status="CANCELLED", outcome="SMOKE_FAILED")
+    except BaseException as exc:
+        if workflow.store.run(rid)["status"] != "SUCCEEDED":
+            workflow.store.update(rid, status="CANCELLED", outcome="SMOKE_FAILED")
+        else:
+            workflow.store.checkpoint(rid, "smoke/result", {"passed": False, "error_type": type(exc).__name__})
         raise
     finally:
         # Explicit teardown of this script's disposable fixture, not production GC behaviour.

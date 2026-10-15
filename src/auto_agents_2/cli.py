@@ -13,7 +13,7 @@ import typer
 from prompt_toolkit import PromptSession
 from rich.console import Console
 
-from .config import ConfigStore
+from .config import Config, ConfigStore, default_config
 from .display import ProgressDisplay
 from .engine import WorkflowEngine
 from .errors import AA2Error, BusyProject, IncompleteIteration
@@ -51,19 +51,22 @@ def init(project: Project = Path("."), from_config: Annotated[Path | None, typer
         project = project.resolve()
         project.mkdir(parents=True, exist_ok=True)
         config = ConfigStore(project)
-        config.initialize()
         if from_config:
-            imported = json.loads(from_config.expanduser().read_text())
-            body = json.loads(config.path.read_text())
-            fields = {"kind", "binary", "environment", "profile_map", "extra_args"}
-            body["providers"] = {name: {k: v for k, v in value.items() if k in fields}
-                                 for name, value in imported["providers"].items()}
-            body["active_provider"] = imported["active_provider"]
-            body["efforts"].update(imported.get("efforts", {}))
-            from .config import Config
-            Config.model_validate(body)
-            with file_lock(config.path.with_suffix(".lock")):
-                write_json(config.path, body)
+            try:
+                imported = json.loads(from_config.expanduser().read_text())
+                with file_lock(config.path.with_suffix(".lock")):
+                    body = (config.load() if config.path.exists() else default_config()).model_dump(mode="json")
+                    fields = {"kind", "binary", "environment", "profile_map", "extra_args"}
+                    body["providers"] = {name: {k: v for k, v in value.items() if k in fields}
+                                         for name, value in imported["providers"].items()}
+                    body["active_provider"] = imported["active_provider"]
+                    body["efforts"].update(imported.get("efforts", {}))
+                    Config.model_validate(body)
+                    write_json(config.path, body)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                raise AA2Error("Cannot read, validate or persist imported provider configuration") from exc
+        else:
+            config.initialize()
         Store(project)
         WorkspaceManager(project).initialize()
         console.print(f"配置已创建：{config.path}")
@@ -104,8 +107,8 @@ async def execute(project, requirements=None, provider=None, run_id=None):
     input_ready = asyncio.Event()
     with store.connect() as db:
         cursor = db.execute("SELECT COALESCE(MAX(seq),0) FROM events").fetchone()[0]
-    display = asyncio.create_task(render(store, stop, paused, cursor, input_ready))
     session = PromptSession() if sys.stdin.isatty() and sys.stdout.isatty() else None
+    display = asyncio.create_task(render(store, stop, paused, cursor, input_ready))
 
     async def question(request):
         input_ready.clear()
@@ -116,10 +119,26 @@ async def execute(project, requirements=None, provider=None, run_id=None):
         finally:
             paused.clear()
 
-    engine = WorkflowEngine(project, question_handler=question if session else None)
-    try:
+    async def supervised_start(*args, **kwargs):
+        owner = asyncio.create_task(engine.start(*args, **kwargs))
         try:
-            result = await engine.start(requirements, provider, run_id)
+            await asyncio.wait([owner, display], return_when=asyncio.FIRST_COMPLETED)
+            if display.done():
+                try:
+                    await display
+                except Exception as exc:
+                    raise AA2Error("Progress display failed; workflow paused") from exc
+                raise AA2Error("Progress display stopped before the workflow")
+            return await owner
+        finally:
+            if not owner.done():
+                owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+
+    try:
+        engine = WorkflowEngine(project, question_handler=question if session else None)
+        try:
+            result = await supervised_start(requirements, provider, run_id)
         except BusyProject:
             if requirements is not None:
                 raise IncompleteIteration(f"项目已有控制进程。请先执行：aa2 run --project {project}")
@@ -131,13 +150,16 @@ async def execute(project, requirements=None, provider=None, run_id=None):
             while True:
                 await asyncio.sleep(1)
                 try:
-                    result = await engine.start(run_id=run_id)
+                    result = await supervised_start(run_id=run_id)
                     break
                 except BusyProject:
                     continue
     finally:
         stop.set()
-        await display
+        if display.done() and not display.cancelled() and display.exception() is not None:
+            display.exception()  # Already propagated by supervised_start.
+        else:
+            await display
     if result:
         summary = store.usage_summary(result["id"])
         stamp = time.strftime("%H:%M:%S")
@@ -252,6 +274,10 @@ def cancel(project: Project = Path(".")):
         store.checkpoint(current["id"], "control/cancel", True)
         try:
             with file_lock(store.root / "controller.lock", blocking=False):
+                active = store.current(unfinished=True)
+                if store.run(current["id"])["status"] in {"SUCCEEDED", "CANCELLED"} or not active or active["id"] != current["id"]:
+                    console.print("所选迭代已结束；未修改其状态。")
+                    return
                 SandboxRunner(store.root, cfg.load().sandbox_binary).reap_orphans()
                 published = store.get(current["id"], "delivery/journal", {}).get("publication_started", False)
                 if published:
@@ -317,24 +343,25 @@ def doctor(project: Project = Path("."), live: bool = False):
                 checks["providers"][name] = {"error": str(exc)}
         console.print_json(data=checks)
         if live:
-            if store.current(unfinished=True):
-                raise IncompleteIteration("请先完成当前迭代，再执行 live doctor")
-            if not sandbox_ok:
-                raise AA2Error("Sandbox probe must pass before live checks")
-            run_record = store.admit("doctor://live", cfg.model_dump(mode="json"))
-            try:
-                result = asyncio.run(ProviderRouter(config, store, runner).invoke(
-                    "review", {"task": "Return approved=true, summary='provider contract verified', findings=[]. Do not execute tools."},
-                    ReviewResult, project.resolve(), run_record["id"], "doctor", True))
-                store.update(run_record["id"], status="SUCCEEDED", outcome="DIAGNOSTIC")
-                console.print_json(data=result.model_dump())
-            except BaseException:
-                store.update(run_record["id"], status="CANCELLED", outcome="DIAGNOSTIC_FAILED")
-                raise
-            finally:
-                resources = ResourceManager(store, cfg.cleanup)
-                resources.release_run(run_record["id"])
-                resources.collect()
+            with file_lock(store.root / "controller.lock", blocking=False):
+                if store.current(unfinished=True):
+                    raise IncompleteIteration("请先完成当前迭代，再执行 live doctor")
+                if not sandbox_ok:
+                    raise AA2Error("Sandbox probe must pass before live checks")
+                run_record = store.admit("doctor://live", cfg.model_dump(mode="json"))
+                try:
+                    result = asyncio.run(ProviderRouter(config, store, runner).invoke(
+                        "review", {"task": "Return approved=true, summary='provider contract verified', findings=[]. Do not execute tools."},
+                        ReviewResult, project.resolve(), run_record["id"], "doctor", True))
+                    store.update(run_record["id"], status="SUCCEEDED", outcome="DIAGNOSTIC")
+                    console.print_json(data=result.model_dump())
+                except BaseException:
+                    store.update(run_record["id"], status="CANCELLED", outcome="DIAGNOSTIC_FAILED")
+                    raise
+                finally:
+                    resources = ResourceManager(store, cfg.cleanup)
+                    resources.release_run(run_record["id"])
+                    resources.collect()
         if not sandbox_ok:
             raise typer.Exit(1)
     except AA2Error as exc:

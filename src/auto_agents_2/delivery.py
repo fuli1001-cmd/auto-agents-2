@@ -5,7 +5,7 @@ from pathlib import Path
 from .config import ConfigStore
 from .environment import Environment
 from .errors import AA2Error
-from .util import digest, write_json
+from .util import digest, identifier, write_json
 from .workspace import git, legacy_tree_hash, tree_hash
 
 
@@ -36,10 +36,17 @@ class DeliveryCoordinator:
                        "old": self.store.get(rid, "target_base", ""), "candidate": candidate,
                        "work": str(work), "plan": plan.model_dump() if plan else None,
                        "environment": {"prefix": str(environment.prefix), "fingerprint": environment.fingerprint},
-                       "outcome": outcome, "reintegrations": 0,
+                       "outcome": outcome, "reintegrations": 0, "runtime_budget_used": 0,
                        "source_hash": tree_hash(work), "validation": self.store.get(rid, "verify/identity"),
                        "candidate_tree": git(work, "rev-parse", f"{candidate}^{{tree}}")}
             self.save(rid, journal)
+        while True:
+            result = await self._advance(rid, journal)
+            if result is not None:
+                return result
+            journal = self.store.get(rid, "delivery/journal")
+
+    async def _advance(self, rid, journal):
         project = self.workspaces.project
         saved_environment = journal["environment"]
         prefix = Path(saved_environment["prefix"])
@@ -61,7 +68,14 @@ class DeliveryCoordinator:
             self.save(rid, journal)
         if journal.get("identity_version") != 2 and journal["phase"] != "publishing":
             await self.upgrade_legacy(rid, journal)
+        if journal["phase"] == "repairing_runtime" and "runtime_budget_used" not in journal:
+            journal["runtime_budget_used"] = ConfigStore(project).load().delivery.max_runtime_retries + 1
+            journal["legacy_runtime_budget_unknown"] = True
+            self.save(rid, journal)
+            raise AA2Error("旧交付运行预算无法核实；已保留现场，明确增加 delivery.max_runtime_retries 后续跑")
         if journal["phase"] == "repairing_runtime":
+            if journal["runtime_budget_used"] >= ConfigStore(project).load().delivery.max_runtime_retries + 1:
+                raise AA2Error("主目录运行重试预算已耗尽；明确增加 delivery.max_runtime_retries 后继续")
             self.workspaces.clean_target(journal["target"])
             if self.workspaces.head(journal["target"]) != journal["old"]:
                 raise AA2Error("运行修复期间目标分支变化，请先人工核对")
@@ -85,7 +99,7 @@ class DeliveryCoordinator:
                 journal.update(result, old=journal["incoming"])
                 self.save(rid, journal, "ready")
                 # Check again after potentially slow verification; bounded across restarts.
-                return await self.finish(rid)
+                return None
             if (tree_hash(Path(journal["work"])) != journal["source_hash"]
                     or git(Path(journal["work"]), "rev-parse", "HEAD") != journal["candidate"]
                     or git(Path(journal["work"]), "diff", "--name-only", "HEAD")):
@@ -110,7 +124,7 @@ class DeliveryCoordinator:
                 if current != journal["old"] and not self.workspaces.is_ancestor(journal["candidate"], current):
                     self.workspaces.clean_target(journal["target"])
                     self.save(rid, journal, "ready")
-                    return await self.finish(rid)
+                    return None
                 raise
             self.save(rid, journal, "published")
         elif journal["phase"] == "publishing":
@@ -120,12 +134,22 @@ class DeliveryCoordinator:
             if journal.get("identity_version") != 2:
                 await self.upgrade_legacy(rid, journal)
                 if journal["phase"] == "ready":
-                    return await self.finish(rid)
+                    return None
             self.workspaces.clean_target(journal["target"])
             if self.workspaces.head(journal["target"]) != journal["candidate"]:
                 raise AA2Error("发布后的目标提交发生变化；保留用户提交，需人工核对后继续完成环境交接")
             if tree_hash(project) != journal["source_hash"]:
                 raise AA2Error("主目录源码与验证版本不符")
+            limit = ConfigStore(project).load().delivery.max_runtime_retries + 1
+            if "runtime_budget_used" not in journal:
+                uncertain = journal["phase"] == "runtime" or bool(self.store.get(rid, "delivery/runtime_repaired"))
+                journal["runtime_budget_used"] = limit if uncertain else 0
+                journal["legacy_runtime_budget_unknown"] = uncertain
+                self.save(rid, journal)
+            if journal["runtime_budget_used"] >= limit:
+                raise AA2Error("主目录运行重试预算已耗尽或旧预算无法核实；保留交付现场，明确增加 delivery.max_runtime_retries 可授予有限额外尝试")
+            journal["runtime_budget_used"] += 1
+            journal["runtime_attempt_id"] = identifier("runtime")
             self.save(rid, journal, "runtime")
             env = Environment(Path(journal["environment"]["prefix"]), journal["environment"]["fingerprint"])
             plan = journal["plan"] or {}
@@ -137,9 +161,23 @@ class DeliveryCoordinator:
                 evidence = await self.runtime(rid, journal, env)
             except RuntimeVerificationError as exc:
                 # Repair source only in the retained isolated checkout, then reverify and FF again.
+                from .evidence import runtime_configuration
+                from .models import Command
+                inputs = [runtime_configuration(project, Command.model_validate(c), env) for c in commands]
+                # Exclude capture timing, log addresses and changing diagnostic prose.
+                rows = exc.evidence.get("checks", []) if isinstance(exc.evidence, dict) else []
+                failure = [{k: row.get(k) for k in ("argv", "cwd", "exit_code", "process_exit_code", "failure_reasons",
+                    "test_ids", "passed_test_ids", "report_status", "input_hash")} for row in rows] or exc.evidence
+                identity = digest([journal["candidate"], journal["source_hash"], journal["environment"], inputs, failure])
+                repeated = identity in journal.get("runtime_failed_inputs", [])
+                journal.setdefault("runtime_failed_inputs", []).append(identity)
+                journal.setdefault("runtime_failures", []).append({"attempt": journal["runtime_attempt_id"],
+                    "identity": identity, "evidence": exc.evidence})
                 journal.update(runtime_failure=exc.evidence, old=journal["candidate"], incoming=journal["candidate"])
-                self.save(rid, journal, "repairing_runtime")
-                return await self.finish(rid)
+                self.save(rid, journal, "runtime" if repeated else "repairing_runtime")
+                if repeated:
+                    raise AA2Error("同一候选和运行输入重复失败，停止自动交付并保留证据") from exc
+                return None
             self.workspaces.clean_target(journal["target"])
             if self.workspaces.head(journal["target"]) != journal["candidate"] or tree_hash(project) != journal["source_hash"]:
                 raise AA2Error("运行环境准备期间源码或目标提交发生变化，保留现场")
@@ -147,7 +185,7 @@ class DeliveryCoordinator:
             receipt = {"version": 1, "run_id": rid, "target": journal["target"], "candidate": journal["candidate"],
                        "tree": journal["candidate_tree"], "source_hash": journal["source_hash"],
                        "validation": journal["validation"], "outcome": journal["outcome"],
-                       "reintegrations": journal["reintegrations"],
+                       "reintegrations": journal["reintegrations"], "runtime_budget_used": journal["runtime_budget_used"],
                        "runtime": {**journal["environment"], "resources": resources, "evidence": evidence},
                        "tokens": self.store.usage_summary(rid), "evidence": self.store.delivery_evidence(rid)}
             receipt["owned_refs"] = dict(line.split(" ", 1) for line in git(project, "for-each-ref",

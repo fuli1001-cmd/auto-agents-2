@@ -11,7 +11,7 @@ from pathlib import Path
 from .util import SECRET
 from .workspace import EXCLUDED, file_digest, git
 
-VIEW_VERSION = "public-v1"
+VIEW_VERSION = "public-v2"
 SENSITIVE_DIRS = {".aws", ".ssh", ".codex", ".gemini", ".credentials"}
 SENSITIVE_FILES = {".netrc", ".npmrc", ".pypirc", ".git-credentials"}
 
@@ -60,7 +60,8 @@ def create_view(workspace: Path, destination: Path, extra=()) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
     # Independent object database: no remotes, alternates, hooks or original history.
-    variables = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    variables = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    variables.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
     git(destination, "-c", "init.templateDir=", "init", "-q", env=variables)
     git(destination, "add", "--all", "--force", env=variables)
     git(destination, "-c", "user.name=aa2", "-c", "user.email=aa2@localhost",
@@ -70,12 +71,12 @@ def create_view(workspace: Path, destination: Path, extra=()) -> Path:
 
 def sensitive_values(workspace: Path, extra=()) -> list[str]:
     values = set()
-    def strings(value, protected=True):
+    def strings(value, protected=False):
         if isinstance(value, str) and protected and len(value) > 3:
             values.add(value)
         elif isinstance(value, dict):
             for key, child in value.items():
-                strings(child, bool(SECRET.search(key)))
+                strings(child, protected or bool(SECRET.search(key)))
         elif isinstance(value, list):
             for child in value:
                 strings(child, protected)
@@ -90,21 +91,22 @@ def sensitive_values(workspace: Path, extra=()) -> list[str]:
                 text = path.read_bytes().decode("utf-8")
             except UnicodeError:
                 continue
-            strings(text.strip())
+            strings(text.strip(), True)
             try:
-                strings(json.loads(text))
+                document = json.loads(text)
+                strings(document, not isinstance(document, dict))
             except ValueError:
                 for line in text.splitlines():
-                    match = re.match(r"\s*([^:=]+)\s*[:=]\s*(.*)", line)
+                    match = re.match(r"\s*([^=]+)\s*=\s*(.*)", line) if "=" in line else re.match(r"\s*([^:]+)\s*:\s*(.*)", line)
                     if match and not line.lstrip().startswith("#"):
                         key, value = match.groups()
                         value = value.strip().strip("\"'")
                         if SECRET.search(key) or re.search(r"://[^/\s]+:[^/\s]+@", value):
-                            strings(value)
+                            strings(value, True)
                 if "PRIVATE KEY" in text:
                     for line in text.splitlines():
                         if line.strip() and not line.startswith("-----"):
-                            strings(line.strip())
+                            strings(line.strip(), True)
                 for match in re.finditer(r"(?i)\bpassword\s+(\S+)", text):
-                    strings(match[1])
+                    strings(match[1], True)
     return sorted(values, key=len, reverse=True)

@@ -3,6 +3,7 @@ import re
 
 import httpx
 import pytest
+from browser_fixtures import PNG, prototype_rows
 from test_workflow import CodingAgent, engine
 
 from auto_agents_2.engine import Replan
@@ -54,7 +55,7 @@ def prototype_fixture(tmp_path, monkeypatch, *, empty=False):
 
     async def browser(*args):
         calls.append("browser")
-        return [{"status": 200}]
+        return prototype_rows(args[0], args[2] if len(args) > 2 else [], workflow.artifacts)
 
     async def installed(*args):
         pass
@@ -157,6 +158,8 @@ async def test_resume_refreshes_legacy_internal_question_with_actual_browser_rep
         "browser_actions": [BrowserAction(route="/index.html", action="expect_visible", selector="h1")]})
     browser_rows = [{"status": 200, "route": "/index.html", "viewport": width,
                      "actions": [action.model_dump() for action in document.browser_actions]} for width in (1440, 390)]
+    for row in browser_rows:
+        row["image_artifact"] = workflow.artifacts.put(PNG, "screenshot")
 
     async def browser(*args):
         calls.append("browser")

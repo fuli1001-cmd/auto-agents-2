@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from contextvars import ContextVar
 
 from .util import digest
@@ -36,7 +37,8 @@ def adopt_logs(db, root, value):
                            (ref["lease_id"], sha))
         elif sha not in visited:
             visited.add(sha)
-            if db.execute("SELECT 1 FROM artifact_edges WHERE parent=?", (sha,)).fetchone():
+            if (db.execute("SELECT 1 FROM artifact_edges WHERE parent=?", (sha,)).fetchone()
+                    or db.execute("SELECT 1 FROM artifact_owners WHERE hash=?", (sha,)).fetchone()):
                 try:
                     data = (root / "artifacts" / sha[:2] / sha).read_bytes()
                     if digest(data) == sha:
@@ -70,7 +72,10 @@ class DiagnosticOperation:
             if kind is None:
                 self.store.invalidate(self.run_id, [self.key])
             else:
-                self.store.checkpoint(self.run_id, self.key, {"logs": self.logs, "phase": "incomplete"})
+                try:
+                    self.store.checkpoint(self.run_id, self.key, {"logs": self.logs, "phase": "incomplete"})
+                except (OSError, sqlite3.Error):
+                    value.add_note("Diagnostic checkpoint could not be persisted; original failure retained")
         elif kind is None:
             # Standalone installer use has no checkpoint consumer.
             with self.store.connect() as db:

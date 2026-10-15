@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+import sys
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -64,21 +66,34 @@ class Activity:
         self.last_published = 0.0
         self.last_output = None
         self.finished = False
-        self.store.event(run_id, "activity.started", {"activity": self.id, "label": label, "total": total})
+        self._event(run_id, "activity.started", {"activity": self.id, "label": label, "total": total})
 
     def output(self):
         self.last_output = time.time()
         if time.monotonic() - self.last_published >= 1:
             self.last_published = time.monotonic()
-            self.store.event(self.run_id, "activity.output", {"activity": self.id, "last_output": self.last_output})
+            self._event(self.run_id, "activity.output", {"activity": self.id, "last_output": self.last_output})
 
     def progress(self, done, total):
-        self.store.event(self.run_id, "activity.progress", {"activity": self.id, "done": done, "total": total,
+        self._event(self.run_id, "activity.progress", {"activity": self.id, "done": done, "total": total,
                                                           "last_output": self.last_output})
 
     def finish(self, outcome="success"):
         if self.finished:
             return
         self.finished = True
-        self.store.event(self.run_id, "activity.finished", {"activity": self.id, "outcome": outcome,
+        self._event(self.run_id, "activity.finished", {"activity": self.id, "outcome": outcome,
                                                           "last_output": self.last_output})
+
+    def _event(self, *args):
+        safe_event(self.store, *args)
+
+
+def safe_event(store, *args):
+    try:
+        store.event(*args)
+    except (OSError, sqlite3.Error):
+        try:
+            print("aa2: progress event could not be persisted", file=sys.stderr)
+        except OSError:
+            pass

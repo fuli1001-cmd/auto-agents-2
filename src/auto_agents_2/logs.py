@@ -27,8 +27,12 @@ class SanitizedLog:
         # split at arbitrary subprocess boundaries cannot leak to the spool.
         while "\n" in self.pending:
             line, self.pending = self.pending.split("\n", 1)
+            self._check_size(line)
             self._write(line + "\n")
-        if len(self.pending) > self.max_record:
+        self._check_size(self.pending)
+
+    def _check_size(self, text):
+        if len(text.encode("utf-8")) > self.max_record:
             raise AA2Error("Log record exceeds safe streaming capacity; capture is incomplete")
 
     def _write(self, text):
@@ -38,6 +42,7 @@ class SanitizedLog:
 
     def finish(self):
         self.pending += self.decoder.decode(b"", final=True)
+        self._check_size(self.pending)
         self._write(self.pending)
         self.pending = ""
         self.stream.flush()

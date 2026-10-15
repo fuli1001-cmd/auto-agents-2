@@ -1,5 +1,25 @@
 # 验证记录
 
+## OCR 核对后修复验收（2026-10-15）
+
+基于 `bc58f801` 对本轮 OCR 评论核对后实施。修复对照及未采纳项见 [实施记录](quality-first-implementation.md#ocr-核对后实施2026-10-15)，新增恢复与网络约束见 [设计修订](design.md#2026-10-15-ocr-边界修订)。原有历史验收文件保持不变。
+
+最终源码全量回归 **573 项通过，0 失败、0 跳过**（475.30 秒），比基线新增 **109 项**行为与故障注入用例。[完整 JUnit](evidence/ocr-fixes-suite.xml) 已归档。受影响子系统分组先行验证，最终完整套件覆盖全部修改；Ruff、`git diff --check`、项目 Conda 环境的 `pip check` 及 wheel 构建通过。Wheel 元数据明确包含新增直接依赖 httpcore、packaging，其版本沿用已安装的项目环境/开发锁。
+
+实际运行覆盖：Chromium 对外部请求、跨来源重定向、WebSocket 和弹窗的阻断；真实 bubblewrap 中无法读取控制器文件的测试仍可制造报告链接，但控制器拒绝归档该链接；输出管道塞满且忽略 SIGTERM 的子进程可被清理；优化模式下手动脚本不能把失败结果标成成功。另用真实 pip 离线 dry-run 验证含空格路径的 editable extras，只生成临时构建元数据，未安装包。
+
+恢复检查包含 SQLite 转移中断、完成修复的重放边界、修复后重编译构建输出、观察 ID/耗时变化不刷新自动复验额度、主目录运行预算跨重启保留、取消与完成竞态、渲染失败解锁、GC 后代保护和快照原文保全。安装器选择和锁重放使用受控命令边界故障注入，没有把这些测试表述成真实远端 Conda/npm 安装验收。
+
+验证限制：当前宿主 DNS 将 `example.com` 解析为非公网测试网段地址 `198.18.0.122`，真实 HTTPS 抓取在连接前被安全策略拒绝。因此本轮没有取得该环境下公网抓取成功的证据。额外临时 pytest 合同检查通过，确认新传输适配器连接校验后的数字地址，同时保留原 Host、TLS SNI、主机名检查和必需证书验证；该受控网络检查不替代真实 TLS 握手。未放宽地址策略或修改宿主 DNS/代理。未重跑收费的真实模型对照，也未运行 GitHub 托管 CI；相关脚本与工作流改动不追溯改写旧证据。
+
+```bash
+.conda-env/bin/python -m pytest -q --junitxml=/tmp/aa2-ocr-final-suite.xml
+.conda-env/bin/python -m ruff check src tests
+git diff --check
+.conda-env/bin/python -m pip check
+.conda-env/bin/python -m hatchling build -t wheel -d /tmp/aa2-ocr-wheel-output
+```
+
 ## 故障生命周期、动作预算与真实 demo 续跑（2026-10-15）
 
 本轮针对旧现场的完整恢复过程验收。控制器将证据有效性与检查成功分开，逐项关闭问题；旧计划停滞不再阻断诊断或已有任务修复，实现额度耗尽时也先诊断当前失败。上游恢复保留下游独立的待修复问题，当前检查反馈不会被旧失败覆盖。一次验证继续收集独立检查，只有依赖失败产物的消费者明确标记未执行，避免单元测试失败掩盖类型或构建错误。

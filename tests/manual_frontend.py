@@ -9,6 +9,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from manual_support import finalize
+
 from auto_agents_2.config import ConfigStore
 from auto_agents_2.design import inspect_application
 from auto_agents_2.environment import EnvironmentManager
@@ -90,7 +92,8 @@ async def main():
             await manager.install_node(work, environment)
             checks = await VerificationService(root, runner).run([Command(argv=["npm", "run", "build"], timeout=300)], work, environment)
             results[framework] = {"checks": [r.model_dump() for r in checks]}
-            assert passed(checks), checks[0].output
+            if not (passed(checks)):
+                raise RuntimeError(checks[0].output)
             visuals = await inspect_application(preview, work, root / "visuals" / framework, environment, runner, root)
             results[framework]["browser"] = visuals
             print(f"Passed {framework}: production build, desktop and mobile click assertions", flush=True)
@@ -99,11 +102,11 @@ async def main():
         store.update(run["id"], status="CANCELLED", outcome="DIAGNOSTIC_FAILED")
         raise
     finally:
-        write_json(project / "results.json", results)
-        ResourceManager(store, config.load().cleanup).collect()
-        for framework in ("react", "next"):
-            for generated in ("node_modules", ".next", "dist"):
-                shutil.rmtree(project / framework / generated, ignore_errors=True)
+        directories = [project / framework / generated for framework in ("react", "next")
+                       for generated in ("node_modules", ".next", "dist")]
+        finalize(lambda: write_json(project / "results.json", results),
+                 lambda: ResourceManager(store, config.load().cleanup).collect(),
+                 *(lambda path=path: shutil.rmtree(path) if path.exists() else None for path in directories))
 
 
 if __name__ == "__main__":
