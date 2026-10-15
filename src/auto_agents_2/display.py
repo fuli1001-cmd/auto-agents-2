@@ -22,6 +22,8 @@ def agent_label(data):
     if stage == "implement":
         label = {"dependencies": "修复依赖清单", "checks": "修复检查问题"}.get(data.get("repair_kind"), label)
     for key, value in (("prototype-review", "原型自动审查"), ("reintegration-prototype", "集成后原型审查"),
+                       ("recovery/diagnose", "故障独立诊断"), ("recovery/patch-review", "局部计划修订审查"),
+                       ("recovery/patch/", "修订局部计划"),
                        ("plan-review", "任务规划审查"), ("test-change-review", "测试与配置变更审查")):
         if key in operation:
             label = value
@@ -117,8 +119,19 @@ class ProgressDisplay:
                 self.message(data["reply_hint"])
         elif kind == "task.integrated":
             self.message(f"任务验收 {data['done']}/{data['total']}")
+        elif kind == "task.baseline_refreshed":
+            action = "保留实现并重新验证" if data["action"] == "reverify" else "保留旧候选并在新基线上修复"
+            self.message(f"更新任务依赖基线｜{data['task']}｜{action}")
         elif kind == "provider.changed":
             self.message(f"provider 已切换：{data['to']}")
+        elif kind == "recovery.requested":
+            self.message(f"记录故障｜归属：{data['owner']}｜{data['component']}｜{data['kind']}")
+        elif kind == "recovery.decided":
+            action = {"recheck": "重新采集证据", "repair": "修复当前任务", "plan_patch": "局部计划修订",
+                      "blocked": "缺少证据，等待处理"}.get(data["action"], STAGE_LABELS.get(data["action"], data["action"]))
+            self.message(f"恢复裁决｜{action}｜影响任务：{', '.join(data['task_ids']) or '最终验收'}｜预算归属：{data['budget_owner']}\n{data['reason']}")
+        elif kind == "plan.patch_activated":
+            self.message(f"计划修订已生效｜版本 {data['revision']}｜复验任务：{', '.join(data['affected'])}")
         elif kind == "replan.assessed":
             outcome = ("已建立验证基线" if data["baseline"] else
                        f"新增通过 {len(data['gains'])} 项" if data["improved"] else

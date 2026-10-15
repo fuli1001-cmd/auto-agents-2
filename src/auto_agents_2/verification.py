@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from .artifacts import ArtifactStore
+from .builds import output_hashes, verification_commands
 from .config import Cleanup
 from .environment import Environment
 from .errors import PolicyViolation, VerificationPreparationError
@@ -36,6 +37,7 @@ class VerificationService:
         self.artifacts = ArtifactStore(root)
 
     async def run(self, commands: list[Command], workspace: Path, environment: Environment | None = None) -> list[CheckResult]:
+        commands = verification_commands(commands, workspace)
         results = []
         baseline = tree_hash(workspace)
         store = self.resources.store
@@ -98,13 +100,23 @@ class VerificationService:
         report_file = scratch / "junit.xml"
         argv, report_env = report_command(argv, runner, report_file, cwd=cwd)
         env.update(report_env)
+        generated = scratch / "generated"
+        overlays = []
+        for output in command.outputs:
+            destination = contained(workspace, output)
+            destination.mkdir(parents=True, exist_ok=True)
+            staging = generated / output
+            staging.mkdir(parents=True)
+            overlays.append((staging, destination))
         outputs = [scratch, cwd / ".pytest_cache", cwd / ".next", cwd / "dist", cwd / "test-results",
                    *(cwd / "node_modules" / name for name in sorted(NODE_RUNTIME_CACHES))]
+        outputs = [path for path in outputs if path not in {destination for _, destination in overlays}]
         start = time.monotonic()
         secrets = [v for k, v in env.items() if SECRET.search(k)] + sensitive_values(workspace)
         logs = [SanitizedLog(log_root / "stdout.log", secrets), SanitizedLog(log_root / "stderr.log", secrets)]
         try:
-            process = await self.sandbox.spawn(argv, cwd, env, outputs, [workspace, environment.prefix] if environment else [workspace])
+            process = await self.sandbox.spawn(argv, cwd, env, outputs,
+                [workspace, environment.prefix] if environment else [workspace], overlays=overlays)
         except BaseException:
             for log in logs:
                 log.close()
@@ -180,6 +192,15 @@ class VerificationService:
             reasons.append("source_changed")
         if process.returncode != 0:
             reasons.append("process_failed")
+        generated_outputs = {}
+        if command.outputs and not reasons:
+            try:
+                generated_outputs = output_hashes(command, generated)
+            except VerificationPreparationError as exc:
+                reasons.append("build_outputs_missing_or_invalid")
+                output += "\n" + str(exc)
+        if command.outputs and not reasons:
+            self._publish_outputs(command, workspace, generated, scratch / "previous-outputs")
         code = process.returncode if process.returncode is not None else -1
         if reasons:
             code = code or 1
@@ -193,8 +214,28 @@ class VerificationService:
                            command_hash=digest(command.model_dump()),
                            effective_argv=argv, checker_version=CHECKER_VERSION, input_hash=inputs_before,
                            runtime_config_hash=runtime_config, logs=log_refs,
+                           generated_outputs=generated_outputs,
                            tests=tests, skipped=skipped, timed_out=timed_out, test_ids=test_ids,
                            passed_test_ids=passed_test_ids, report=report)
+
+    @staticmethod
+    def _publish_outputs(command, workspace, generated, backup):
+        """Publish only a successful, validated build; failed builds retain old files."""
+        backup.mkdir()
+        moved = []
+        try:
+            for index, output in enumerate(command.outputs):
+                destination = contained(workspace, output)
+                previous = backup / str(index)
+                destination.rename(previous)
+                moved.append((destination, previous, generated / output))
+                (generated / output).rename(destination)
+        except BaseException:
+            for destination, previous, staged in reversed(moved):
+                if destination.exists():
+                    destination.rename(staged)
+                previous.rename(destination)
+            raise
 
 
 def passed(results: list[CheckResult]) -> bool:

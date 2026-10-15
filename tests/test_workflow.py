@@ -35,6 +35,12 @@ class CodingAgent:
 
     async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
         self.calls.append((stage, fresh))
+        if context.get("review_kind") == "recovery_diagnosis":
+            from auto_agents_2.recovery import Diagnosis
+            assert fresh
+            failure = context["failure"]
+            return Diagnosis(action="repair", task_ids=[failure["task_id"]] if failure["task_id"] else [],
+                             reason="Fixture defect within supplied scope", evidence_refs=failure["evidence_refs"])
         check = Command(argv=[sys.executable, "-m", "pytest", "-q", "tests"], expected_tests=1)
         if stage == "clarify":
             implemented = (workspace / "calc.py").is_file() and "return a + b" in (workspace / "calc.py").read_text()
@@ -322,12 +328,19 @@ async def test_replan_renaming_preserves_budget_and_reclaims_previous_worker(tmp
             if stage == "implement" and not self.replanned:
                 self.replanned = True
                 return ImplementationResult(summary="Task needs a clarified contract", replan_stage="plan", replan_reason="Make the public import explicit")
+            if context.get("review_kind") == "recovery_diagnosis":
+                from auto_agents_2.recovery import Diagnosis
+                assert fresh
+                return Diagnosis(action="plan_patch", reason="Adjust task contract", evidence_refs=context["failure"]["evidence_refs"])
+            if context.get("plan_patch"):
+                from auto_agents_2.plan_revision import PlanPatch
+                task = TaskSpec.model_validate(context["plan"]["tasks"][0])
+                task.id = "T1_REVISED"
+                task.origin_id = "T1"
+                assert context["task_origins"]["budgets"]["T1"]["round"] == 1
+                return PlanPatch(base_revision=context["base_revision"], failure_ids=[context["failure"]["id"]],
+                                 reason="Explicit import contract", document="# Revised plan", upsert_tasks=[task], remove_tasks=["T1"])
             result = await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
-            if stage == "plan" and self.replanned:
-                result.tasks[0].id = "T1_REVISED"
-                result.tasks[0].origin_id = "T1"
-                assert context["feedback"]["recovery_refs"]
-                assert not list((project / ".aa2/worktrees" / run_id).glob("T1-p*"))
             return result
 
     workflow = engine(project, ReplanningAgent())
@@ -335,6 +348,8 @@ async def test_replan_renaming_preserves_budget_and_reclaims_previous_worker(tmp
     assert result["status"] == "SUCCEEDED"
     assert workflow.store.get(result["id"], "rounds/T1")["round"] == 2
     assert workflow.store.get(result["id"], "rounds/T1_REVISED") is None
+    assert workflow.store.get(result["id"], "plan_revision/current")["revision"] == 2
+    assert not list((project / ".aa2/worktrees" / result["id"]).glob("T1-*"))
 
 
 @pytest.mark.parametrize("explicit_origins", [False, True])

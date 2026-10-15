@@ -16,7 +16,7 @@ from .artifacts import ArtifactStore
 from .config import ConfigStore
 from .dependencies import copy_execution_source, manifest_reference, pip_inputs
 from .diagnostics import DiagnosticOperation, current_diagnostics
-from .errors import AA2Error, DependencyResolutionError
+from .errors import AA2Error, DependencyResolutionError, RetryableInfrastructureError
 from .evidence import RUNTIME_CACHES
 from .logs import capture_diagnostics
 from .progress import capture_output
@@ -43,6 +43,14 @@ class Environment:
                    XDG_CACHE_HOME=str(scratch / "cache"), TMPDIR=str(scratch),
                    npm_config_cache=str(scratch / "npm-cache"), npm_config_update_notifier="false",
                    NEXT_TELEMETRY_DISABLED="1", PLAYWRIGHT_BROWSERS_PATH="0")
+        # Proxy clients disagree on CIDR/wildcard syntax. Validation servers always
+        # bind loopback; explicit entries keep their probes off external proxies.
+        bypass = list(dict.fromkeys(part.strip() for name in ("no_proxy", "NO_PROXY", "npm_config_no_proxy", "npm_config_noproxy")
+                                    for part in env.get(name, "").split(",") if part.strip()))
+        bypass = list(dict.fromkeys([*bypass, "127.0.0.1", "localhost", "[::1]", "::1"]))
+        for name in ("no_proxy", "NO_PROXY", "npm_config_no_proxy", "npm_config_noproxy"):
+            if name != "npm_config_no_proxy" or name in env:
+                env[name] = ",".join(bypass)
         return env
 
 
@@ -170,13 +178,15 @@ class EnvironmentManager:
                 resolution = re.search(r"(?m)^(?:ResolvePackageNotFound|PackagesNotFoundError|"
                                        r"UnsatisfiableError|LibMambaUnsatisfiableError):[^\n]*", diagnostic)
                 failure = DependencyResolutionError if conda_manifest and resolution else AA2Error
+                if not resolution and re.search(r"CondaHTTPError|ConnectionError|ConnectionResetError|ReadTimeout|ETIMEDOUT|ECONNRESET|EAI_AGAIN", diagnostic):
+                    failure = RetryableInfrastructureError
                 detail = diagnostic[-2000:]
                 if failure is DependencyResolutionError and resolution.group() not in detail:
                     detail = resolution.group() + "\n" + detail
                 raise failure("Dependency preparation failed: " + detail)
             return stdout.decode(errors="replace")
         except TimeoutError as exc:
-            raise AA2Error("Dependency preparation timed out") from exc
+            raise RetryableInfrastructureError("Dependency preparation timed out") from exc
         finally:
             await self.sandbox.stop(process)
 

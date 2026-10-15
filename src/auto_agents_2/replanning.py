@@ -44,10 +44,11 @@ def check_criteria(commands, results, source_hash: str, environment_hash: str) -
     for command in commands:
         data = command.model_dump()
         # Explicit compatibility mapping: the new empty declaration is the old obligation.
-        obligation = {k: v for k, v in data.items() if k != "inputs" or v}
+        obligation = {k: v for k, v in data.items() if k not in {"inputs", "outputs"} or v}
         key = digest(obligation)
         result = actual.get((tuple(command.argv), command.cwd, digest(data)))
         invalid_evidence = {"execution_inputs_changed", "source_changed", "incomplete_log_capture",
+                            "build_outputs_missing_or_invalid",
                             "test_report_missing", "test_report_invalid", "unsupported_test_runner"}
         valid = bool(result and result.checker_version == CHECKER_VERSION
                      and not invalid_evidence.intersection(result.failure_reasons)

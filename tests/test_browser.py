@@ -43,6 +43,33 @@ async def test_static_interaction_and_implemented_preview(browser_cache, tmp_pat
     assert not list((root / "tmp").glob("preview-*"))
 
 
+async def test_backend_preview_reads_sibling_build_inside_real_sandbox(browser_cache, tmp_path, monkeypatch):
+    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"):
+        monkeypatch.setenv(name, "http://127.0.0.1:1")
+    monkeypatch.setenv("no_proxy", "")
+    monkeypatch.setenv("NO_PROXY", "")
+    ConfigStore(tmp_path).initialize()
+    root = tmp_path / ".aa2"
+    work = root / "worktrees/preview/integration"
+    (work / "backend").mkdir(parents=True)
+    (work / "frontend/dist").mkdir(parents=True)
+    (work / "frontend/dist/index.html").write_text('<h1 id="status">Built application</h1>')
+    (work / "backend/server.py").write_text(
+        "import sys\nfrom pathlib import Path\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "class Handler(BaseHTTPRequestHandler):\n"
+        " def do_GET(self):\n"
+        "  data=(Path(__file__).parents[1]/'frontend/dist/index.html').read_bytes()\n"
+        "  self.send_response(200); self.end_headers(); self.wfile.write(data)\n"
+        "HTTPServer(('127.0.0.1',int(sys.argv[1])),Handler).serve_forever()\n")
+    spec = PreviewSpec(command=Command(argv=[sys.executable, "server.py", "{port}"], cwd="backend",
+                                      inputs=["frontend/dist"]),
+                       actions=[BrowserAction(action="expect_text", selector="#status", value="Built application")])
+    rows = await inspect_application(spec, work, tmp_path / "images", Environment(Path(sys.prefix), "fixture"),
+                                     SandboxRunner(root), root)
+    assert len(rows) == 2 and all(r["status"] == 200 and len(r["actions"]) == 1 for r in rows)
+    assert not list((root / "processes").glob("*.json"))
+
+
 @pytest.mark.asyncio
 async def test_prototype_cannot_call_external_service(browser_cache, tmp_path):
     from auto_agents_2.errors import AA2Error

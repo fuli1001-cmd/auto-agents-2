@@ -1,0 +1,67 @@
+{
+  "snapshot": "/tmp/aa2-build-replay-7d1uxue2/.aa2/state.sqlite",
+  "isolated_project": "/tmp/aa2-recovery-migration-ubiu8q8o",
+  "run": "run_f8a82b6d34f24434",
+  "schema_version": 2,
+  "budget_counters_preserved": true,
+  "accepted_tasks_preserved": [
+    "T001",
+    "T002",
+    "T003"
+  ],
+  "pending_stalled": 7,
+  "proposal_changes_preserved": [
+    {
+      "path": "README.md",
+      "operation": "replace"
+    }
+  ],
+  "failure_identity": "855f45001a83c48c6e06c559b5c41a257ef965fc603bad9b2758ca35598cd8a5",
+  "checks": [
+    {
+      "argv": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "passed_tests": 0,
+      "report_status": "not_required"
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/test_delivery.py"
+      ],
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "passed_tests": 18,
+      "report_status": "valid"
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "test:e2e"
+      ],
+      "process_exit_code": 1,
+      "exit_code": 1,
+      "passed_tests": 12,
+      "report_status": "valid"
+    }
+  ],
+  "unpassed_test_ids": [
+    "layout-keyboard.spec.ts::[mobile-375] T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作",
+    "task-flow.spec.ts::[mobile-375] T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化",
+    "layout-keyboard.spec.ts::[desktop-1280] T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作",
+    "task-flow.spec.ts::[desktop-1280] T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化"
+  ],
+  "live_demo_modified": false
+}

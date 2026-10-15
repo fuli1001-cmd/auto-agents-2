@@ -8,7 +8,6 @@ from test_workflow import CodingAgent, engine
 
 from auto_agents_2.approvals import APPROVAL_CONTEXT_VERSION, prototype_identity
 from auto_agents_2.design import PROTOTYPE_BROWSER_VERSION
-from auto_agents_2.engine import Replan
 from auto_agents_2.errors import AA2Error
 from auto_agents_2.interaction import choice_spec
 from auto_agents_2.models import (
@@ -18,6 +17,7 @@ from auto_agents_2.models import (
     IntakeResult,
     ReviewResult,
 )
+from auto_agents_2.recovery import RecoveryNeeded
 from auto_agents_2.util import digest
 from auto_agents_2.workspace import git, tree_hash
 
@@ -254,8 +254,9 @@ async def test_new_model_replan_after_receipt_is_not_suppressed(tmp_path, monkey
         return ImplementationResult(summary="Real design issue", changes=[], replan_stage="prototype", replan_reason="Still needs redesign")
 
     workflow.agent.invoke = still_blocked
-    with pytest.raises(Replan, match="Still needs redesign"):
+    with pytest.raises(RecoveryNeeded) as raised:
         await workflow._task(rid, proposal.tasks[0], base, proposal, {"specification": {"frontend": True}})
+    assert raised.value.failure.proposal["replan_reason"] == "Still needs redesign"
     pending = workflow.store.prepare_replan(rid, "prototype", "Still needs redesign")
     assert not await workflow._refresh_legacy_approval_context(rid)
     assert workflow.store.get(rid, "replanning/pending") == pending
@@ -328,5 +329,6 @@ async def test_delivery_repair_supplies_approval_to_implementation_and_review(tm
     workflow, rid, _, question, contexts, _ = approval_fixture(tmp_path, monkeypatch, legacy=False)
     await workflow._ensure_prototype_approval(rid, tmp_path)
     await workflow._delivery_repair(rid, tmp_path, {"runtime_failure": "repair"}, ["calc.py", "tests"])
-    assert [stage for stage, _ in contexts] == ["implement", "review"]
+    assert [stage for stage, _ in contexts] == ["review", "implement", "review"]
+    assert contexts[0][1]["review_kind"] == "recovery_diagnosis"
     assert all(c["prototype_approval"]["human"]["question_id"] == question["id"] for _, c in contexts)

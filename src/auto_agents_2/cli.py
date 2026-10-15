@@ -177,11 +177,15 @@ def resume(project: Project = Path("."), run_id: Annotated[str | None, typer.Opt
 def status(project: Project = Path("."), run_id: Annotated[str | None, typer.Option("--run")] = None):
     try:
         configuration(project)
-        store = Store(project)
+        store = Store(project, readonly=True)
         current = store.run(run_id) if run_id else store.current()
         console.print_json(data={"run": current, "questions": store.pending(current["id"]) if current else [],
                                 "tokens": store.usage_summary(current["id"]) if current else {},
                                 "replanning": store.get(current["id"], "replanning/pending", {}) if current else {},
+                                "recovery": store.get(current["id"], "recovery/active", {}) if current else {},
+                                "plan_revision": store.get(current["id"], "plan_revision/current", {}) if current else {},
+                                "tasks": {t["id"]: store.get(current["id"], "task_state/" + t["id"], {})
+                                          for t in (store.get(current["id"], "plan", {}) or {}).get("tasks", [])} if current else {},
                                 "delivery": store.get(current["id"], "delivery/journal", store.get(current["id"], "delivery/receipt", {})) if current else {}})
     except AA2Error as exc:
         fail(exc)
@@ -192,7 +196,7 @@ def logs(project: Project = Path("."), run_id: Annotated[str | None, typer.Optio
          after: int = 0):
     try:
         configuration(project)
-        store = Store(project)
+        store = Store(project, readonly=True)
         current = store.run(run_id) if run_id else store.current()
         if current:
             for event in store.events(current["id"], after):

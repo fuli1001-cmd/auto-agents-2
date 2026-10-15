@@ -5,16 +5,18 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .builds import generated_entry, output_hashes, verification_commands
+from .errors import VerificationPreparationError
 from .util import contained, digest
 from .workspace import input_entry, tree_hash
 
-CHECKER_VERSION = "verification-v4"
+CHECKER_VERSION = "verification-v6"
 NODE_RUNTIME_CACHES = {".cache", ".vite", ".vite-temp", ".tmp"}
 RUNTIME_CACHES = {"__pycache__", ".pytest_cache", *NODE_RUNTIME_CACHES}
 
 
 def input_identity(workspace, command):
-    entries = [(p, input_entry(contained(workspace, p), workspace, excluded=set())) for p in command.inputs]
+    entries = [(p, generated_entry(contained(workspace, p), workspace)) for p in command.inputs]
     for name in ("", "backend", "frontend", "api", "web"):
         modules = workspace / name / "node_modules"
         if modules.exists() and any(p.name not in RUNTIME_CACHES for p in modules.iterdir()):
@@ -45,6 +47,7 @@ class ReuseDecision:
 
 
 def reusable(commands, results, workspace: Path, environment, artifacts=None):
+    commands = verification_commands(commands, workspace)
     if len(commands) != len(results) or not results:
         return ReuseDecision(False, "missing command evidence")
     source = tree_hash(workspace)
@@ -59,6 +62,11 @@ def reusable(commands, results, workspace: Path, environment, artifacts=None):
                 or result.process_exit_code != 0 or result.tests < command.expected_tests
                 or result.test_runner and (result.report_status != "valid" or not result.report or result.tests < 1)):
             return ReuseDecision(False, "unsuccessful observation")
+        try:
+            if result.generated_outputs != output_hashes(command, workspace):
+                return ReuseDecision(False, "generated build outputs changed")
+        except (OSError, VerificationPreparationError):
+            return ReuseDecision(False, "generated build outputs unavailable")
         if artifacts:
             try:
                 for ref in result.logs:

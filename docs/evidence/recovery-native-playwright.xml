@@ -1,0 +1,10 @@
+<testsuites id="" name="" tests="2" failures="0" skipped="0" errors="0" time="5.466475">
+<testsuite name="tasks.spec.ts" timestamp="2026-10-15T04:35:25.559Z" hostname="desktop" tests="1" failures="0" skipped="0" time="1.176" errors="0">
+<testcase name="[desktop] task lifecycle persists and long titles wrap without horizontal overflow" classname="tasks.spec.ts" time="1.176">
+</testcase>
+</testsuite>
+<testsuite name="tasks.spec.ts" timestamp="2026-10-15T04:35:25.559Z" hostname="narrow-mobile" tests="1" failures="0" skipped="0" time="1.129" errors="0">
+<testcase name="[narrow-mobile] task lifecycle persists and long titles wrap without horizontal overflow" classname="tasks.spec.ts" time="1.129">
+</testcase>
+</testsuite>
+</testsuites>

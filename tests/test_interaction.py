@@ -76,6 +76,7 @@ def test_store_migrates_old_questions_without_losing_text(tmp_path):
         db.execute("CREATE TABLE questions(id TEXT PRIMARY KEY,run_id TEXT,key TEXT,prompt TEXT,artifact_hash TEXT,answer TEXT,created REAL, UNIQUE(run_id,key,artifact_hash))")
         db.execute("INSERT INTO questions VALUES('q','r','prototype','old question','v1',NULL,1)")
     store = Store(tmp_path)
+    store.migrate()
     assert store.pending("r")[0]["prompt"] == "old question"
     store.supersede_questions("r", "prototype")
     assert store.pending("r") == []

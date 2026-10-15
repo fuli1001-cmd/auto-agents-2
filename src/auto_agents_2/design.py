@@ -233,7 +233,7 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
     cwd = workspace if spec.command.cwd == "." else contained(workspace, spec.command.cwd)
     process = await sandbox.spawn(argv, cwd, environment.variables(scratch),
                                   [scratch, cwd / ".next", cwd / "dist",
-                                   *(cwd / "node_modules" / name for name in sorted(NODE_RUNTIME_CACHES))], [environment.prefix])
+                                   *(cwd / "node_modules" / name for name in sorted(NODE_RUNTIME_CACHES))], [workspace, environment.prefix])
     # Drain pipes to avoid deadlocking a long-running server; retain a bounded diagnostic tail.
     tail = []
 
@@ -251,7 +251,7 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
         activity.progress(0, len(spec.routes) * 2)
     output.mkdir(parents=True, exist_ok=True)
     try:
-        async with httpx.AsyncClient(timeout=2) as client:
+        async with httpx.AsyncClient(timeout=2, trust_env=False) as client:
             for _ in range(60):
                 if process.returncode is not None:
                     raise AA2Error("Preview process exited: " + "".join(tail))

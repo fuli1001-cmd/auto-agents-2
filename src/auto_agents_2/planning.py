@@ -41,6 +41,10 @@ def validate_plan(plan: PlanResult, requirement_ids: set[str]):
 
 
 def conflict(a: TaskSpec, b: TaskSpec) -> bool:
+    # Split repairs share one persisted implementation budget. Dispatching them
+    # concurrently would reserve the same round twice and conceal consumption.
+    if a.origin_id and a.origin_id == b.origin_id:
+        return True
     def overlaps(x, y):
         # Distinct literal directory prefixes prove disjointness even for glob scopes.
         def prefix(value):

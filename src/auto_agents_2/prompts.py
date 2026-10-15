@@ -4,7 +4,7 @@ import json
 
 from .research import request_documents
 
-PROMPT_VERSION = "2026-10-14.5"
+PROMPT_VERSION = "2026-10-15.3"
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
     "gemini": "https://ai.google.dev/gemini-api/docs/prompting-strategies#gemini-3",
@@ -50,6 +50,16 @@ the required checks independently. Avoid duplicate investigation and excessive t
 Use relative paths, structured argv (no shell wrappers), and stable requirement/task IDs.
 Every command includes inputs: workspace-root-relative execution input references; use []
 when no additional inputs are known. This declaration cannot grant permissions or prove completeness.
+Every command also includes outputs: workspace-root-relative generated directories, or []
+for non-build checks. Supported writable build roots are the command cwd's dist and .next;
+source files, tracked files and locks remain read-only. Declare consumed generated paths
+in inputs. runtime_prepare supplies build prerequisites in each consuming task workspace,
+before final acceptance and in the primary checkout. Generated outputs are not transferred
+by Git task integration. The controller's verification_contract gives the effective ordered
+commands; use it to assess preparation order, including older plans with stale prose.
+Builds run with fresh output directories, publish only after success and retain output
+fingerprints. A previous successful build is insufficient if its outputs disappeared or changed.
+Never fake an output, skip a missing-build test, or make a read-only preview implicitly build.
 The design catalogue order is only a lexical hint, especially across languages. It is not
 an authoritative best-match ranking: inspect the full catalogue when early candidates do not fit.
 Read omitted public files from the supplied workspace. For dependency/version/conflict
@@ -119,6 +129,30 @@ class PromptCompiler:
         }.get(family, "Follow the task contract precisely.")
         data = json.dumps(request_documents(context), ensure_ascii=False, indent=2)
         task = ROLES.get(stage, ROLES["review"])
+        if stage in {"plan", "implement"} or stage == "review" and context.get("review_kind") in {"plan", "plan_patch", "test_changes"}:
+            task += (" New npm lockfile creation belongs to EnvironmentManager. When package-lock.json is absent, "
+                     "propose package.json and let the controller run real npm install --package-lock-only before npm ci. "
+                     "Do not hand-author or return a generated package-lock.json for this initial resolution, "
+                     "and never fabricate package versions, integrity hashes or dependency graphs. "
+                     "A plan may require the resulting lock as an acceptance artifact but must identify its controller producer; "
+                     "its absence from a pre-application proposal is not a defect. Existing locks remain protected changes.")
+        if stage in {"clarify", "coverage_review"}:
+            task += (" Coverage 'changed' includes new unmet requirements with no existing implementation. "
+                     "'unknown' means uncertainty about existing behaviour, not the absence of a new feature. "
+                     "For an empty/new project, use changed and verification=[]; executable future acceptance belongs in the plan. "
+                     "Coverage verification commands must work against files and tools already present, not proposed future files.")
+        if stage == "implement":
+            task += (" Request recovery with recovery_request (reason, suggested_action, evidence_refs) when blocked. "
+                     "The controller adjudicates it; a suggestion never authorizes rollback or scope expansion. "
+                     "Use execution_contract for current scope, task/plan revisions and approval evidence. "
+                     "Set legacy replan_stage and replan_reason to empty when using recovery_request.")
+        if stage == "plan" and context.get("plan_patch"):
+            task = ("Propose a minimal PlanPatch against base_revision, citing the supplied failure.id. "
+                    "Do not return a replacement full plan. Preserve requirements, acceptance obligations, test targets "
+                    "and expected_tests minima. Retain existing budget origin_id for renamed/split tasks; merging origins is forbidden. "
+                    "List only changed/new tasks in upsert_tasks. No removal without replacement coverage under the same origin. "
+                    "Use null for unchanged delivery contracts. Scope expansion requires explicit justification and independent review. "
+                    "Preparation/check-only changes require re-verification, not reimplementation. document is the resulting full plan document.")
         if stage == "plan" or stage == "review" and context.get("review_kind") == "plan":
             task += (" environment_file and requirements_file are workspace-root-relative file PATHS, "
                      "such as environment.yml and requirements.txt, never file contents or package lists. "
@@ -127,6 +161,8 @@ class PromptCompiler:
         if stage == "review":
             kind = context.get("review_kind", "implementation")
             task += {
+                "recovery_diagnosis": " Diagnose the supplied FailureRecord, not implementation acceptance. Return Diagnosis. Cite only controller-supplied evidence_refs. Inspect source and actual machine reports; model rollback text is a proposal, not fact. Distinguish collection/build/approval transmission from product defects. Prefer recheck for missing/stale evidence, repair for a defect within existing task scope (name task_ids), plan_patch only for changes to scopes/dependencies/acceptance or command contracts. A design/test mismatch requires explaining approved behaviour before proposing any test changes; protected tests remain independently reviewed. Actual human approval is required, but an old pending label does not invalidate a matching controller receipt. Genuine requirements/design/prototype changes use their corresponding gate. Use blocked with missing evidence when inconclusive; never fabricate consent or passing evidence.",
+                "plan_patch": " Review this local plan amendment against the previous plan and verified failure. Check that task scopes and dependencies suffice, all requirements/acceptance/checks survive, expected_tests never decreases, budgets keep their origins, no origin merge occurs, and affected tasks/reopen choices are conservative. Test target substitutions or deletions cannot conceal failures. Reject unnecessary changes or scope expansion without evidence. Product implementation need not exist for new repair tasks.",
                 "plan": " This is a PRE-IMPLEMENTATION planning gate. Assess coverage, task granularity, DAG, allowed paths, dependency declarations and executable future acceptance checks. Product files and passing task tests are not expected to exist yet. Their absence is not a defect in the plan. Do not evaluate the plan as a completed implementation.",
                 "test_changes": " This is a PRE-APPLICATION candidate gate. Evaluate the proposed test/config diff against requirements and existing expectations. New tests may be added; existing cases/assertions must not be deleted or weakened to fit an implementation. The candidate is not applied yet, so missing files or unexecuted new tests are expected.",
                 "prototype": " This gate checks only the static interactive prototype and its browser evidence. Production features, database integration and final application tests are not expected at this stage.",

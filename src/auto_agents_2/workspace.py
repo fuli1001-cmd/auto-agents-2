@@ -7,12 +7,14 @@ import stat
 import subprocess
 from pathlib import Path
 
-from .errors import AA2Error, PolicyViolation, ProtectedChange
+from .errors import AA2Error, IntegrationConflict, PolicyViolation, ProtectedChange
 from .models import Change
 from .util import atomic_write, contained, digest
 
 EXCLUDED = {".git", ".aa2", ".conda-env", ".venv", "node_modules", ".next", "__pycache__",
             ".pytest_cache", ".ruff_cache", ".cache", "test-results", "dist", "build", ".aws", ".ssh", ".codex", ".gemini"}
+GENERATED_DIRECTORIES = {"node_modules", ".next", "__pycache__", ".pytest_cache", ".ruff_cache",
+                         ".cache", "test-results", "dist", "build"}
 PROTECTED_NAMES = {"AGENTS.md", "CLAUDE.md", "GEMINI.md", "conftest.py", "pytest.ini",
                    "playwright.config.ts", "vitest.config.ts", "vitest.config.js", "jest.config.js", "jest.config.ts",
                    "pyproject.toml", "package.json", "package-lock.json", "tox.ini", "setup.cfg", "tsconfig.json",
@@ -68,7 +70,7 @@ def legacy_tree_hash(root: Path) -> str:
     return digest([(str(p.relative_to(root)), file_digest(p)) for p in sorted(files(root))])
 
 
-def tree_hash(root: Path) -> str:
+def _tree_paths(root: Path):
     paths = set()
     for directory, folders, names in os.walk(root, followlinks=False):
         for name in folders + names:
@@ -77,11 +79,35 @@ def tree_hash(root: Path) -> str:
                 paths.add(path.relative_to(root).as_posix())
         folders[:] = [f for f in folders if f not in EXCLUDED and not Path(directory, f).is_symlink()]
     # Tracked inputs remain relevant even when hidden from model material or normally generated.
+    tracked = set()
     try:
-        paths.update(p for p in git(root, "ls-files", "-z").split("\0") if p)
+        tracked.update(p for p in git(root, "ls-files", "-z").split("\0") if p)
+        paths.update(tracked)
     except AA2Error:
         pass
+    return paths, tracked
+
+
+def tree_hash(root: Path) -> str:
+    paths, _ = _tree_paths(root)
     return digest(["execution-v2", [(p, input_entry(root / p, root)) for p in sorted(paths)]])
+
+
+def prepared_before_hash(root: Path, prepared: list[dict]) -> str:
+    """Reconstruct the recorded preimage identity without reverting any actual file."""
+    paths, tracked = _tree_paths(root)
+    overrides = {}
+    for item in prepared:
+        _, path = write_path(root, item["path"])
+        if item["before"] is None:
+            if path in tracked:
+                overrides[path] = ["missing"]
+            else:
+                paths.discard(path)
+        else:
+            paths.add(path)
+            overrides[path] = ["file", bool(item.get("mode", 0o644) & 0o111), item["before"]]
+    return digest(["execution-v2", [(p, overrides[p] if p in overrides else input_entry(root / p, root)) for p in sorted(paths)]])
 
 
 def write_path(root: Path, relative: str) -> tuple[Path, str]:
@@ -191,17 +217,24 @@ class WorkspaceManager:
             if (self.project / ".git").exists():
                 raise
             git(self.project, "init", "-b", "main")
+        self._ensure_exclusions()
+
+    def _ensure_exclusions(self):
         exclude = Path(git(self.project, "rev-parse", "--git-path", "info/exclude"))
         if not exclude.is_absolute():
             exclude = self.project / exclude
         old = exclude.read_text() if exclude.exists() else ""
-        additions = [f"/{name}/" for name in EXCLUDED - {".git"} if f"/{name}/" not in old]
+        patterns = {f"/{name}/" for name in EXCLUDED - {".git"}} | {f"{name}/" for name in GENERATED_DIRECTORIES}
+        additions = sorted(patterns - set(old.splitlines()))
         if additions:
             atomic_write(exclude, old + "\n" + "\n".join(additions) + "\n")
 
     def allocate(self, run_id: str, name: str, base: str) -> Path:
         if not name.replace("-", "").replace("_", "").isalnum():
             raise PolicyViolation("Unsafe workspace name")
+        # Also upgrade repositories initialized before nested generated directories
+        # were excluded. The shared private exclude file covers existing worktrees.
+        self._ensure_exclusions()
         path = self.root / "worktrees" / run_id / name
         if path.exists():
             git(path, "rev-parse", "--show-toplevel")
@@ -233,9 +266,17 @@ class WorkspaceManager:
         try:
             git(target, "-c", "user.name=aa2", "-c", "user.email=aa2@localhost",
                 "merge", "--no-edit", "--no-ff", commit)
-        except AA2Error:
-            git(target, "merge", "--abort")
-            raise AA2Error("Integration conflict: replan affected tasks against the current integration baseline")
+        except AA2Error as exc:
+            conflicts = git(target, "diff", "--name-only", "--diff-filter=U", "-z").strip("\0")
+            try:
+                git(target, "rev-parse", "--verify", "MERGE_HEAD")
+            except AA2Error:
+                pass
+            else:
+                git(target, "merge", "--abort")
+            if conflicts:
+                raise IntegrationConflict("Integration conflict: " + conflicts.replace("\0", ", ")) from exc
+            raise
 
     def release(self, path: Path):
         if path.exists():

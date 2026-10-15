@@ -15,6 +15,10 @@ class Command(Record):
     timeout: int = Field(default=300, ge=1, le=1800)
     expected_tests: int = Field(default=0, ge=0)
     inputs: list[str] = []
+    outputs: list[str] = Field(default=[], description=(
+        "Workspace-root-relative generated directories produced by this command, e.g. frontend/dist or frontend/.next. "
+        "Only the command cwd's dist and .next directories are writable; declarations cannot grant source writes. "
+        "Consumers must list required generated paths in inputs. Use [] for commands that do not build artifacts."))
 
 
 class Change(Record):
@@ -113,11 +117,18 @@ class PlanResult(Record):
     runtime_probes: list[Command] = []
 
 
+class RecoveryRequest(Record):
+    reason: str
+    suggested_action: Literal["diagnose", "recheck", "repair", "plan_patch", "clarify", "provider_research", "prototype", "design"] = "diagnose"
+    evidence_refs: list[str] = []
+
+
 class ImplementationResult(Record):
     summary: str
     changes: list[Change] = []
     replan_stage: Literal["", "clarify", "provider_research", "prototype", "design", "plan"] = ""
     replan_reason: str = ""
+    recovery_request: RecoveryRequest | None = None
 
 
 class Finding(Record):
@@ -158,6 +169,7 @@ class CheckResult(Record):
     checker_version: str = ""
     input_hash: str = ""
     runtime_config_hash: str = ""
+    generated_outputs: dict[str, str] = {}
     logs: list[dict] = []
     tests: int = 0
     skipped: int = 0

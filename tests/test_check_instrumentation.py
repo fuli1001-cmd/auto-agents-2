@@ -16,6 +16,49 @@ from auto_agents_2.util import write_json
 from auto_agents_2.verification import VerificationService
 
 
+@pytest.mark.parametrize("prefix,runner,args", [
+    (["node", "node_modules/vitest/vitest.mjs"], "vitest", ["run", "src/core.test.ts", "--configLoader", "runner"]),
+    (["node", "--enable-source-maps", "node_modules/@playwright/test/cli.js"], "playwright", ["test", "e2e/tasks.spec.ts"]),
+    (["nodejs", "--", "node_modules/playwright/cli.js"], "playwright", ["test"]),
+])
+def test_node_package_entrypoints_keep_interpreter_and_selectors(tmp_path, prefix, runner, args):
+    from auto_agents_2.test_reports import test_runner as discover
+    original = [*prefix, *args]
+    assert discover(original, tmp_path) == runner
+    report = tmp_path / "private/junit.xml"
+    instrumented, env = report_command(original, runner, report, cwd=tmp_path)
+    assert instrumented[:len(prefix)] == prefix
+    assert all(arg in instrumented for arg in args)
+    assert report_command(instrumented, runner, report, cwd=tmp_path) == (instrumented, env)
+    if runner == "vitest":
+        assert "--reporter=junit" in instrumented
+        assert f"--outputFile.junit={report}" in instrumented
+        assert instrumented.count("run") == 1
+    else:
+        assert env["PLAYWRIGHT_JUNIT_OUTPUT_FILE"] == str(report)
+
+
+@pytest.mark.parametrize("argv", [
+    ["node", "-e", "console.log('vitest')", "node_modules/vitest/vitest.mjs"],
+    ["node", "--eval=code", "node_modules/vitest/vitest.mjs"],
+    ["node", "custom.mjs", "node_modules/vitest/vitest.mjs"],
+    ["node", "vitest.mjs"], ["node", "node_modules/playwright/cli.js", "install"],
+])
+def test_node_discovery_does_not_infer_runner_from_arbitrary_code_or_arguments(tmp_path, argv):
+    from auto_agents_2.test_reports import test_runner as discover
+    assert discover(argv, tmp_path) == ""
+
+
+def test_npm_node_wrapper_composes_reporting_after_the_script_entrypoint(tmp_path):
+    from auto_agents_2.test_reports import test_runner as discover
+    write_json(tmp_path / "package.json", {"scripts": {"test": "node --no-warnings node_modules/vitest/vitest.mjs run --configLoader runner"}})
+    argv = ["npm", "run", "test", "--", "src/core.test.ts"]
+    assert discover(argv, tmp_path) == "vitest"
+    actual, _ = report_command(argv, "vitest", tmp_path / "report.xml", cwd=tmp_path)
+    assert actual[:len(argv)] == argv
+    assert "--run" not in actual and "--reporter=junit" in actual
+
+
 @pytest.mark.parametrize("script", ["vitest", "vitest run", "vitest --run", "vitest --watch=false", "vitest --no-watch"])
 @pytest.mark.parametrize("forwarded", [[], ["--run"], ["--run=true"], ["--run", "--run"], ["--watch=false"]])
 def test_vitest_instrumentation_combines_script_and_forwarded_options_once(tmp_path, script, forwarded):
@@ -102,14 +145,17 @@ def test_unsafe_or_conflicting_instrumentation_stops_before_execution(tmp_path, 
 
 
 async def test_preparation_error_preserves_applied_task_and_round_for_retry(tmp_path):
+    from auto_agents_2.recovery import RecoveryNeeded
     agent = CodingAgent()
     workflow = engine(tmp_path, agent)
     rid = workflow.store.admit("addition", {})["id"]
     proposal = plan()
     proposal.tasks[0].checks[0].argv.extend(["-p", "no:junitxml"])
     base = workflow.workspaces.committed_baseline(rid, "main")
-    with pytest.raises(VerificationPreparationError, match="JUnit plugin"):
+    with pytest.raises(RecoveryNeeded) as raised:
         await workflow._task(rid, proposal.tasks[0], base, proposal, {"specification": {}})
+    assert raised.value.failure.component == "verification_preparation"
+    assert "JUnit plugin" in raised.value.failure.evidence["error"]
     assert workflow.store.get(rid, "develop/task/T1")["phase"] == "applied"
     assert workflow.store.get(rid, "rounds/T1")["round"] == 1
     assert workflow.store.get(rid, "replanning/pending") is None

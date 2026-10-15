@@ -48,6 +48,27 @@ def python_module(argv: list[str]) -> str:
     return _python_module_target(argv)[0]
 
 
+def _node_runner_target(argv: list[str], cwd: Path) -> tuple[str, int]:
+    """Recognize package-owned entry points, never -e code or arbitrary script arguments."""
+    if not argv or Path(argv[0]).name not in {"node", "nodejs"}:
+        return "", 0
+    index = 1
+    while index < len(argv) and argv[index] in {"--no-warnings", "--enable-source-maps", "--trace-warnings"}:
+        index += 1
+    if index < len(argv) and argv[index] == "--":
+        index += 1
+    if index >= len(argv) or argv[index].startswith("-"):
+        return "", 0
+    target = (cwd / argv[index]).resolve()
+    entries = {"vitest/vitest.mjs": "vitest", "@playwright/test/cli.js": "playwright", "playwright/cli.js": "playwright"}
+    for entry, runner in entries.items():
+        if target == (cwd / "node_modules" / entry).resolve():
+            if runner == "playwright" and argv[index + 1:index + 2] != ["test"]:
+                return "", 0
+            return runner, index + 1
+    return "", 0
+
+
 def _literal_script(body: str) -> list[str]:
     """Accept literal shell words; reject operators, comments and expansions.
 
@@ -94,7 +115,7 @@ def _npm_script(argv: list[str], cwd: Path) -> list[str]:
         if not isinstance(body, str):
             return []
         words = _literal_script(body)
-        if not words or Path(words[0]).name not in {"vitest", "playwright"}:
+        if not words or (Path(words[0]).name not in {"vitest", "playwright"} and not _node_runner_target(words, cwd)[0]):
             return []
         return words
     except (OSError, ValueError, KeyError, TypeError):
@@ -109,6 +130,9 @@ def test_runner(argv: list[str], cwd: Path) -> str:
         return "vitest"
     if name == "playwright" and argv[1:2] == ["test"]:
         return "playwright"
+    node_runner, _ = _node_runner_target(argv, cwd)
+    if node_runner:
+        return node_runner
     if name == "npm":
         words = _npm_script(argv, cwd)
         return test_runner(words, cwd) if words else ""
@@ -220,7 +244,8 @@ def report_command(argv: list[str], runner: str, report: Path, *, cwd: Path | No
     if Path(argv[0]).name == "npm":
         if cwd is None or not (script := _npm_script(argv, cwd)):
             raise VerificationPreparationError("Cannot inspect the npm test script before report instrumentation")
-        script = script[1:]
+        _, offset = _node_runner_target(script, cwd)
+        script = script[offset or 1:]
         if "--" in script:
             raise VerificationPreparationError("An npm test script ends option parsing with --; use a direct runner command")
         if "--" not in result:
@@ -230,6 +255,9 @@ def report_command(argv: list[str], runner: str, report: Path, *, cwd: Path | No
         start = 1
         if runner == "pytest" and is_python(argv[0]):
             _, start = _python_module_target(argv)
+        elif cwd is not None:
+            _, offset = _node_runner_target(argv, cwd)
+            start = offset or start
     boundary = result.index("--", start) if "--" in result[start:] else len(result)
     args = result[start:boundary]
     variables = {}

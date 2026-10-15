@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 from .diagnostics import adopt_logs
 from .errors import AA2Error, IncompleteIteration
 from .interaction import validate_answer
+from .recovery import implemented_candidate
 from .replanning import assess
 from .util import digest, identifier, now, redact
 
@@ -15,13 +17,24 @@ TERMINAL = ("SUCCEEDED", "CANCELLED")
 
 
 class Store:
-    def __init__(self, project: Path):
+    def __init__(self, project: Path, *, readonly=False, _initialize=False):
+        self.readonly = readonly
         self.root = project.resolve() / ".aa2"
         if self.root.is_symlink():
             raise AA2Error("Project state must be a local directory, not a symlink")
+        self.path = self.root / "state.sqlite"
+        if self.path.exists() and not _initialize:
+            # Readers and engine construction must never perform a migration.
+            with sqlite3.connect(f"file:{self.path}?mode=ro", uri=True) as db:
+                meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
+                version = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] if meta else "0"
+                if version not in {"0", "1", "2"}:
+                    raise AA2Error("Unsupported state database version")
+            return
+        if readonly:
+            raise AA2Error("Project state database does not exist")
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.root.chmod(0o700)
-        self.path = self.root / "state.sqlite"
         with self.connect() as db:
             db.executescript("""
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -69,11 +82,13 @@ class Store:
 
     @contextmanager
     def connect(self):
-        db = sqlite3.connect(self.path, timeout=15)
+        db = (sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=15) if self.readonly
+              else sqlite3.connect(self.path, timeout=15))
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("PRAGMA synchronous=FULL")
+        if not self.readonly:
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA synchronous=FULL")
         try:
             yield db
             db.commit()
@@ -82,6 +97,115 @@ class Store:
             raise
         finally:
             db.close()
+
+    def migrate(self):
+        """Called only by run while holding controller.lock, before dispatch/GC."""
+        if self.readonly:
+            raise AA2Error("Read-only state cannot migrate")
+        with self.connect() as db:
+            meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
+            if meta and db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2":
+                return
+            backup = self.root / "state-v1.backup.sqlite"
+            if not backup.exists():
+                temporary = backup.with_suffix(".tmp")
+                with sqlite3.connect(temporary) as target:
+                    db.backup(target)
+                temporary.replace(backup)
+                with backup.open("rb") as stream:
+                    os.fsync(stream.fileno())
+                directory = os.open(self.root, os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            if not meta:
+                Store(self.root.parent, _initialize=True)
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(questions)")}
+            if "interaction" not in columns:
+                db.execute("ALTER TABLE questions ADD COLUMN interaction TEXT NOT NULL DEFAULT '{}'")
+            if "superseded" not in columns:
+                db.execute("ALTER TABLE questions ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0")
+            for row in db.execute("SELECT id FROM runs").fetchall():
+                rid = row[0]
+                records = {r[0]: json.loads(r[1]) for r in db.execute(
+                    "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
+                self._put(db, rid, "migration/v1", {"version": 1, "records": records})
+                if records.get("plan"):
+                    self._put(db, rid, "plan_revision/current", {"version": 1, "revision": 1})
+                done = records.get("develop/done", [])
+                for task in records.get("plan", {}).get("tasks", []):
+                    self._put(db, rid, "task_state/" + task["id"], {
+                        "version": 1, "revision": 1, "implementation": "accepted" if task["id"] in done else "pending",
+                        "evidence": "stale" if task["id"] in done else "absent"})
+            db.execute("UPDATE meta SET value='2' WHERE key='schema_version'")
+            self._event(db, None, "state.migrated", {"version": 2, "backup": str(backup)})
+
+    def _put(self, db, rid, key, value):
+        db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
+                   (rid, key, json.dumps(value, ensure_ascii=False)))
+        adopt_logs(db, self.root, value)
+
+    def activate_plan_patch(self, rid, journal_id):
+        """CAS activation. Git/files are snapshotted before this transaction, never called atomic with it."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = {r[0]: json.loads(r[1]) for r in db.execute("SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
+            key = "plan_revision/journal/" + journal_id
+            journal = rows[key]
+            if journal["phase"] == "activated":
+                return
+            revision = rows.get("plan_revision/current", {}).get("revision", 1)
+            if revision != journal["base_revision"] or rows["plan"] != journal["previous_plan"]:
+                raise AA2Error("Plan activation CAS failed; preserving proposal and recovery snapshots")
+            self._put(db, rid, f"plan_revision/history/{revision}", {
+                "plan": rows["plan"], "tasks": {k: v for k, v in rows.items() if k.startswith(("develop/", "task_state/"))}})
+            origins = dict(rows.get("task_origins", {}))
+            for task in journal["plan"]["tasks"]:
+                origins[task["id"]] = task["origin_id"]
+            self._put(db, rid, "task_origins", origins)
+            self._put(db, rid, "plan", journal["plan"])
+            self._put(db, rid, "plan_revision/current", {"version": 1, "revision": revision + 1})
+            done = set(rows.get("develop/done", [])) - set(journal["affected"])
+            done &= {t["id"] for t in journal["plan"]["tasks"]}
+            self._put(db, rid, "develop/done", sorted(done))
+            for task_id in journal["affected"]:
+                predecessor = task_id
+                if task_id not in journal["reopen"] and task_id not in {t["id"] for t in journal["previous_plan"]["tasks"]}:
+                    replaced = [t["id"] for t in journal["previous_plan"]["tasks"]
+                                if t["id"] in journal.get("patch", {}).get("remove_tasks", []) and t["origin_id"] == origins[task_id]]
+                    if len(replaced) == 1:
+                        predecessor = replaced[0]
+                accepted = predecessor in rows.get("develop/done", [])
+                previous = rows.get("develop/task/" + predecessor, {})
+                old = rows.get("task_state/" + task_id, {})
+                state = {"version": 1, "revision": old.get("revision", 1) + 1,
+                         "implementation": "needs_repair" if task_id in journal["reopen"] else (
+                             "accepted" if accepted else "pending"),
+                         "evidence": "stale"}
+                self._put(db, rid, "task_state/" + task_id, state)
+                retained = {}
+                if task_id not in rows.get("develop/done", []) and journal.get("snapshots", {}).get(task_id):
+                    retained["workspace"] = journal["snapshots"][task_id]["workspace"]
+                elif task_id not in {t["id"] for t in journal["previous_plan"]["tasks"]}:
+                    origin = origins[task_id]
+                    inherited = [snapshot for old_id, snapshot in journal.get("snapshots", {}).items()
+                                 if origins.get(old_id) == origin and old_id not in rows.get("develop/done", [])]
+                    if len(inherited) > 1:
+                        raise AA2Error("Multiple unfinished candidates need explicit reconciliation before splitting their origin")
+                    if inherited:
+                        retained["resume_base"] = inherited[0]["commit"]
+                self._put(db, rid, "develop/task/" + task_id, {
+                    **retained,
+                    "phase": ("rejected" if task_id in journal["reopen"] else "reverify"
+                              if implemented_candidate(previous, accepted) else "pending"),
+                    "feedback": {"controller_recovery": journal["reason"]},
+                    "previous_evidence": previous, "revision": state["revision"]})
+            for prefix in ("readme", "candidate/readme", "verify"):
+                db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR key LIKE ?)", (rid, prefix, prefix + "/%"))
+            self._put(db, rid, key, {**journal, "phase": "activated"})
+            self._event(db, rid, "plan.patch_activated", {"revision": revision + 1, "affected": journal["affected"], "journal": key})
 
     def _run(self, row):
         if row is None:
@@ -194,6 +318,18 @@ class Store:
             pending = json.loads(row[0])
             body = json.loads(db.execute("SELECT data FROM runs WHERE id=?", (rid,)).fetchone()[0])
             body["replans"] = pending["generation"] + 1
+            records = {r["key"]: json.loads(r["data"]) for r in db.execute(
+                "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
+            removed = {key: value for key, value in records.items() if any(
+                key == prefix + stage or key.startswith(prefix + stage + "/")
+                for stage in stages for prefix in ("", "candidate/", "invocation/", "provider-result/"))}
+            self._put(db, rid, f"recovery/gate-history/{pending['generation']}", {
+                "version": 1, "pending": pending, "checkpoints": removed, "recovery_refs": recovery_refs})
+            if "plan" in removed:
+                revision = records.get("plan_revision/current", {}).get("revision", 1)
+                self._put(db, rid, f"plan_revision/history/{revision}", {
+                    "plan": removed["plan"], "tasks": {k: v for k, v in records.items() if k.startswith(("develop/", "task_state/"))}})
+                self._put(db, rid, "plan_revision/current", {"version": 1, "revision": revision + 1})
             for stage in stages:
                 for prefix in ("candidate/", "invocation/", "provider-result/"):
                     db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR key LIKE ?)",
@@ -234,7 +370,8 @@ class Store:
 
     @staticmethod
     def _question(row):
-        return {**dict(row), "interaction": json.loads(row["interaction"])}
+        values = dict(row)
+        return {**values, "interaction": json.loads(values.get("interaction", "{}")), "superseded": values.get("superseded", 0)}
 
     def request(self, rid, key, prompt, artifact_hash="", interaction=None) -> dict:
         with self.connect() as db:
@@ -261,8 +398,10 @@ class Store:
 
     def pending(self, rid):
         with self.connect() as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(questions)")}
+            restriction = " AND superseded=0" if "superseded" in columns else ""
             return [self._question(r) for r in db.execute(
-                "SELECT * FROM questions WHERE run_id=? AND answer IS NULL AND superseded=0 ORDER BY created", (rid,))]
+                "SELECT * FROM questions WHERE run_id=? AND answer IS NULL" + restriction + " ORDER BY created", (rid,))]
 
     def answer(self, qid, answer, artifact_hash: str | None = None):
         with self.connect() as db:
@@ -348,7 +487,8 @@ class Store:
                 if key.startswith("develop/task/"):
                     result[key] = {k: value[k] for k in ("commit", "checks", "review", "source_hash") if k in value}
                 elif key in {"capture", "clarify", "provider_research", "prototype", "prototype_approval", "design", "plan",
-                             "coverage_checks", "verify/identity", "verify/checks", "verify/review", "verify/visuals"} or key.startswith("rounds/"):
+                             "coverage_checks", "verify/identity", "verify/checks", "verify/review", "verify/visuals"} or key.startswith(
+                                 ("rounds/", "budget_grants/", "plan_revision/", "task_state/", "recovery/", "migration/")):
                     result[key] = value
             result["approvals"] = [dict(r) for r in db.execute("SELECT key,artifact_hash,answer FROM questions WHERE run_id=? AND answer IS NOT NULL", (rid,))]
         return result

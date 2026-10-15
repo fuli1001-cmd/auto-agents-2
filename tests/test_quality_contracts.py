@@ -159,7 +159,7 @@ def test_legacy_obligation_does_not_reset_progress(tmp_path):
     from auto_agents_2.evidence import CHECKER_VERSION
     from auto_agents_2.models import CheckResult
     command = Command(argv=["python", "-c", "pass"])
-    legacy = command.model_dump(exclude={"inputs"})
+    legacy = command.model_dump(exclude={"inputs", "outputs"})
     key = "command/" + digest(legacy)
     previous = {"tracked": {"task": {key: False}}, "evaluations": 1, "stalled": 2}
     result = CheckResult(argv=command.argv, cwd=".", exit_code=0, output="", duration=0,
@@ -328,6 +328,8 @@ async def test_delivery_repair_replays_partial_replace_once(tmp_path, monkeypatc
     class RepairAgent(CodingAgent):
         proposals = 0
         async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
+            if context.get("review_kind") == "recovery_diagnosis":
+                return await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
             if stage == "implement":
                 self.proposals += 1
                 return ImplementationResult(summary="repair", changes=[Change(path=name, operation="replace", old_text="old", content="new") for name in ("one.py", "two.py")])
@@ -629,6 +631,8 @@ async def test_delivery_hard_errors_use_bounded_rounds_without_test_review(tmp_p
         proposals = 0
         reviews = 0
         async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
+            if context.get("review_kind") == "recovery_diagnosis":
+                return await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
             if stage == "implement":
                 self.proposals += 1
                 path = "outside.py" if self.proposals == 1 else "allowed.py"

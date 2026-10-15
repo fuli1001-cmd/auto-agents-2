@@ -1,0 +1,164 @@
+{
+  "run_id": "run_f8a82b6d34f24434",
+  "source_hash": "79b94fdb5899c2a57cf88a32e6d1e21742bd9c5a3bd7238916043caf6fadb370",
+  "mode": "isolated snapshot; real Conda/npm/Chromium; browser tests in a separate loopback network namespace",
+  "recovered": false,
+  "pending_replan_preserved": true,
+  "completed_tasks_preserved": [
+    "T001",
+    "T002",
+    "T003"
+  ],
+  "budgets_and_approval_preserved": true,
+  "live_project_writes": 0,
+  "native_provider_calls": 0,
+  "checks": [
+    {
+      "argv": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "cwd": "frontend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 0,
+      "test_ids": [],
+      "passed_test_ids": [],
+      "failure_reasons": [],
+      "generated_outputs": {
+        "frontend/dist": "ca8325581782eb268ff1dd76a4775c3e11bf7e2abae30220790c455d8da3e197"
+      },
+      "report": {}
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "tests/test_delivery.py"
+      ],
+      "cwd": "backend",
+      "process_exit_code": 0,
+      "exit_code": 0,
+      "tests": 18,
+      "test_ids": [
+        "tests.test_delivery::test_production_build_alias_assets_and_api_404",
+        "tests.test_delivery::test_missing_build_keeps_api_available",
+        "tests.test_delivery::test_assets_cannot_escape_build",
+        "tests.test_delivery::test_isolation_ignores_external_database_and_closes_lifespan",
+        "tests.test_delivery::test_initialization_failure_cleans_owned_directory",
+        "tests.test_delivery::test_factory_failure_cleans_owned_directory",
+        "tests.test_delivery::test_preview_rejects_invalid_binding[args0]",
+        "tests.test_delivery::test_preview_rejects_invalid_binding[args1]",
+        "tests.test_delivery::test_preview_rejects_invalid_binding[args2]",
+        "tests.test_delivery::test_preview_rejects_invalid_binding[args3]",
+        "tests.test_delivery::test_preview_rejects_invalid_binding[args4]",
+        "tests.test_delivery::test_preview_rejects_invalid_binding[args5]",
+        "tests.test_delivery::test_occupied_port_does_not_create_database_or_fallback",
+        "tests.test_delivery::test_unbuilt_preview_fails_before_creating_database",
+        "tests.test_delivery::test_normal_preview_exit_closes_before_cleanup",
+        "tests.test_delivery::test_real_preview_signal_shutdown_cleans_only_its_database[15]",
+        "tests.test_delivery::test_real_preview_signal_shutdown_cleans_only_its_database[2]",
+        "tests.test_delivery::test_runtime_probe_exits_with_real_versions_and_cleanup"
+      ],
+      "passed_test_ids": [
+        "tests.test_delivery::test_production_build_alias_assets_and_api_404",
+        "tests.test_delivery::test_missing_build_keeps_api_available",
+        "tests.test_delivery::test_assets_cannot_escape_build",
+        "tests.test_delivery::test_isolation_ignores_external_database_and_closes_lifespan",
+        "tests.test_delivery::test_initialization_failure_cleans_owned_directory",
+        "tests.test_delivery::test_factory_failure_cleans_owned_directory",
+        "tests.test_delivery::test_preview_rejects_invalid_binding[args0]",
+        "tests.test_delivery::test_preview_rejects_invalid_binding[args1]",
+        "tests.test_delivery::test_preview_rejects_invalid_binding[args2]",
+        "tests.test_delivery::test_preview_rejects_invalid_binding[args3]",
+        "tests.test_delivery::test_preview_rejects_invalid_binding[args4]",
+        "tests.test_delivery::test_preview_rejects_invalid_binding[args5]",
+        "tests.test_delivery::test_occupied_port_does_not_create_database_or_fallback",
+        "tests.test_delivery::test_unbuilt_preview_fails_before_creating_database",
+        "tests.test_delivery::test_normal_preview_exit_closes_before_cleanup",
+        "tests.test_delivery::test_real_preview_signal_shutdown_cleans_only_its_database[15]",
+        "tests.test_delivery::test_real_preview_signal_shutdown_cleans_only_its_database[2]",
+        "tests.test_delivery::test_runtime_probe_exits_with_real_versions_and_cleanup"
+      ],
+      "failure_reasons": [],
+      "generated_outputs": {},
+      "report": {
+        "hash": "2b8be18488dcc568d95c2114c6bc37569fc07a036851d1772e22e027a01e9868",
+        "kind": "junit",
+        "bytes": 2258
+      },
+      "archived_report": "docs/evidence/build-recovery-backend.xml"
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "test:e2e"
+      ],
+      "cwd": "frontend",
+      "process_exit_code": 1,
+      "exit_code": 1,
+      "tests": 12,
+      "test_ids": [
+        "dev-proxy.spec.ts::[mobile-375] T004-B08 Vite 业务别名通过同源 /api 代理读写隔离后端",
+        "failure-feedback.spec.ts::[mobile-375] T004-B02 创建失败保留草稿，解锁后直接重试",
+        "failure-feedback.spec.ts::[mobile-375] T004-B03 编辑失败保留原值和草稿，可直接保存重试",
+        "failure-feedback.spec.ts::[mobile-375] T004-B04 状态切换失败保留未完成状态，可直接重试",
+        "failure-feedback.spec.ts::[mobile-375] T004-B05 删除失败保留任务和确认框，可直接重试",
+        "failure-feedback.spec.ts::[mobile-375] T004-B06 首次加载展示等待和失败状态，按钮可重试恢复",
+        "layout-keyboard.spec.ts::[mobile-375] T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作",
+        "task-flow.spec.ts::[mobile-375] T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化",
+        "dev-proxy.spec.ts::[desktop-1280] T004-B08 Vite 业务别名通过同源 /api 代理读写隔离后端",
+        "failure-feedback.spec.ts::[desktop-1280] T004-B02 创建失败保留草稿，解锁后直接重试",
+        "failure-feedback.spec.ts::[desktop-1280] T004-B03 编辑失败保留原值和草稿，可直接保存重试",
+        "failure-feedback.spec.ts::[desktop-1280] T004-B04 状态切换失败保留未完成状态，可直接重试",
+        "failure-feedback.spec.ts::[desktop-1280] T004-B05 删除失败保留任务和确认框，可直接重试",
+        "failure-feedback.spec.ts::[desktop-1280] T004-B06 首次加载展示等待和失败状态，按钮可重试恢复",
+        "layout-keyboard.spec.ts::[desktop-1280] T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作",
+        "task-flow.spec.ts::[desktop-1280] T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化"
+      ],
+      "passed_test_ids": [
+        "dev-proxy.spec.ts::[mobile-375] T004-B08 Vite 业务别名通过同源 /api 代理读写隔离后端",
+        "failure-feedback.spec.ts::[mobile-375] T004-B02 创建失败保留草稿，解锁后直接重试",
+        "failure-feedback.spec.ts::[mobile-375] T004-B03 编辑失败保留原值和草稿，可直接保存重试",
+        "failure-feedback.spec.ts::[mobile-375] T004-B04 状态切换失败保留未完成状态，可直接重试",
+        "failure-feedback.spec.ts::[mobile-375] T004-B05 删除失败保留任务和确认框，可直接重试",
+        "failure-feedback.spec.ts::[mobile-375] T004-B06 首次加载展示等待和失败状态，按钮可重试恢复",
+        "dev-proxy.spec.ts::[desktop-1280] T004-B08 Vite 业务别名通过同源 /api 代理读写隔离后端",
+        "failure-feedback.spec.ts::[desktop-1280] T004-B02 创建失败保留草稿，解锁后直接重试",
+        "failure-feedback.spec.ts::[desktop-1280] T004-B03 编辑失败保留原值和草稿，可直接保存重试",
+        "failure-feedback.spec.ts::[desktop-1280] T004-B04 状态切换失败保留未完成状态，可直接重试",
+        "failure-feedback.spec.ts::[desktop-1280] T004-B05 删除失败保留任务和确认框，可直接重试",
+        "failure-feedback.spec.ts::[desktop-1280] T004-B06 首次加载展示等待和失败状态，按钮可重试恢复"
+      ],
+      "failure_reasons": [
+        "test_report_failed",
+        "process_failed"
+      ],
+      "generated_outputs": {},
+      "report": {
+        "hash": "c4e67769406e714d5a0cdf3a1d8e09626b916dbe1d7ff850d9b1a7a1057a00ba",
+        "kind": "junit",
+        "bytes": 18986
+      },
+      "archived_report": "docs/evidence/build-recovery-browser.xml"
+    }
+  ],
+  "application_preview": {
+    "views": 4,
+    "executed_actions": 84,
+    "errors": 0
+  },
+  "remaining_browser_failures": [
+    "layout-keyboard.spec.ts::[mobile-375] T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作",
+    "task-flow.spec.ts::[mobile-375] T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化",
+    "layout-keyboard.spec.ts::[desktop-1280] T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作",
+    "task-flow.spec.ts::[desktop-1280] T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化"
+  ]
+}

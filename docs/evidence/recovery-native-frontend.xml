@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="8" failures="0" errors="0" time="0.608328938">
+    <testsuite name="src/App.test.tsx" timestamp="2026-10-15T04:35:18.589Z" hostname="LAPTOP-UE3M8TAU" tests="4" failures="0" errors="0" skipped="0" time="0.567764358">
+        <testcase classname="src/App.test.tsx" name="approved task interface &gt; shows loading, load error/retry and empty states, aborting and disregarding obsolete loads" time="0.191397332">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="approved task interface &gt; validates before requesting, accepts 80 Unicode code points and renders created titles as plain text" time="0.139109042">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="approved task interface &gt; guards duplicate pending creation, retains exact text on failure and permits explicit retry" time="0.110274701">
+        </testcase>
+        <testcase classname="src/App.test.tsx" name="approved task interface &gt; retains confirmed completion while pending, retries the same boolean and supports both keyboard transitions" time="0.12560052">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/core.test.ts" timestamp="2026-10-15T04:35:18.592Z" hostname="LAPTOP-UE3M8TAU" tests="4" failures="0" errors="0" skipped="0" time="0.04056458">
+        <testcase classname="src/core.test.ts" name="domain and real JSON client &gt; normalizes and validates all shared Unicode, NUL, type and length boundaries" time="0.003695061">
+        </testcase>
+        <testcase classname="src/core.test.ts" name="domain and real JSON client &gt; serializes same-origin requests and round-trips every accepted title exactly" time="0.021050651">
+        </testcase>
+        <testcase classname="src/core.test.ts" name="domain and real JSON client &gt; reports HTTP and network failures safely, preserves cancellation and never retries mutations" time="0.004554166">
+        </testcase>
+        <testcase classname="src/core.test.ts" name="domain and real JSON client &gt; rejects malformed JSON, invalid task shapes and inconsistent mutation responses" time="0.010116692">
+        </testcase>
+    </testsuite>
+</testsuites>

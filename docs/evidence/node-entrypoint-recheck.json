@@ -1,0 +1,72 @@
+{
+  "run": "run_10130fdc659d490a",
+  "task": "T-FRONTEND-CORE",
+  "source_unchanged": true,
+  "implementation_round_after_recheck": 2,
+  "before": {
+    "argv": [
+      "node",
+      "node_modules/vitest/vitest.mjs",
+      "run",
+      "src/core.test.ts",
+      "--configLoader",
+      "runner"
+    ],
+    "exit_code": 1,
+    "process_exit_code": 0,
+    "tests": 0,
+    "report_status": "not_required",
+    "failure_reasons": [
+      "unsupported_test_runner",
+      "insufficient_test_cases"
+    ],
+    "checker_version": "verification-v5",
+    "source_hash": "73021b753459606421680ca851f26c350e34e519ce943cd3b1ceda8393659df6"
+  },
+  "after": {
+    "argv": [
+      "node",
+      "node_modules/vitest/vitest.mjs",
+      "run",
+      "src/core.test.ts",
+      "--configLoader",
+      "runner"
+    ],
+    "effective_argv": [
+      "/tmp/aa2-recovery-native-00w026ql/project/.aa2/environments/87f6df0593d95b2c7e8e49e8c1aa1900250f36d41baac708a7c1f1caaa02a100/bin/node",
+      "node_modules/vitest/vitest.mjs",
+      "run",
+      "src/core.test.ts",
+      "--configLoader",
+      "runner",
+      "--reporter=default",
+      "--reporter=junit",
+      "--outputFile.junit=/tmp/aa2-recovery-native-00w026ql/project/.aa2/tmp/check_fce2ea3f961443e7/junit.xml"
+    ],
+    "exit_code": 0,
+    "process_exit_code": 0,
+    "tests": 4,
+    "skipped": 0,
+    "report_status": "valid",
+    "failure_reasons": [],
+    "checker_version": "verification-v6",
+    "source_hash": "73021b753459606421680ca851f26c350e34e519ce943cd3b1ceda8393659df6",
+    "test_ids": [
+      "src/core.test.ts::domain and real JSON client > normalizes and validates all shared Unicode, NUL, type and length boundaries",
+      "src/core.test.ts::domain and real JSON client > serializes same-origin requests and round-trips every accepted title exactly",
+      "src/core.test.ts::domain and real JSON client > reports HTTP and network failures safely, preserves cancellation and never retries mutations",
+      "src/core.test.ts::domain and real JSON client > rejects malformed JSON, invalid task shapes and inconsistent mutation responses"
+    ],
+    "passed_test_ids": [
+      "src/core.test.ts::domain and real JSON client > normalizes and validates all shared Unicode, NUL, type and length boundaries",
+      "src/core.test.ts::domain and real JSON client > serializes same-origin requests and round-trips every accepted title exactly",
+      "src/core.test.ts::domain and real JSON client > reports HTTP and network failures safely, preserves cancellation and never retries mutations",
+      "src/core.test.ts::domain and real JSON client > rejects malformed JSON, invalid task shapes and inconsistent mutation responses"
+    ],
+    "report": {
+      "hash": "4fe0896c47fecb8270a8bbfd499b890d7898a9fe5425fcaa2778bc4682f90ac2",
+      "kind": "junit",
+      "bytes": 1157
+    }
+  }
+}

@@ -1,0 +1,724 @@
+{
+  "project": "/tmp/aa2-recovery-native-00w026ql/project",
+  "run": "run_10130fdc659d490a",
+  "status": "SUCCEEDED",
+  "stage": "deliver",
+  "real_provider": true,
+  "source_profiles": "existing demo user profiles; no model or permission overrides",
+  "pause_resume_verified": true,
+  "prototype_browser": {
+    "error": "",
+    "viewports": [
+      390,
+      1440
+    ],
+    "scenarios": 14,
+    "executed_actions": 124
+  },
+  "pending_approval": [],
+  "usage": {
+    "input_tokens": 13599328,
+    "output_tokens": 306773,
+    "cached_tokens": 10797568,
+    "reasoning_tokens": 83877,
+    "total_tokens": 13906101,
+    "complete": false
+  },
+  "full_delivery_verified": true,
+  "live_demo_modified": false,
+  "human_approval": {
+    "run_id": "run_10130fdc659d490a",
+    "question_id": "question_bb5df0a0929346b0",
+    "answer": "1",
+    "decision": "approve",
+    "artifact_hash": "3c93c52d06397992ddc2359822578b2b4309adf768cecd572de91fb6921a74cb",
+    "binding": "content_and_actions",
+    "content_hash": "90ec6e712572f6c26247aec0287c403f30a3ba1ba5cfcf94800e70e94a18e0b1",
+    "actions_hash": "ebea2d1c351f9e4794d76dd96a8ad98d73bcf3e88c37c94fa4d2b81cbdb0e7e9"
+  },
+  "observed_at": "2026-10-15T04:41:26.301779+00:00",
+  "accepted_tasks": [
+    "T-BACKEND",
+    "T-FRONTEND-CORE",
+    "T-INTEGRATION",
+    "T-UI"
+  ],
+  "task_evidence": {
+    "T-BACKEND": {
+      "commit": "3d2b8acab228eb78f22ac9534a044150c12090aa",
+      "rounds": {
+        "round": 2,
+        "stalled": 0,
+        "failure": ""
+      },
+      "review_approved": true,
+      "checks": [
+        {
+          "argv": [
+            "python",
+            "-B",
+            "-m",
+            "pytest",
+            "tests/backend",
+            "-p",
+            "no:cacheprovider"
+          ],
+          "tests": 5,
+          "skipped": 0,
+          "process_exit_code": 0,
+          "exit_code": 0,
+          "report_status": "valid",
+          "source_hash": "dcecd54f319e7b9ed064300e4bdbbd7cfdfb99e86b806ab45efab19e049469f9",
+          "checker_version": "verification-v5",
+          "report": {
+            "hash": "3d98d4fe89b4de19fa275b8ab4672df6838572c6605701be8259993285822ac7",
+            "kind": "junit",
+            "bytes": 851
+          }
+        }
+      ]
+    },
+    "T-FRONTEND-CORE": {
+      "commit": "9161a4dfe8998f5945b888b00c1c7e01a1259663",
+      "rounds": {
+        "round": 2,
+        "stalled": 0,
+        "failure": "6d75123ef9fc697b9aa7d9fb65abfbc8b86aa230bc683bbf1247f977dff7fdd3"
+      },
+      "review_approved": true,
+      "checks": [
+        {
+          "argv": [
+            "npm",
+            "run",
+            "typecheck"
+          ],
+          "tests": 0,
+          "skipped": 0,
+          "process_exit_code": 0,
+          "exit_code": 0,
+          "report_status": "not_required",
+          "source_hash": "73021b753459606421680ca851f26c350e34e519ce943cd3b1ceda8393659df6",
+          "checker_version": "verification-v6",
+          "report": {}
+        },
+        {
+          "argv": [
+            "node",
+            "node_modules/vitest/vitest.mjs",
+            "run",
+            "src/core.test.ts",
+            "--configLoader",
+            "runner"
+          ],
+          "tests": 4,
+          "skipped": 0,
+          "process_exit_code": 0,
+          "exit_code": 0,
+          "report_status": "valid",
+          "source_hash": "73021b753459606421680ca851f26c350e34e519ce943cd3b1ceda8393659df6",
+          "checker_version": "verification-v6",
+          "report": {
+            "hash": "4fe0896c47fecb8270a8bbfd499b890d7898a9fe5425fcaa2778bc4682f90ac2",
+            "kind": "junit",
+            "bytes": 1157
+          }
+        }
+      ]
+    },
+    "T-INTEGRATION": {
+      "commit": "62f28eb0c8a618ad1374e3f44b6da47df7640dea",
+      "rounds": {
+        "round": 1,
+        "stalled": 0,
+        "failure": ""
+      },
+      "review_approved": true,
+      "checks": [
+        {
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "tests": 0,
+          "skipped": 0,
+          "process_exit_code": 0,
+          "exit_code": 0,
+          "report_status": "not_required",
+          "source_hash": "5d974a1cf68a8b4dfe1c75388be84061ee656123f97c5f296b6f8e021cf80054",
+          "checker_version": "verification-v6",
+          "report": {}
+        },
+        {
+          "argv": [
+            "python",
+            "-B",
+            "-m",
+            "pytest",
+            "tests/integration",
+            "-p",
+            "no:cacheprovider"
+          ],
+          "tests": 2,
+          "skipped": 0,
+          "process_exit_code": 0,
+          "exit_code": 0,
+          "report_status": "valid",
+          "source_hash": "5d974a1cf68a8b4dfe1c75388be84061ee656123f97c5f296b6f8e021cf80054",
+          "checker_version": "verification-v6",
+          "report": {
+            "hash": "79b5fdaf6b49ae34be507e8594bbc58f7c20b0c31f510162967b07f46aa8749e",
+            "kind": "junit",
+            "bytes": 511
+          }
+        },
+        {
+          "argv": [
+            "node",
+            "node_modules/@playwright/test/cli.js",
+            "test"
+          ],
+          "tests": 2,
+          "skipped": 0,
+          "process_exit_code": 0,
+          "exit_code": 0,
+          "report_status": "valid",
+          "source_hash": "5d974a1cf68a8b4dfe1c75388be84061ee656123f97c5f296b6f8e021cf80054",
+          "checker_version": "verification-v6",
+          "report": {
+            "hash": "ace6c9af9b66e47c0e31e1a677d88b916f730fc19cd17669100d1d7a787c557d",
+            "kind": "junit",
+            "bytes": 740
+          }
+        }
+      ]
+    },
+    "T-UI": {
+      "commit": "607727cc7a4d9784466d86d27d54412a00d49cd4",
+      "rounds": {
+        "round": 1,
+        "stalled": 0,
+        "failure": ""
+      },
+      "review_approved": true,
+      "checks": [
+        {
+          "argv": [
+            "npm",
+            "run",
+            "typecheck"
+          ],
+          "tests": 0,
+          "skipped": 0,
+          "process_exit_code": 0,
+          "exit_code": 0,
+          "report_status": "not_required",
+          "source_hash": "c2d7333bbf3490e2b684277695572a580109323d143f3c4315215d6eb259f68b",
+          "checker_version": "verification-v6",
+          "report": {}
+        },
+        {
+          "argv": [
+            "node",
+            "node_modules/vitest/vitest.mjs",
+            "run",
+            "src/App.test.tsx",
+            "--configLoader",
+            "runner"
+          ],
+          "tests": 4,
+          "skipped": 0,
+          "process_exit_code": 0,
+          "exit_code": 0,
+          "report_status": "valid",
+          "source_hash": "c2d7333bbf3490e2b684277695572a580109323d143f3c4315215d6eb259f68b",
+          "checker_version": "verification-v6",
+          "report": {
+            "hash": "71e2b4d5b2f7820c41ab6ec8cdb56f1753caf13e5fc602be52bae57d71bfe391",
+            "kind": "junit",
+            "bytes": 1207
+          }
+        }
+      ]
+    }
+  },
+  "recoveries": [
+    {
+      "version": 1,
+      "failure_id": "acf86b2400d93bd9fcad22b810d5c11f9d9b297a9ef17f6d6ce628c9d3f5fc91",
+      "action": "design",
+      "task_ids": [
+        "T-BACKEND"
+      ],
+      "evidence_refs": [
+        "develop/task/T-BACKEND",
+        "invocation/develop/task/T-BACKEND"
+      ],
+      "reason": "Confirmed a design conflict: R-CREATE accepts U+0000 within a 1–80-code-point title, but the supplied architecture's SQLite CHECK(length(title) BETWEEN 1 AND 80) rejects a title containing only U+0000. An independent in-memory probe reproduced that constraint failure. Revise the architecture's constraint to accommodate embedded NUL while preserving authoritative application validation, then resume T-BACKEND with NUL boundary and persistence assertions. Do not narrow accepted titles. The workspace contains no backend implementation or tests to audit; no pytest success is claimed. Preserve the approved prototype and its verified human receipt.",
+      "budget_owner": "T-BACKEND"
+    },
+    {
+      "version": 1,
+      "failure_id": "1746c21e4957ec53a8e66467b154768000b7128674f588e91eb07995e468a4dc",
+      "action": "recheck",
+      "task_ids": [
+        "T-FRONTEND-CORE"
+      ],
+      "evidence_refs": [
+        "develop/task/T-FRONTEND-CORE",
+        "invocation/develop/task/T-FRONTEND-CORE"
+      ],
+      "reason": "重新准备声明的构建产物并采集原始检查证据",
+      "budget_owner": "T-FRONTEND-CORE"
+    }
+  ],
+  "supervised_restarts": [
+    {
+      "stage": "develop/task/T-FRONTEND-CORE",
+      "reason": "about ten minutes without new visible output or native session records",
+      "method": "SIGINT to verified temporary-project controller, then aa2 run",
+      "retained": {
+        "accepted_tasks": [
+          "T-BACKEND"
+        ],
+        "frontend_round": 1,
+        "phase": "implementing",
+        "approval_question": "question_bb5df0a0929346b0"
+      },
+      "actual_interrupted_operation": "develop/task/T-FRONTEND-CORE/test-change-review",
+      "proposal_reused_on_resume": true,
+      "note": "The long implementation returned immediately before SIGINT; the independent change review was interrupted and rerun. The implementation proposal and business round were retained."
+    }
+  ],
+  "outcome": "DELIVERED",
+  "task_rounds": {
+    "T-BACKEND": {
+      "round": 2,
+      "stalled": 0,
+      "failure": ""
+    },
+    "T-FRONTEND-CORE": {
+      "round": 2,
+      "stalled": 0,
+      "failure": "6d75123ef9fc697b9aa7d9fb65abfbc8b86aa230bc683bbf1247f977dff7fdd3"
+    },
+    "T-UI": {
+      "round": 1,
+      "stalled": 0,
+      "failure": ""
+    },
+    "T-INTEGRATION": {
+      "round": 1,
+      "stalled": 0,
+      "failure": ""
+    }
+  },
+  "final_checks": [
+    {
+      "argv": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "cwd": "frontend",
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "tests": 0,
+      "skipped": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "checker_version": "verification-v6",
+      "source_hash": "26a28577a2a7212d4fca2595a88d845312b580e24d89c446da561089a10b9693",
+      "environment_hash": "6b900e0fd0e35a4ad8b005a7270a5d11de544ac65a4c58cb6a07598e81dbf856",
+      "generated_outputs": {
+        "frontend/dist": "6d811e42ed47efff65c329005b663fe003fcf148b61f6239e83850aa3dfca003"
+      }
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/backend",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "tests": 5,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "checker_version": "verification-v6",
+      "source_hash": "26a28577a2a7212d4fca2595a88d845312b580e24d89c446da561089a10b9693",
+      "environment_hash": "6b900e0fd0e35a4ad8b005a7270a5d11de544ac65a4c58cb6a07598e81dbf856",
+      "generated_outputs": {}
+    },
+    {
+      "argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/core.test.ts",
+        "src/App.test.tsx",
+        "--configLoader",
+        "runner"
+      ],
+      "cwd": "frontend",
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "tests": 8,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "checker_version": "verification-v6",
+      "source_hash": "26a28577a2a7212d4fca2595a88d845312b580e24d89c446da561089a10b9693",
+      "environment_hash": "6b900e0fd0e35a4ad8b005a7270a5d11de544ac65a4c58cb6a07598e81dbf856",
+      "generated_outputs": {}
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-m",
+        "pytest",
+        "tests/integration",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "tests": 2,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "checker_version": "verification-v6",
+      "source_hash": "26a28577a2a7212d4fca2595a88d845312b580e24d89c446da561089a10b9693",
+      "environment_hash": "6b900e0fd0e35a4ad8b005a7270a5d11de544ac65a4c58cb6a07598e81dbf856",
+      "generated_outputs": {}
+    },
+    {
+      "argv": [
+        "node",
+        "node_modules/@playwright/test/cli.js",
+        "test"
+      ],
+      "cwd": "frontend",
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "tests": 2,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "checker_version": "verification-v6",
+      "source_hash": "26a28577a2a7212d4fca2595a88d845312b580e24d89c446da561089a10b9693",
+      "environment_hash": "6b900e0fd0e35a4ad8b005a7270a5d11de544ac65a4c58cb6a07598e81dbf856",
+      "generated_outputs": {}
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "cwd": "frontend",
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "tests": 0,
+      "skipped": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "checker_version": "verification-v6",
+      "source_hash": "26a28577a2a7212d4fca2595a88d845312b580e24d89c446da561089a10b9693",
+      "environment_hash": "6b900e0fd0e35a4ad8b005a7270a5d11de544ac65a4c58cb6a07598e81dbf856",
+      "generated_outputs": {}
+    },
+    {
+      "argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/core.test.ts",
+        "--configLoader",
+        "runner"
+      ],
+      "cwd": "frontend",
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "tests": 4,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "checker_version": "verification-v6",
+      "source_hash": "26a28577a2a7212d4fca2595a88d845312b580e24d89c446da561089a10b9693",
+      "environment_hash": "6b900e0fd0e35a4ad8b005a7270a5d11de544ac65a4c58cb6a07598e81dbf856",
+      "generated_outputs": {}
+    },
+    {
+      "argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/App.test.tsx",
+        "--configLoader",
+        "runner"
+      ],
+      "cwd": "frontend",
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "tests": 4,
+      "skipped": 0,
+      "report_status": "valid",
+      "failure_reasons": [],
+      "checker_version": "verification-v6",
+      "source_hash": "26a28577a2a7212d4fca2595a88d845312b580e24d89c446da561089a10b9693",
+      "environment_hash": "6b900e0fd0e35a4ad8b005a7270a5d11de544ac65a4c58cb6a07598e81dbf856",
+      "generated_outputs": {}
+    },
+    {
+      "argv": [
+        "node",
+        "-e",
+        "const assert = require('node:assert/strict'); const [major, minor] = process.versions.node.split('.').map(Number); assert.ok(major === 22 && minor >= 12, 'Node 22.12+ within Node 22 is required'); for (const name of ['react', 'react-dom', 'typescript', 'vite', 'vitest', '@playwright/test']) require.resolve(name); console.log('Node runtime and frontend dependencies available');"
+      ],
+      "cwd": "frontend",
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "tests": 0,
+      "skipped": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "checker_version": "verification-v6",
+      "source_hash": "26a28577a2a7212d4fca2595a88d845312b580e24d89c446da561089a10b9693",
+      "environment_hash": "6b900e0fd0e35a4ad8b005a7270a5d11de544ac65a4c58cb6a07598e81dbf856",
+      "generated_outputs": {}
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-c",
+        "import sys\nfrom pathlib import Path\nfrom tempfile import TemporaryDirectory\nfrom fastapi.testclient import TestClient\nfrom backend.preview import create_app\nassert sys.version_info[:2] == (3, 12), 'Python 3.12 is required'\nwith TemporaryDirectory(prefix='task-list-probe-') as directory:\n    app = create_app(db_path=Path(directory) / 'tasks.sqlite3', static_dir=Path('frontend/dist').resolve())\n    with TestClient(app) as client:\n        response = client.get('/api/tasks')\n        assert response.status_code == 200 and response.json() == []\n        page = client.get('/task-list/index.html')\n        assert page.status_code == 200 and 'text/html' in page.headers.get('content-type', '')\nprint('Application startup and built page available with temporary storage')"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "tests": 0,
+      "skipped": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "checker_version": "verification-v6",
+      "source_hash": "26a28577a2a7212d4fca2595a88d845312b580e24d89c446da561089a10b9693",
+      "environment_hash": "6b900e0fd0e35a4ad8b005a7270a5d11de544ac65a4c58cb6a07598e81dbf856",
+      "generated_outputs": {}
+    }
+  ],
+  "final_review": {
+    "approved": true,
+    "summary": "Pre-publication candidate approved. Source and test audit supports all 11 requirements, including NUL-safe validation and persistence, schema incompatibility protection, real API integration and approved responsive UI equivalence. Reviewed JUnit reports confirm 5 backend, 8 frontend, 2 integration and 2 browser tests passed without skips. Controller evidence also confirms build, typecheck and runtime probes passed, with build preceding asset consumers. Human approval is recorded by question_bb5df0a0929346b0 and artifact_hash 3c93c52d06397992ddc2359822578b2b4309adf768cecd572de91fb6921a74cb. No product tests were rerun during this audit; primary-workdir installation remains the controller’s subsequent gate.",
+    "findings": []
+  },
+  "application_browser": [
+    {
+      "route": "/task-list/index.html",
+      "viewport": 1440,
+      "actions": 20,
+      "errors": [],
+      "image_artifact": {
+        "hash": "172969d49043e49e72d26a79cd09344d4bc8cd876fd6c9155685c4624bf5ac52",
+        "kind": "screenshot",
+        "bytes": 33983
+      }
+    },
+    {
+      "route": "/task-list/index.html",
+      "viewport": 390,
+      "actions": 20,
+      "errors": [],
+      "image_artifact": {
+        "hash": "df0e53f5f9ae8948d0c455de71cc68779bc3e28ce124ac950941dd19607e145a",
+        "kind": "screenshot",
+        "bytes": 30921
+      }
+    }
+  ],
+  "runtime_checks": [
+    {
+      "argv": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "cwd": "frontend",
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "tests": 0,
+      "skipped": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "checker_version": "verification-v6",
+      "source_hash": "26a28577a2a7212d4fca2595a88d845312b580e24d89c446da561089a10b9693",
+      "environment_hash": "6b900e0fd0e35a4ad8b005a7270a5d11de544ac65a4c58cb6a07598e81dbf856",
+      "generated_outputs": {
+        "frontend/dist": "6d811e42ed47efff65c329005b663fe003fcf148b61f6239e83850aa3dfca003"
+      }
+    },
+    {
+      "argv": [
+        "node",
+        "-e",
+        "const assert = require('node:assert/strict'); const [major, minor] = process.versions.node.split('.').map(Number); assert.ok(major === 22 && minor >= 12, 'Node 22.12+ within Node 22 is required'); for (const name of ['react', 'react-dom', 'typescript', 'vite', 'vitest', '@playwright/test']) require.resolve(name); console.log('Node runtime and frontend dependencies available');"
+      ],
+      "cwd": "frontend",
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "tests": 0,
+      "skipped": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "checker_version": "verification-v6",
+      "source_hash": "26a28577a2a7212d4fca2595a88d845312b580e24d89c446da561089a10b9693",
+      "environment_hash": "6b900e0fd0e35a4ad8b005a7270a5d11de544ac65a4c58cb6a07598e81dbf856",
+      "generated_outputs": {}
+    },
+    {
+      "argv": [
+        "python",
+        "-B",
+        "-c",
+        "import sys\nfrom pathlib import Path\nfrom tempfile import TemporaryDirectory\nfrom fastapi.testclient import TestClient\nfrom backend.preview import create_app\nassert sys.version_info[:2] == (3, 12), 'Python 3.12 is required'\nwith TemporaryDirectory(prefix='task-list-probe-') as directory:\n    app = create_app(db_path=Path(directory) / 'tasks.sqlite3', static_dir=Path('frontend/dist').resolve())\n    with TestClient(app) as client:\n        response = client.get('/api/tasks')\n        assert response.status_code == 200 and response.json() == []\n        page = client.get('/task-list/index.html')\n        assert page.status_code == 200 and 'text/html' in page.headers.get('content-type', '')\nprint('Application startup and built page available with temporary storage')"
+      ],
+      "cwd": ".",
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "tests": 0,
+      "skipped": 0,
+      "report_status": "not_required",
+      "failure_reasons": [],
+      "checker_version": "verification-v6",
+      "source_hash": "26a28577a2a7212d4fca2595a88d845312b580e24d89c446da561089a10b9693",
+      "environment_hash": "6b900e0fd0e35a4ad8b005a7270a5d11de544ac65a4c58cb6a07598e81dbf856",
+      "generated_outputs": {}
+    }
+  ],
+  "runtime_browser": [
+    {
+      "route": "/task-list/index.html",
+      "viewport": 1440,
+      "actions": 20,
+      "errors": [],
+      "image_artifact": {
+        "hash": "d67fc042e3ca477bde1c0cff5078210be159f4c6cb4da004bae7ca53e2e1eb92",
+        "kind": "screenshot",
+        "bytes": 33981
+      }
+    },
+    {
+      "route": "/task-list/index.html",
+      "viewport": 390,
+      "actions": 20,
+      "errors": [],
+      "image_artifact": {
+        "hash": "df0e53f5f9ae8948d0c455de71cc68779bc3e28ce124ac950941dd19607e145a",
+        "kind": "screenshot",
+        "bytes": 30921
+      }
+    }
+  ],
+  "runtime_versions": {
+    "python": "Python 3.12.15",
+    "node": "v22.23.2"
+  },
+  "final_reports": {
+    "backend": {
+      "file": "docs/evidence/recovery-native-backend.xml",
+      "tests": 5,
+      "skipped": 0,
+      "report_hash": "656c44cf44a79cb764b5294b3db8e28a1cd27beec44253088f4268288d8103f9"
+    },
+    "frontend": {
+      "file": "docs/evidence/recovery-native-frontend.xml",
+      "tests": 8,
+      "skipped": 0,
+      "report_hash": "bbdb6be3c80b691d3eb255d4c721406202b5c936f2ab7224fc85e780f24f4e05"
+    },
+    "integration": {
+      "file": "docs/evidence/recovery-native-integration.xml",
+      "tests": 2,
+      "skipped": 0,
+      "report_hash": "c533a72da2e78ee4a27c4c5fa99718afe042cd173abe037dc00fdeee9d6e817a"
+    },
+    "playwright": {
+      "file": "docs/evidence/recovery-native-playwright.xml",
+      "tests": 2,
+      "skipped": 0,
+      "report_hash": "24a4773aecbd1c611dc573932498e2010aac3c6f6bd091aafc08581b31a360ba"
+    }
+  },
+  "delivery": {
+    "target": "main",
+    "commit": "7d0a5fd651b3103ab6cae1446b2f7a54c108ac2a",
+    "source_hash": "26a28577a2a7212d4fca2595a88d845312b580e24d89c446da561089a10b9693",
+    "receipt_digest": "c5b6a15d24fe227cbec3ae0c7c3a6f101369f6809f41b9bd3bc48502c5cd2c04",
+    "primary_clean": true,
+    "worktrees_reclaimed": true,
+    "private_refs_reclaimed": true,
+    "runtime_resources_pinned": [
+      "/tmp/aa2-recovery-native-00w026ql/project/.aa2/environments/87f6df0593d95b2c7e8e49e8c1aa1900250f36d41baac708a7c1f1caaa02a100"
+    ],
+    "cleanup_pending": false
+  },
+  "pause_events": [
+    {
+      "time": 1792029976.1971292,
+      "kind": "run.updated"
+    },
+    {
+      "time": 1792036415.2600722,
+      "kind": "run.updated"
+    },
+    {
+      "time": 1792037132.6832576,
+      "kind": "run.updated"
+    },
+    {
+      "time": 1792037748.9180427,
+      "kind": "run.updated"
+    }
+  ],
+  "validation_scope": "Supervised native workflow: controller fixes and resumptions occurred during the run; not an unattended-success-rate benchmark.",
+  "provider_settings": [
+    {
+      "provider": "codex",
+      "model": "gpt-6-astra",
+      "effort": "high"
+    },
+    {
+      "provider": "codex",
+      "model": "gpt-6-astra",
+      "effort": "max"
+    },
+    {
+      "provider": "codex",
+      "model": "gpt-6-astra",
+      "effort": "medium"
+    }
+  ],
+  "prompt_versions": [
+    "2026-10-15.2",
+    "2026-10-15.3"
+  ],
+  "controller_final_regression": {
+    "tests": 446,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 344.68,
+    "junit": "docs/evidence/recovery-suite.xml",
+    "additional_validation": "Retained-task baseline refresh, conflict preservation, partial-patch recovery and semantic rename were verified with real Git fault-injection tests after the native delivery."
+  }
+}

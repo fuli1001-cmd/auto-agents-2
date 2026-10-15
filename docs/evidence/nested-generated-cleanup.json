@@ -1,0 +1,10 @@
+{
+  "run": "run_10130fdc659d490a",
+  "task": "T-FRONTEND-CORE",
+  "source_hash_unchanged": "73021b753459606421680ca851f26c350e34e519ce943cd3b1ceda8393659df6",
+  "accepted_commit": "9161a4dfe8998f5945b888b00c1c7e01a1259663",
+  "integrated_before_cleanup": true,
+  "worktree_retired": true,
+  "ignored_generated_directory": "frontend/node_modules",
+  "unarchived_source_guard_unchanged": true
+}

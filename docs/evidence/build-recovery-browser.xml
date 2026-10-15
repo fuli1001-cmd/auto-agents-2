@@ -1,0 +1,252 @@
+<testsuites id="" name="" tests="16" failures="4" skipped="0" errors="0" time="31.383567">
+<testsuite name="dev-proxy.spec.ts" timestamp="2026-10-14T23:55:09.441Z" hostname="mobile-375" tests="1" failures="0" skipped="0" time="0.867" errors="0">
+<testcase name="[mobile-375] T004-B08 Vite 业务别名通过同源 /api 代理读写隔离后端" classname="dev-proxy.spec.ts" time="0.867">
+</testcase>
+</testsuite>
+<testsuite name="failure-feedback.spec.ts" timestamp="2026-10-14T23:55:09.441Z" hostname="mobile-375" tests="5" failures="0" skipped="0" time="3.329" errors="0">
+<testcase name="[mobile-375] T004-B02 创建失败保留草稿，解锁后直接重试" classname="failure-feedback.spec.ts" time="0.716">
+</testcase>
+<testcase name="[mobile-375] T004-B03 编辑失败保留原值和草稿，可直接保存重试" classname="failure-feedback.spec.ts" time="0.796">
+</testcase>
+<testcase name="[mobile-375] T004-B04 状态切换失败保留未完成状态，可直接重试" classname="failure-feedback.spec.ts" time="0.691">
+</testcase>
+<testcase name="[mobile-375] T004-B05 删除失败保留任务和确认框，可直接重试" classname="failure-feedback.spec.ts" time="0.738">
+</testcase>
+<testcase name="[mobile-375] T004-B06 首次加载展示等待和失败状态，按钮可重试恢复" classname="failure-feedback.spec.ts" time="0.388">
+</testcase>
+</testsuite>
+<testsuite name="layout-keyboard.spec.ts" timestamp="2026-10-14T23:55:09.441Z" hostname="mobile-375" tests="1" failures="1" skipped="0" time="6.19" errors="0">
+<testcase name="[mobile-375] T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作" classname="layout-keyboard.spec.ts" time="6.19">
+<failure message="layout-keyboard.spec.ts:4:1 T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作" type="FAILURE">
+<![CDATA[  [mobile-375] › layout-keyboard.spec.ts:4:1 › T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作 ─────────────────
+
+    Error: expect(locator).toBeFocused() failed
+
+    Locator:  getByRole('button', { name: '确认删除', exact: true })
+    Expected: focused
+    Received: inactive
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toBeFocused" with timeout 5000ms
+      - waiting for getByRole('button', { name: '确认删除', exact: true })
+        9 × locator resolved to <button type="button" class="danger" id="confirm-delete">确认删除</button>
+          - unexpected value "inactive"
+
+
+      75 |   await noOverflow(page);
+      76 |   await page.keyboard.press('Shift+Tab');
+    > 77 |   await expect(confirm).toBeFocused();
+         |                         ^
+      78 |   await page.keyboard.press('Tab');
+      79 |   await expect(cancel).toBeFocused();
+      80 |   await page.keyboard.press('Escape');
+        at /tmp/aa2-build-replay-7d1uxue2/.aa2/worktrees/run_f8a82b6d34f24434/T004-p6/frontend/e2e/layout-keyboard.spec.ts:77:25
+
+    attachment #2: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../../tmp/check_f5a502887f4b4376/playwright-results/layout-keyboard-T004-B07-长中文与-200-字符标题换行，真实键盘完成主要操作-mobile-375/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../../tmp/check_f5a502887f4b4376/playwright-results/layout-keyboard-T004-B07-长中文与-200-字符标题换行，真实键盘完成主要操作-mobile-375/error-context.md
+
+    attachment #4: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../../tmp/check_f5a502887f4b4376/playwright-results/layout-keyboard-T004-B07-长中文与-200-字符标题换行，真实键盘完成主要操作-mobile-375/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../../tmp/check_f5a502887f4b4376/playwright-results/layout-keyboard-T004-B07-长中文与-200-字符标题换行，真实键盘完成主要操作-mobile-375/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+]]>
+</failure>
+<system-out>
+<![CDATA[
+[[ATTACHMENT|playwright-results/layout-keyboard-T004-B07-长中文与-200-字符标题换行，真实键盘完成主要操作-mobile-375/test-failed-1.png]]
+
+[[ATTACHMENT|playwright-results/layout-keyboard-T004-B07-长中文与-200-字符标题换行，真实键盘完成主要操作-mobile-375/error-context.md]]
+
+[[ATTACHMENT|playwright-results/layout-keyboard-T004-B07-长中文与-200-字符标题换行，真实键盘完成主要操作-mobile-375/trace.zip]]
+]]>
+</system-out>
+</testcase>
+</testsuite>
+<testsuite name="task-flow.spec.ts" timestamp="2026-10-14T23:55:09.441Z" hostname="mobile-375" tests="1" failures="1" skipped="0" time="1.188" errors="0">
+<testcase name="[mobile-375] T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化" classname="task-flow.spec.ts" time="1.188">
+<failure message="task-flow.spec.ts:4:1 T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化" type="FAILURE">
+<![CDATA[  [mobile-375] › task-flow.spec.ts:4:1 › T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化 ────────────────────────────
+
+    Error: locator.check: Clicking the checkbox did not change its state
+    Call log:
+      - waiting for locator('#task-8').getByRole('checkbox')
+        - locator resolved to <input type="checkbox" data-action="toggle"/>
+      - attempting click action
+        - waiting for element to be visible, enabled and stable
+        - element is visible, enabled and stable
+        - scrolling into view if needed
+        - done scrolling
+        - performing click action
+        - click action done
+        - waiting for scheduled navigations to finish
+        - navigations have finished
+
+
+      22 |   await page.getByRole('button', { name: '保存修改', exact: true }).click();
+      23 |   await expect(row.locator('[data-role="title"]')).toHaveText(title);
+    > 24 |   await row.getByRole('checkbox').check();
+         |                                   ^
+      25 |   await expect(row.getByRole('checkbox')).toBeChecked();
+      26 |   await expect(row.locator('[data-role="status"]')).toHaveText('已完成');
+      27 |   await expect(row.locator('[data-role="title"]')).toHaveCSS('text-decoration-line', 'line-through');
+        at /tmp/aa2-build-replay-7d1uxue2/.aa2/worktrees/run_f8a82b6d34f24434/T004-p6/frontend/e2e/task-flow.spec.ts:24:35
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../../tmp/check_f5a502887f4b4376/playwright-results/task-flow-T004-B01-创建、编辑、完成、三种筛选和两次刷新持久化-mobile-375/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../../tmp/check_f5a502887f4b4376/playwright-results/task-flow-T004-B01-创建、编辑、完成、三种筛选和两次刷新持久化-mobile-375/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../../tmp/check_f5a502887f4b4376/playwright-results/task-flow-T004-B01-创建、编辑、完成、三种筛选和两次刷新持久化-mobile-375/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../../tmp/check_f5a502887f4b4376/playwright-results/task-flow-T004-B01-创建、编辑、完成、三种筛选和两次刷新持久化-mobile-375/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+]]>
+</failure>
+<system-out>
+<![CDATA[
+[[ATTACHMENT|playwright-results/task-flow-T004-B01-创建、编辑、完成、三种筛选和两次刷新持久化-mobile-375/test-failed-1.png]]
+
+[[ATTACHMENT|playwright-results/task-flow-T004-B01-创建、编辑、完成、三种筛选和两次刷新持久化-mobile-375/error-context.md]]
+
+[[ATTACHMENT|playwright-results/task-flow-T004-B01-创建、编辑、完成、三种筛选和两次刷新持久化-mobile-375/trace.zip]]
+]]>
+</system-out>
+</testcase>
+</testsuite>
+<testsuite name="dev-proxy.spec.ts" timestamp="2026-10-14T23:55:09.441Z" hostname="desktop-1280" tests="1" failures="0" skipped="0" time="0.858" errors="0">
+<testcase name="[desktop-1280] T004-B08 Vite 业务别名通过同源 /api 代理读写隔离后端" classname="dev-proxy.spec.ts" time="0.858">
+</testcase>
+</testsuite>
+<testsuite name="failure-feedback.spec.ts" timestamp="2026-10-14T23:55:09.441Z" hostname="desktop-1280" tests="5" failures="0" skipped="0" time="3.226" errors="0">
+<testcase name="[desktop-1280] T004-B02 创建失败保留草稿，解锁后直接重试" classname="failure-feedback.spec.ts" time="0.65">
+</testcase>
+<testcase name="[desktop-1280] T004-B03 编辑失败保留原值和草稿，可直接保存重试" classname="failure-feedback.spec.ts" time="0.751">
+</testcase>
+<testcase name="[desktop-1280] T004-B04 状态切换失败保留未完成状态，可直接重试" classname="failure-feedback.spec.ts" time="0.671">
+</testcase>
+<testcase name="[desktop-1280] T004-B05 删除失败保留任务和确认框，可直接重试" classname="failure-feedback.spec.ts" time="0.735">
+</testcase>
+<testcase name="[desktop-1280] T004-B06 首次加载展示等待和失败状态，按钮可重试恢复" classname="failure-feedback.spec.ts" time="0.419">
+</testcase>
+</testsuite>
+<testsuite name="layout-keyboard.spec.ts" timestamp="2026-10-14T23:55:09.441Z" hostname="desktop-1280" tests="1" failures="1" skipped="0" time="6.407" errors="0">
+<testcase name="[desktop-1280] T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作" classname="layout-keyboard.spec.ts" time="6.407">
+<failure message="layout-keyboard.spec.ts:4:1 T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作" type="FAILURE">
+<![CDATA[  [desktop-1280] › layout-keyboard.spec.ts:4:1 › T004-B07 长中文与 200 字符标题换行，真实键盘完成主要操作 ───────────────
+
+    Error: expect(locator).toBeFocused() failed
+
+    Locator:  getByRole('button', { name: '确认删除', exact: true })
+    Expected: focused
+    Received: inactive
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toBeFocused" with timeout 5000ms
+      - waiting for getByRole('button', { name: '确认删除', exact: true })
+        9 × locator resolved to <button type="button" class="danger" id="confirm-delete">确认删除</button>
+          - unexpected value "inactive"
+
+
+      75 |   await noOverflow(page);
+      76 |   await page.keyboard.press('Shift+Tab');
+    > 77 |   await expect(confirm).toBeFocused();
+         |                         ^
+      78 |   await page.keyboard.press('Tab');
+      79 |   await expect(cancel).toBeFocused();
+      80 |   await page.keyboard.press('Escape');
+        at /tmp/aa2-build-replay-7d1uxue2/.aa2/worktrees/run_f8a82b6d34f24434/T004-p6/frontend/e2e/layout-keyboard.spec.ts:77:25
+
+    attachment #2: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../../tmp/check_f5a502887f4b4376/playwright-results/layout-keyboard-T004-B07-长中文与-200-字符标题换行，真实键盘完成主要操作-desktop-1280/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../../tmp/check_f5a502887f4b4376/playwright-results/layout-keyboard-T004-B07-长中文与-200-字符标题换行，真实键盘完成主要操作-desktop-1280/error-context.md
+
+    attachment #4: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../../tmp/check_f5a502887f4b4376/playwright-results/layout-keyboard-T004-B07-长中文与-200-字符标题换行，真实键盘完成主要操作-desktop-1280/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../../tmp/check_f5a502887f4b4376/playwright-results/layout-keyboard-T004-B07-长中文与-200-字符标题换行，真实键盘完成主要操作-desktop-1280/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+]]>
+</failure>
+<system-out>
+<![CDATA[
+[[ATTACHMENT|playwright-results/layout-keyboard-T004-B07-长中文与-200-字符标题换行，真实键盘完成主要操作-desktop-1280/test-failed-1.png]]
+
+[[ATTACHMENT|playwright-results/layout-keyboard-T004-B07-长中文与-200-字符标题换行，真实键盘完成主要操作-desktop-1280/error-context.md]]
+
+[[ATTACHMENT|playwright-results/layout-keyboard-T004-B07-长中文与-200-字符标题换行，真实键盘完成主要操作-desktop-1280/trace.zip]]
+]]>
+</system-out>
+</testcase>
+</testsuite>
+<testsuite name="task-flow.spec.ts" timestamp="2026-10-14T23:55:09.441Z" hostname="desktop-1280" tests="1" failures="1" skipped="0" time="1.228" errors="0">
+<testcase name="[desktop-1280] T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化" classname="task-flow.spec.ts" time="1.228">
+<failure message="task-flow.spec.ts:4:1 T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化" type="FAILURE">
+<![CDATA[  [desktop-1280] › task-flow.spec.ts:4:1 › T004-B01 创建、编辑、完成、三种筛选和两次刷新持久化 ──────────────────────────
+
+    Error: locator.check: Clicking the checkbox did not change its state
+    Call log:
+      - waiting for locator('#task-17').getByRole('checkbox')
+        - locator resolved to <input type="checkbox" data-action="toggle"/>
+      - attempting click action
+        - waiting for element to be visible, enabled and stable
+        - element is visible, enabled and stable
+        - scrolling into view if needed
+        - done scrolling
+        - performing click action
+        - click action done
+        - waiting for scheduled navigations to finish
+        - navigations have finished
+
+
+      22 |   await page.getByRole('button', { name: '保存修改', exact: true }).click();
+      23 |   await expect(row.locator('[data-role="title"]')).toHaveText(title);
+    > 24 |   await row.getByRole('checkbox').check();
+         |                                   ^
+      25 |   await expect(row.getByRole('checkbox')).toBeChecked();
+      26 |   await expect(row.locator('[data-role="status"]')).toHaveText('已完成');
+      27 |   await expect(row.locator('[data-role="title"]')).toHaveCSS('text-decoration-line', 'line-through');
+        at /tmp/aa2-build-replay-7d1uxue2/.aa2/worktrees/run_f8a82b6d34f24434/T004-p6/frontend/e2e/task-flow.spec.ts:24:35
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../../tmp/check_f5a502887f4b4376/playwright-results/task-flow-T004-B01-创建、编辑、完成、三种筛选和两次刷新持久化-desktop-1280/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../../tmp/check_f5a502887f4b4376/playwright-results/task-flow-T004-B01-创建、编辑、完成、三种筛选和两次刷新持久化-desktop-1280/error-context.md
+
+    attachment #3: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../../tmp/check_f5a502887f4b4376/playwright-results/task-flow-T004-B01-创建、编辑、完成、三种筛选和两次刷新持久化-desktop-1280/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../../tmp/check_f5a502887f4b4376/playwright-results/task-flow-T004-B01-创建、编辑、完成、三种筛选和两次刷新持久化-desktop-1280/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+]]>
+</failure>
+<system-out>
+<![CDATA[
+[[ATTACHMENT|playwright-results/task-flow-T004-B01-创建、编辑、完成、三种筛选和两次刷新持久化-desktop-1280/test-failed-1.png]]
+
+[[ATTACHMENT|playwright-results/task-flow-T004-B01-创建、编辑、完成、三种筛选和两次刷新持久化-desktop-1280/error-context.md]]
+
+[[ATTACHMENT|playwright-results/task-flow-T004-B01-创建、编辑、完成、三种筛选和两次刷新持久化-desktop-1280/trace.zip]]
+]]>
+</system-out>
+</testcase>
+</testsuite>
+</testsuites>

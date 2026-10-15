@@ -16,6 +16,18 @@ class DependencyResolutionError(AA2Error):
     code = "DEPENDENCY_RESOLUTION_ERROR"
 
 
+class RetryableInfrastructureError(AA2Error):
+    """An explicitly recognized transient transport/timeout failure, not a manifest defect."""
+
+    code = "RETRYABLE_INFRASTRUCTURE_ERROR"
+
+
+class IntegrationConflict(AA2Error):
+    """Git reported unmerged paths, rather than an unrelated command failure."""
+
+    code = "INTEGRATION_CONFLICT"
+
+
 class VerificationPreparationError(AA2Error):
     """The declared command cannot safely collect controller-owned evidence."""
 

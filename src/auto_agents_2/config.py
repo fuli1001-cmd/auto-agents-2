@@ -42,6 +42,7 @@ class Execution(Record):
     max_rounds: int = Field(default=4, ge=1)
     max_stalled_rounds: int = Field(default=2, ge=1)
     max_stalled_replans: int = Field(default=2, ge=1)
+    max_diagnosis_rounds: int = Field(default=2, ge=1)
     infra_retries: int = Field(default=3, ge=0, le=10)
     @model_validator(mode="before")
     @classmethod

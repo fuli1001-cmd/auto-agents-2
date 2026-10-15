@@ -6,10 +6,10 @@ from test_manifest_references import plan
 from test_runtime import configured
 from test_workflow import CodingAgent, engine
 
-from auto_agents_2.engine import Replan
 from auto_agents_2.environment import EnvironmentManager
 from auto_agents_2.errors import AA2Error, DependencyResolutionError, Waiting
 from auto_agents_2.models import Change, ImplementationResult
+from auto_agents_2.recovery import RecoveryNeeded
 from auto_agents_2.sandbox import SandboxRunner
 from auto_agents_2.util import atomic_write, write_json
 
@@ -165,7 +165,7 @@ async def test_infrastructure_failure_keeps_applied_candidate_for_retry(tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("max_rounds,expected,rounds", [(4, Replan, 3), (2, Waiting, 2)])
+@pytest.mark.parametrize("max_rounds,expected,rounds", [(4, RecoveryNeeded, 3), (2, Waiting, 2)])
 async def test_dependency_repair_preserves_round_and_stall_budgets(tmp_path, max_rounds, expected, rounds):
     agent = CodingAgent()
     workflow = engine(tmp_path, agent)

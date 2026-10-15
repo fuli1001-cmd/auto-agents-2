@@ -52,6 +52,48 @@ def test_checkpoint_and_question_survive_restart(project):
         restarted.answer(question["id"], "approve", "sha-v1")
 
 
+def test_nested_generated_directories_do_not_block_retirement_but_unknown_changes_do(project):
+    from pathlib import Path
+
+    store = Store(project)
+    rid = store.admit("nested frontend", {})["id"]
+    manager = WorkspaceManager(project)
+    base = manager.committed_baseline(rid, "main")
+    worker = manager.allocate(rid, "frontend", base)
+    resources = ResourceManager(store, ConfigStore(project).load().cleanup)
+    resources.register(worker, "worktree", rid)
+    source = worker / "frontend/src/app.ts"
+    source.parent.mkdir(parents=True)
+    source.write_text("export const value = 1;\n")
+    ref = f"refs/aa2/{rid}/frontend"
+    manager.checkpoint(worker, ref, "accepted source")
+    for relative in ("frontend/node_modules/pkg/index.js", "frontend/dist/index.html", "backend/__pycache__/app.pyc"):
+        generated = worker / relative
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_text("generated")
+    exclude = Path(git(project, "rev-parse", "--git-path", "info/exclude"))
+    if not exclude.is_absolute():
+        exclude = project / exclude
+    exclude.write_text("/.aa2/\n/node_modules/\n/dist/\n/__pycache__/\n")
+    assert "frontend/node_modules/" in git(worker, "status", "--porcelain", "--untracked-files=all")
+    assert manager.allocate(rid, "frontend", base) == worker
+    assert not git(worker, "status", "--porcelain")
+    note = worker / "frontend/user-note.txt"
+    note.write_text("preserve this")
+    with pytest.raises(PolicyViolation, match="unarchived changes"):
+        resources.retire_worktree(worker, ref)
+    assert note.read_text() == "preserve this"
+    manager.checkpoint(worker, ref, "explicitly archive user note")
+    source.write_text("export const value = 2;\n")
+    with pytest.raises(PolicyViolation, match="unarchived changes"):
+        resources.retire_worktree(worker, ref)
+    assert worker.exists()
+    manager.checkpoint(worker, ref, "explicitly archive source modification")
+    resources.retire_worktree(worker, ref)
+    assert not worker.exists()
+    assert git(project, "show", ref + ":frontend/user-note.txt") == "preserve this"
+
+
 def test_removed_timeout_setting_is_rejected(project):
     config = ConfigStore(project)
     body = config.load().model_dump(mode="json")
