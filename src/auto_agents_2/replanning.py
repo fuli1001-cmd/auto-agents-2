@@ -51,7 +51,7 @@ def check_criteria(commands, results, source_hash: str, environment_hash: str) -
         result = actual.get((tuple(command.argv), command.cwd, digest(data)))
         invalid_evidence = {"execution_inputs_changed", "source_changed", "incomplete_log_capture",
                             "build_outputs_missing_or_invalid",
-                            "test_report_missing", "test_report_invalid", "unsupported_test_runner"}
+                            "test_report_missing", "test_report_invalid", "test_attachments_invalid", "unsupported_test_runner"}
         valid = bool(result and result.checker_version == CHECKER_VERSION
                      and not invalid_evidence.intersection(result.failure_reasons)
                      and result.command_hash == digest(data) and not result.timed_out and result.source_hash == source_hash

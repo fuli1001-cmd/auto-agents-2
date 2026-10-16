@@ -479,7 +479,8 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
                     reader.cancel()
                 await asyncio.gather(*drains, return_exceptions=True)
             finally:
-                shutil.rmtree(scratch, ignore_errors=True)
+                if process.cleanup_confirmed:
+                    shutil.rmtree(scratch, ignore_errors=True)
         if cleanup_errors:
             if original is None:
                 raise cleanup_errors[0]

@@ -113,12 +113,16 @@ class WorkflowEngine:
         self.recovery = RecoveryController(self)
         browser_environment(self.store.root / "cache/browsers")
 
-    async def start(self, source: str | None = None, provider: str | None = None, run_id: str | None = None):
+    async def start(self, source: str | None = None, provider: str | None = None, run_id: str | None = None, *, allow_resume: bool = True):
         # Admission check precedes source reads and provider persistence.
         if source is not None and self.store.current(unfinished=True):
             from .errors import IncompleteIteration
             raise IncompleteIteration(f"上一轮迭代尚未完成。请先执行：aa2 run --project {self.project}")
         with file_lock(self.store.root / "controller.lock", blocking=False):
+            if not allow_resume and source is None:
+                attached = self.store.run(run_id) if run_id else self.store.current()
+                if attached and (attached["status"] == "PAUSED" or self.store.get(attached["id"], "control/cancel")):
+                    return attached
             self.store.migrate()
             self.sandbox.reap_orphans()
             self.resources.recover_disposable()
@@ -179,6 +183,10 @@ class WorkflowEngine:
                 if self.store.get(rid, "control/cancel"):
                     journal = self.store.get(rid, "delivery/journal", {})
                     published = journal.get("publication_started", False)
+                    if not published:
+                        path = self.store.root / "worktrees" / rid
+                        hold = self.resources.hold(path, "cancellation archive", rid)
+                        self.store.checkpoint(rid, "cancellation/archive_hold", hold)
                     self.store.update(rid, status="PAUSED" if published else "CANCELLED")
                     return self.store.run(rid)
                 self.store.update(rid, status="PAUSED")
@@ -189,12 +197,28 @@ class WorkflowEngine:
             finally:
                 collector.cancel()
                 await asyncio.gather(collector, return_exceptions=True)
-                if self.store.run(rid)["status"] in {"SUCCEEDED", "CANCELLED"}:
-                    if self.store.run(rid)["status"] == "CANCELLED":
-                        self.archive_workspaces(rid)
-                    self.resources.release_run(rid)
-                self.resources.collect()
-                self.resources.collect_artifacts_safely()
+                errors = []
+                try:
+                    if self.store.run(rid)["status"] in {"SUCCEEDED", "CANCELLED"}:
+                        if self.store.run(rid)["status"] == "CANCELLED":
+                            hold = self.store.get(rid, "cancellation/archive_hold")
+                            if not hold:
+                                hold = self.resources.hold(self.store.root / "worktrees" / rid, "cancellation archive", rid)
+                                self.store.checkpoint(rid, "cancellation/archive_hold", hold)
+                            self.archive_workspaces(rid)
+                            self.resources.release_holds([hold])
+                            self.store.checkpoint(rid, "cancellation/archive_hold", None)
+                        self.resources.release_run(rid)
+                except Exception as exc:
+                    errors.append(type(exc).__name__)
+                for cleanup in (self.resources.collect, self.resources.collect_artifacts_safely):
+                    try:
+                        cleanup()
+                    except Exception as exc:
+                        errors.append(type(exc).__name__)
+                if errors:
+                    from .progress import safe_event
+                    safe_event(self.store, rid, "cleanup.pending", {"errors": errors})
 
     def _replan_evidence(self, rid, scope, criteria, **identity):
         self.store.checkpoint(rid, f"replanning/evidence/{scope}", {"criteria": criteria, **identity})
@@ -594,6 +618,8 @@ class WorkflowEngine:
         identity = invocation_identity(stage, context, schema, workspace, self.config.load(), source_before, execution)
         saved = self.store.get(rid, invocation_key, {})
         if saved.get("identity") == identity and saved.get("result"):
+            if saved.get("cleanup_record"):
+                self.sandbox.confirm_record(saved["cleanup_record"])
             return schema.model_validate(saved["result"])
         self.store.update(rid, stage=stage)
         try:
@@ -1005,6 +1031,7 @@ class WorkflowEngine:
             self.store.checkpoint(rid, "clarify_context", {**context, "additional_evidence": answer})
             raise Replan("clarify", "Resolve unknown coverage using additional user evidence")
         context["specification"] = assessment
+        verification_only = False
         if all_satisfied and not self.store.get(rid, "recovery/implementation_pending"):
             checks = result.verification or self.config.load().verification
             if not checks:
@@ -1017,9 +1044,17 @@ class WorkflowEngine:
             self._replan_checks(rid, "coverage", checks, evidence, work, environment)
             self.store.checkpoint(rid, "coverage_checks", [r.model_dump() for r in evidence])
             if passed(evidence):
-                return await self._finish_no_changes(rid, work, "current-baseline")
-            self.store.checkpoint(rid, "clarify_context", {**context, "regression_evidence": [r.model_dump() for r in evidence]})
-            raise Replan("clarify", "Coverage verification failed. Distinguish actual regressions from missing test infrastructure; do not reimplement satisfied behaviour.")
+                previous_contract = next((r["id"] for r in self.store.successful()
+                    if r["data"].get("verified_source_hash") == source_hash and self.store.get(r["id"], "prototype")
+                    and self.store.get(r["id"], "plan", {}).get("preview")), None)
+                if not result.frontend or previous_contract:
+                    return await self._finish_no_changes(rid, work, previous_contract or "current-baseline")
+                verification_only = True
+                context["planning_mode"] = "verification_only"
+                context["coverage_verification"] = [r.model_dump() for r in evidence]
+            else:
+                self.store.checkpoint(rid, "clarify_context", {**context, "regression_evidence": [r.model_dump() for r in evidence]})
+                raise Replan("clarify", "Coverage verification failed. Distinguish actual regressions from missing test infrastructure; do not reimplement satisfied behaviour.")
         spec_dir = work / "docs/requirements"
         acceptance = "\n\n".join(f"### {r.id}: {r.description}\n" + "\n".join(f"- {a}" for a in r.acceptance) for r in result.requirements)
         atomic_write(spec_dir / f"{rid}.md", result.document + "\n\n## 验收条目\n\n" + acceptance + f"\n\n原始输入指纹：`{raw['hash']}`\n")
@@ -1081,9 +1116,13 @@ class WorkflowEngine:
                     raise Replan(stage, review.summary)
             if stage == "plan":
                 self._replan_contract(rid, "plan", False)
-                unmet = {c.requirement_id for c in result.coverage if c.status != "satisfied"} or {r.id for r in result.requirements}
+                unmet = {c.requirement_id for c in result.coverage if c.status != "satisfied"}
+                if not verification_only and not unmet:
+                    unmet = {r.id for r in result.requirements}
                 try:
-                    validate_plan(document, unmet)
+                    if verification_only and document.mode != "verification_only":
+                        raise AA2Error("Satisfied coverage requires a verification-only contract without implementation tasks")
+                    validate_plan(document, unmet, coverage_verified=verification_only)
                     for task in document.tasks:
                         verification_commands(task.checks, work, document.runtime_prepare)
                     context["verification_contract"] = self._verification_contract(verification_commands(
@@ -1133,7 +1172,12 @@ class WorkflowEngine:
             self.store.checkpoint(rid, "plan_revision/current", {"version": 1, "revision": 1})
         materialize_plan(self.store, rid, work, plan)
         self.workspaces.checkpoint(work, f"refs/aa2/{rid}/design", "aa2: requirements and design baseline")
-        await self._develop(rid, work, plan, context)
+        if plan.mode == "verification_only":
+            if not verification_only:
+                raise AA2Error("Verification-only plan no longer has verified satisfied coverage")
+            self.store.checkpoint(rid, "develop/done", [])
+        else:
+            await self._develop(rid, work, plan, context)
         if not self.store.get(rid, "readme"):
             pending = self.store.get(rid, "candidate/readme", {})
             docs = (DocumentResult.model_validate(pending["document"]) if pending.get("document") else
@@ -1213,7 +1257,8 @@ class WorkflowEngine:
             raise AA2Error("Verified build inputs or outputs changed during final acceptance")
         self._task_approval_context(rid, work, context)
         self.store.update(rid, external_dependencies=bool(context.get("provider_research", {}).get("sources")))
-        return await self.delivery.finish(rid, candidate=candidate, work=work, environment=environment, plan=plan)
+        return await self.delivery.finish(rid, candidate=candidate, work=work, environment=environment, plan=plan,
+                                          outcome="NO_CHANGES" if verification_only else "DELIVERED")
 
     async def _environment(self, work, rid, plan=None):
         key = "infrastructure/environment/" + digest([str(work), tree_hash(work)])
@@ -1505,7 +1550,7 @@ class WorkflowEngine:
             previous = before + after
         sequence = verification_commands([*plan.final_checks, *plan.runtime_probes], work, plan.runtime_prepare, prepare_all=True)
         commands = "\n".join(f"- `{shlex.join(command.argv)}` (cwd: {command.cwd})" for command in sequence)
-        block = f"\n{start}\nUse the versioned requirements in docs/requirements and architecture in docs/aa2.\nPreserve accepted behaviour and the DESIGN.md baseline. Run checks relevant to the change;\ncomplete the delivery checks below before shipping. Test expectation changes need independent review.\nUse project-local dependencies. Do not install into system Python, Conda base or global npm.\n\nDelivery checks:\n{commands}\n{end}\n"
+        block = f"\n{start}\nUse the versioned requirements in docs/requirements and architecture in docs/aa2.\nPreserve accepted behaviour and the DESIGN.md baseline. Run checks relevant to the change;\ncomplete the delivery checks below before shipping. Test expectation changes need independent review.\nUse project-local dependencies. Do not install into system Python, Conda base or global npm.\nStore real secrets only in designated secret files (such as .env or configured sensitive_paths). Source, tests, documentation, examples and generated material must reference environment or configuration variables, never real secret literals. Use unmistakable placeholders in examples. Never copy or link secrets into ordinary files, prompts, logs or diagnostics. Model material admission protects secret paths; it does not inspect ordinary file contents, hashes or inodes for secrets.\n\nDelivery checks:\n{commands}\n{end}\n"
         atomic_write(path, previous.rstrip() + "\n" + block)
 
     def _export_environment(self, work, environment):
@@ -1712,8 +1757,10 @@ class WorkflowEngine:
             observation = identifier("delivery-verification")
             self.store.checkpoint(rid, "delivery/verification-observation", {
                 "id": observation, "candidate": candidate, "source_hash": before})
+            self.recovery.start_delivery_recheck(rid, work)
             evidence = await self.verifier.run(checks, work, environment)
             if not passed(evidence):
+                self.recovery.complete_delivery_recheck(rid, {"checks": [c.model_dump() for c in evidence]})
                 await self._delivery_repair(rid, work, {"checks": [c.model_dump() for c in evidence]},
                                             [p for p in git(work, "ls-files", "-z").split("\0") if p], observation=observation)
                 continue
@@ -1723,6 +1770,7 @@ class WorkflowEngine:
                 try:
                     approval_context["prototype_approval"] = await self._ensure_prototype_approval(rid, work)
                 except Replan as exc:
+                    self.recovery.complete_delivery_recheck(rid, {"prototype_feedback": exc.reason})
                     await self._delivery_repair(rid, work, {"prototype_feedback": exc.reason},
                         [p for p in git(work, "ls-files", "-z", "--", "design/prototypes", "DESIGN.md").split("\0") if p],
                         observation=observation)
@@ -1735,6 +1783,7 @@ class WorkflowEngine:
                 except PrototypeBrowserError as exc:
                     visuals = self._archive_visuals(exc.results)
                     self.store.checkpoint(rid, "verify/visuals", visuals)
+                    self.recovery.complete_delivery_recheck(rid, {"visuals": visuals, "browser_error": str(exc)})
                     await self._delivery_repair(rid, work, {"visuals": visuals, "browser_error": str(exc)},
                         [p for p in git(work, "ls-files", "-z").split("\0") if p], observation=observation)
                     continue
@@ -1744,6 +1793,7 @@ class WorkflowEngine:
                 "evidence": [c.model_dump() for c in evidence], "implemented_visuals": visuals, "incoming": incoming},
                 ReviewResult, work, rid, f"reintegration-review/{journal['reintegrations']}", fresh=True)
             if not review.approved:
+                self.recovery.complete_delivery_recheck(rid, {"review": review.model_dump()})
                 await self._delivery_repair(rid, work, {"review": review.model_dump()},
                                             [p for p in git(work, "ls-files", "-z").split("\0") if p], observation=observation)
                 continue
@@ -1759,6 +1809,8 @@ class WorkflowEngine:
             self.store.checkpoint(rid, "verify/review", review.model_dump())
             visuals = self._archive_visuals(visuals)
             self.store.checkpoint(rid, "verify/visuals", visuals)
+            self.recovery.complete_delivery_recheck(rid, {"checks": [c.model_dump() for c in evidence],
+                                                         "review": review.model_dump(), "visuals": visuals})
             return {"candidate": candidate, "candidate_tree": git(work, "rev-parse", f"{candidate}^{{tree}}"),
                     "source_hash": before, "validation": identity,
                     "environment": {"prefix": str(environment.prefix), "fingerprint": environment.fingerprint}}

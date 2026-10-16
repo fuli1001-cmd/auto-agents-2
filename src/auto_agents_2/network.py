@@ -165,6 +165,7 @@ class PreviewProxy:
                 incoming, upstream = await asyncio.open_connection(self.origin.hostname, self.origin.port)
                 if self.owner is not None:
                     await verify_connection(self.owner, upstream)
+                upgrade = method == "CONNECT"
                 if method == "CONNECT":
                     writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                     await writer.drain()
@@ -186,7 +187,14 @@ class PreviewProxy:
                     destination.write_eof()
                     await destination.drain()
             pumps = [asyncio.create_task(relay(reader, upstream)), asyncio.create_task(relay(incoming, writer))]
-            await asyncio.gather(*pumps)
+            if upgrade:
+                _, pending = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+                async with asyncio.timeout(10):
+                    await asyncio.gather(*pumps)
+            else:
+                # A normal response closes the exchange even if the browser keeps
+                # its request socket open. Client half-close still permits a reply.
+                await pumps[1]
         except PreviewOwnershipError:
             self.ownership_failed = True
             self.errors.append(OWNERSHIP_FAILURE)

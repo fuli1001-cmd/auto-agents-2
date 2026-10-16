@@ -34,7 +34,12 @@ def owned_sockets(root):
                     descriptors.append(os.readlink(path))
                 except OSError:
                     pass
-            children = Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
+            children = set()
+            for thread in Path(f"/proc/{pid}/task").iterdir():
+                try:
+                    children.update((thread / "children").read_text().split())
+                except FileNotFoundError:
+                    continue
         except OSError:
             return
         if signature(pid) != before:
@@ -62,7 +67,12 @@ def endpoint(raw):
 def connection_owned(process, local, peer):
     if process.supervisor.returncode is not None:
         return False
+    before = signature(process.pid)
+    if before is None or getattr(process, "start", before[1]) != before[1]:
+        return False
     owned = owned_sockets(process.pid)
+    if signature(process.pid) != before:
+        return False
     expected = ((address(peer[0]), peer[1]), (address(local[0]), local[1]))
     for table in ("tcp", "tcp6"):
         try:

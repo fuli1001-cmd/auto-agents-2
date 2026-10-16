@@ -12,14 +12,15 @@ import os
 import sqlite3
 import subprocess
 import tempfile
-from contextlib import closing
+from contextlib import ExitStack, closing
 from pathlib import Path
 
-from auto_agents_2.util import digest
-from auto_agents_2.workspace import git, tree_hash
+from auto_agents_2.util import digest, file_lock
+from auto_agents_2.workspace import git, input_entry, isolated_git, tree_hash
 
 # These are mutable controller addresses, never proposal text or signed evidence.
 CHECKPOINT_PATHS = {
+    "invocation/*": ["cleanup_record"],
     "develop/task/*": ["workspace", "previous_evidence.workspace"],
     "recovery/task-baselines/*": ["workspace", "repair_workspace", "previous_task.workspace"],
     "plan_revision/journal/*": ["snapshots.*.workspace"],
@@ -96,6 +97,15 @@ def safe_write(path, root, text):
 
 
 def snapshot(source, destination):
+    # Use the same lock order as the controller. The baseline precedes every copy;
+    # external writers are still detected by the closing consistency checks.
+    with ExitStack() as locks, isolated_git():
+        for name in ("controller.lock", "gc.lock", "artifact-gc.lock"):
+            locks.enter_context(file_lock(source.resolve() / ".aa2" / name, blocking=False))
+        return _snapshot(source, destination)
+
+
+def _snapshot(source, destination):
     source = source.resolve()
     if (source / ".aa2").is_symlink():
         raise ValueError("Source state must be a local directory")
@@ -117,6 +127,30 @@ def snapshot(source, destination):
             path.unlink()  # Only the empty reservation created by this invocation.
         raise
     try:
+        database = source / ".aa2/state.sqlite"
+        if database.is_symlink() or (source / ".aa2").is_symlink():
+            raise ValueError("Source state must be a local regular database")
+        for _ in range(5):
+            if any(Path(str(database) + suffix).exists() for suffix in ("-wal", "-journal")):
+                continue
+            raw = database.read_bytes()
+            if raw == database.read_bytes() and not any(Path(str(database) + s).exists() for s in ("-wal", "-journal")):
+                break
+        else:
+            raise RuntimeError("Source is changing; pause it before taking a snapshot")
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro&immutable=1", uri=True)) as db:
+            current = db.execute("SELECT id,status FROM runs ORDER BY created DESC LIMIT 1").fetchone()
+            if not current or current[1] not in {"PAUSED", "WAITING_USER"}:
+                raise ValueError("Snapshot requires a paused or waiting run")
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            held = [Path(row[0]) for row in db.execute("SELECT DISTINCT path FROM resource_holds")] if "resource_holds" in tables else []
+        mutable = [source / ".aa2" / name for name in ("recovery", "environment-records", "node-records", "config.json")]
+        mutable.extend(path for path in held if path.exists())
+        mutable = list(dict.fromkeys(mutable))
+        mutable_before = {path: digest(input_entry(path, source, excluded=set())) for path in mutable}
+        for record in (source / ".aa2/processes").glob("*.json"):
+            if json.loads(record.read_text()).get("status") != "cleaned":
+                raise ValueError("Snapshot requires confirmed process cleanup before copying recovery state")
         source_hash = tree_hash(source)
         destination.mkdir(mode=0o700)
         for path in source.iterdir():
@@ -129,17 +163,6 @@ def snapshot(source, destination):
             if path.exists() or path.is_symlink():
                 subprocess.run(["cp", "-a", "--reflink=auto", str(path), str(state / name)], check=True)
         validate_copy(destination, source)  # Before opening any copied path for writing.
-        database = source / ".aa2/state.sqlite"
-        if database.is_symlink() or (source / ".aa2").is_symlink():
-            raise ValueError("Source state must be a local regular database")
-        for _ in range(5):
-            if any(Path(str(database) + suffix).exists() for suffix in ("-wal", "-journal")):
-                continue
-            raw = database.read_bytes()
-            if raw == database.read_bytes() and not any(Path(str(database) + s).exists() for s in ("-wal", "-journal")):
-                break
-        else:
-            raise RuntimeError("Source is changing; pause it before taking a snapshot")
         handles[0][1].write(raw)
         handles[0][1].flush()
         os.fsync(handles[0][1].fileno())
@@ -199,6 +222,10 @@ def snapshot(source, destination):
                         target.parent.mkdir(parents=True, exist_ok=True)
                         subprocess.run(["cp", "-a", "--reflink=auto", str(held_source), str(target)], check=True)
                 validate_copy(destination, source)
+            for path, expected in mutable_before.items():
+                copied = destination / path.relative_to(source)
+                if digest(input_entry(copied, destination, excluded=set())) != expected:
+                    raise RuntimeError("Mutable recovery files changed while copying; snapshot is not certified")
             for table in ("resources", "delivery_pins", "resource_holds"):
                 if table not in tables:
                     continue
@@ -251,6 +278,8 @@ def snapshot(source, destination):
                 raise RuntimeError("Source worktree changed while copying; retain both snapshots and retry")
         if database.read_bytes() != raw or any(Path(str(database) + suffix).exists() for suffix in ("-wal", "-journal")):
             raise RuntimeError("Source changed during snapshot; copied project is not certified for recovery")
+        if any(digest(input_entry(path, source, excluded=set())) != expected for path, expected in mutable_before.items()):
+            raise RuntimeError("Mutable recovery files changed during snapshot; copy is not certified")
         validate_copy(destination)
         if tree_hash(source) != source_hash or tree_hash(destination) != source_hash:
             raise RuntimeError("Project source changed during snapshot; retain the copy for investigation")

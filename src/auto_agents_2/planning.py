@@ -6,7 +6,9 @@ from .models import PlanResult, TaskSpec
 from .workspace import path_allowed
 
 
-def validate_plan(plan: PlanResult, requirement_ids: set[str]):
+def validate_plan(plan: PlanResult, requirement_ids: set[str], *, coverage_verified=False):
+    if plan.mode == "verification_only" and (not coverage_verified or requirement_ids):
+        raise AA2Error("Verification-only planning requires controller-verified satisfied coverage")
     manifest_reference(plan.environment_file, "environment_file")
     manifest_reference(plan.requirements_file, "requirements_file")
     tasks = {t.id: t for t in plan.tasks}

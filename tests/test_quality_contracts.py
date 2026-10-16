@@ -93,7 +93,7 @@ def test_context_scope_exact_and_glob(tmp_path):
     assert len(ContextBuilder().build(tmp_path, scopes=["src/*.py"])["files"]) == 2
 
 
-def test_provider_snapshot_closes_alias_and_git_history_access(tmp_path):
+def test_provider_snapshot_protects_secret_paths_and_git_history(tmp_path):
     project = tmp_path / "project"
     repository(project)
     secret = project / ".env"
@@ -108,10 +108,10 @@ def test_provider_snapshot_closes_alias_and_git_history_access(tmp_path):
     (project / "public.txt").write_text("public")
     commit(project)
     names = {p.name for p in public_files(project)}
-    assert names == {"public.txt"}
+    assert names == {"public.txt", "alias.txt", "copy.txt"}
     state = project / ".aa2"
     view = create_view(project, state / "attempts/view")
-    assert git(view, "ls-files").splitlines() == ["public.txt"]
+    assert git(view, "ls-files").splitlines() == ["alias.txt", "copy.txt", "public.txt"]
     assert "deleted-sensitive-value" not in git(view, "log", "-p", "--all")
     runner = SandboxRunner(state)
     command = runner.command(["/bin/sh", "-c", f'test "$(cat public.txt)" = public && test ! -e {secret} && test ! -e .env'],
@@ -599,16 +599,15 @@ async def test_stdout_pass_claim_cannot_supply_test_case_evidence(tmp_path):
     assert result.tests == 0 and result.exit_code != 0
 
 
-def test_all_values_in_explicitly_protected_files_are_confidential(tmp_path):
+def test_secret_storage_contract_uses_paths_not_plaintext_detection(tmp_path):
     (tmp_path / ".env").write_text("HOST=localhost\nPORT=8000\nPASSWORD=private-password-value\n")
     (tmp_path / "server.py").write_text("HOST = 'localhost'\nPORT = 8000\n")
     (tmp_path / "leak.py").write_text("PASSWORD = 'private-password-value'\n")
-    # A key name cannot prove that its value is public. Publish safe defaults
-    # separately in .env.example when they must reach the model.
-    assert not public_files(tmp_path)
+    # Ordinary paths are admitted even if the project violates the storage rule.
+    assert {p.name for p in public_files(tmp_path)} == {"server.py", "leak.py"}
     (tmp_path / ".env").write_text("PASSWORD=private-password-value\n")
     (tmp_path / ".env.example").write_text("HOST=localhost\nPORT=8000\n")
-    assert {p.name for p in public_files(tmp_path)} == {"server.py", ".env.example"}
+    assert {p.name for p in public_files(tmp_path)} == {"server.py", "leak.py", ".env.example"}
 
 
 def test_issue_scope_survives_task_renaming(tmp_path):

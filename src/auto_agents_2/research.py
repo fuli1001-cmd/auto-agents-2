@@ -8,9 +8,10 @@ import httpx
 
 from .artifacts import ArtifactStore
 from .errors import AA2Error
+from .http_body import ACQUISITION_TIMEOUT, read_body
 from .models import SourceEvidence
 from .network import PublicHTTPTransport, public_address
-from .requirements import MAX_REQUIREMENTS_BYTES, extract_document
+from .requirements import extract_document
 from .util import SECRET, now
 
 
@@ -38,7 +39,9 @@ class ResearchService:
 
     async def capture(self, url: str) -> dict:
         public_url(url)
-        async with httpx.AsyncClient(transport=PublicHTTPTransport(), trust_env=False, follow_redirects=False, timeout=30) as client:
+        async with asyncio.timeout(ACQUISITION_TIMEOUT), httpx.AsyncClient(
+                transport=PublicHTTPTransport(), trust_env=False, follow_redirects=False, timeout=30,
+                headers={"Accept-Encoding": "gzip, deflate"}) as client:
             final = url
             for _ in range(6):
                 public_url(final)
@@ -47,11 +50,7 @@ class ResearchService:
                         final = urljoin(final, response.headers["location"])
                         continue
                     response.raise_for_status()
-                    data = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        data.extend(chunk)
-                        if len(data) > MAX_REQUIREMENTS_BYTES:
-                            raise AA2Error("Research response exceeds the supported acquisition size; no claim verified")
+                    data = await read_body(response)
                     mime = response.headers.get("content-type", "")
                     break
             else:

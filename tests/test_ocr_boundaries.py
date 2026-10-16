@@ -69,13 +69,13 @@ def test_prototype_receipt_requires_validated_review_complete_routes_and_images(
     (".credentials/config.json", '{"credentials":{"primary":"private-value-123"}}', "private-value-123"),
     (".npmrc", "//registry.example/:_authToken=registry-private-token", "registry-private-token"),
 ])
-def test_secret_alias_values_never_reach_public_material(tmp_path, name, content, value):
+def test_secret_paths_do_not_block_ordinary_matching_text(tmp_path, name, content, value):
     secret = tmp_path / name
     secret.parent.mkdir(parents=True, exist_ok=True)
     secret.write_text(content)
     public = tmp_path / "public.txt"
     public.write_text("prefix " + value + " suffix")
-    assert public not in public_files(tmp_path)
+    assert public in public_files(tmp_path)
 
 
 def test_overlapping_and_multiline_secrets_are_redacted_before_spooling(tmp_path):
@@ -394,7 +394,7 @@ async def test_termination_finishes_with_full_pipes_and_ignored_sigterm(tmp_path
             await process.communicate()
 
 
-async def test_registration_failure_reaps_launched_process(tmp_path, monkeypatch):
+async def test_registration_failure_prevents_unmanaged_process_launch(tmp_path, monkeypatch):
     processes = []
     spawn = asyncio.create_subprocess_exec
     async def capture(*args, **kwargs):
@@ -404,8 +404,8 @@ async def test_registration_failure_reaps_launched_process(tmp_path, monkeypatch
     def failed(*args):
         raise OSError("registration failed")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
-    monkeypatch.setattr("auto_agents_2.sandbox.write_json", failed)
+    monkeypatch.setattr("auto_agents_2.managed_process.write_json", failed)
     runner = SandboxRunner(tmp_path / "state", _test_unconfined=True)
     with pytest.raises(OSError, match="registration failed"):
         await runner.spawn([sys.executable, "-c", "import time; time.sleep(60)"], tmp_path, dict(os.environ), [])
-    assert len(processes) == 1 and processes[0].returncode is not None
+    assert not processes

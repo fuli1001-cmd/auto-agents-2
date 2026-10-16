@@ -118,7 +118,7 @@ class EnvironmentManager:
                                                                   if k.startswith(("PIP_", "CONDA_"))}),
                               "conda": conda_file.read_text() if conda_file else "",
                               "requirements": inputs.requirements, "constraints": inputs.constraints,
-                              "local_paths": inputs.local_paths,
+                              "local_paths": inputs.local_paths, "source_paths": inputs.source_paths,
                               "private_source": [str(workspace), tree_hash(workspace)] if local else None,
                               **({"source_copy_version": 2} if local else {})})
         location = self.root / "environment-records" / fingerprint / "instance.json"
@@ -182,16 +182,15 @@ class EnvironmentManager:
         except (OSError, ValueError, KeyError, RecursionError):
             return False
 
-    async def _command(self, argv, workspace, env, writes, reads=(), timeout=1800, *, conda_manifest=False):
+    async def _command(self, argv, workspace, env, writes, reads=(), timeout=1800, *, conda_manifest=False, machine=False):
         process = await self.sandbox.spawn(argv, workspace, env, writes, list(reads))
         try:
             async with asyncio.timeout(timeout):
-                machine = "--explicit" in argv or "freeze" in argv or "-c" in argv
                 if machine:
                     stdout, stderr = await capture_output(process)
                 else:
                     stdout, stderr, logs = await capture_diagnostics(process, self.resources, ArtifactStore(self.root),
-                        [v for k, v in env.items() if SECRET.search(k)] + sensitive_values(workspace))
+                        [v for k, v in env.items() if SECRET.search(k)] + sensitive_values(workspace, self.config.load().sensitive_paths))
                     run = self.store.current(unfinished=True)
                     operation = current_diagnostics.get()
                     if operation:
@@ -201,7 +200,7 @@ class EnvironmentManager:
                                               {"logs": logs, "exit_code": process.returncode})
             if process.returncode:
                 diagnostic = scrub_text((stdout + b"\n" + stderr).decode(errors="replace"),
-                                        [v for k, v in env.items() if SECRET.search(k)])
+                                        [v for k, v in env.items() if SECRET.search(k)] + sensitive_values(workspace, self.config.load().sensitive_paths))
                 # Only explicit solver failures from a workspace manifest are repairable
                 # proposals. Network, permissions, locks and configured defaults stay blocked.
                 resolution = re.search(r"(?m)^(?:ResolvePackageNotFound|PackagesNotFoundError|"
@@ -272,12 +271,12 @@ class EnvironmentManager:
                 await self._command([str(prefix / "bin/python"), "-m", "pip", "check"],
                                     workspace, env, [scratch], [prefix], timeout=60)
                 identity = await self._command([str(prefix / "bin/python"), "-c", "import sys; print(sys.prefix)"],
-                                               workspace, env, [scratch], [prefix], timeout=30)
+                                               workspace, env, [scratch], [prefix], timeout=30, machine=True)
                 if Path(identity.strip()).resolve() != prefix.resolve():
                     raise AA2Error("Environment interpreter identity mismatch")
-                frozen = await self._command([str(prefix / "bin/python"), "-m", "pip", "freeze"], workspace, env, [scratch], [prefix], timeout=30)
+                frozen = await self._command([str(prefix / "bin/python"), "-m", "pip", "freeze"], workspace, env, [scratch], [prefix], timeout=30, machine=True)
                 explicit = await self._command([conda, "list", "--explicit", "-p", str(prefix)], workspace, env,
-                                               [scratch], [prefix, *reads], timeout=30)
+                                               [scratch], [prefix, *reads], timeout=30, machine=True)
                 if not local and (records / "pip.lock").is_file():
                     def resolution(text):
                         return sorted(line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#"))

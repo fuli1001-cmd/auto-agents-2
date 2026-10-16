@@ -17,15 +17,20 @@ RUNTIME_CACHES = {"__pycache__", ".pytest_cache", *NODE_RUNTIME_CACHES}
 
 
 def input_identity(workspace, command):
-    def failed(error):
-        raise error
     entries = [(p, generated_entry(contained(workspace, p), workspace)) for p in command.inputs]
-    for directory, folders, _ in os.walk(workspace, followlinks=False, onerror=failed):
-        modules = Path(directory) / "node_modules"
+    seen = set()
+    def visit(directory):
+        resolved = directory.resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        modules = directory / "node_modules"
         if modules.exists() and any(p.name not in RUNTIME_CACHES for p in modules.iterdir()):
-            entries.append((modules.relative_to(workspace).as_posix(), input_entry(modules, workspace, excluded=RUNTIME_CACHES)))
-        folders[:] = [name for name in folders if name not in {"node_modules", ".git", ".aa2", ".venv", ".conda-env", *RUNTIME_CACHES}
-                      and not Path(directory, name).is_symlink()]
+            entries.append((directory.relative_to(workspace).as_posix(), input_entry(modules, workspace, excluded=RUNTIME_CACHES)))
+        for child in sorted(directory.iterdir()):
+            if child.name not in {"node_modules", ".git", ".aa2", ".venv", ".conda-env", *RUNTIME_CACHES} and child.is_dir():
+                visit(child)
+    visit(workspace)
     return digest(sorted(entries))
 
 

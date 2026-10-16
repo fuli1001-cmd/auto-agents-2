@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import codecs
 import re
 from email.message import Message
@@ -10,10 +11,13 @@ import httpx
 
 from .artifacts import ArtifactStore
 from .errors import AA2Error, PolicyViolation
+from .http_body import ACQUISITION_TIMEOUT, read_body
 from .models import IntakeResult
 from .util import contained, digest, now
 
 MAX_REQUIREMENTS_BYTES = 4 * 1024 * 1024
+BLOCK_TAGS = {"p", "div", "br", "li", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "tr", "table",
+              "section", "article", "header", "footer", "main", "aside", "nav", "ul", "ol", "dl", "dt", "dd", "blockquote"}
 
 
 class TextExtractor(HTMLParser):
@@ -27,7 +31,7 @@ class TextExtractor(HTMLParser):
             self.hidden += 1
         if self.hidden:
             return
-        if tag in {"p", "div", "br", "li", "h1", "h2", "h3", "h4", "pre", "tr", "table"}:
+        if tag in BLOCK_TAGS:
             self.parts.append("\n")
         if tag in {"td", "th"}:
             self.parts.append(" | ")
@@ -42,6 +46,8 @@ class TextExtractor(HTMLParser):
             if tag in {"script", "style"}:
                 self.hidden = max(0, self.hidden - 1)
             return
+        if tag in BLOCK_TAGS:
+            self.parts.append("\n")
         if tag == "a" and self.links:
             self.parts.append(" (" + self.links.pop() + ") ")
         if tag in {"script", "style"}:
@@ -88,16 +94,11 @@ def extract_document(raw: bytes, content_type: str) -> tuple[str, str]:
 
 async def capture(source: str, artifacts: ArtifactStore) -> dict:
     if source.startswith(("https://", "http://")):
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+        async with asyncio.timeout(ACQUISITION_TIMEOUT), httpx.AsyncClient(
+                follow_redirects=True, timeout=30, headers={"Accept-Encoding": "gzip, deflate"}) as client:
             async with client.stream("GET", source) as response:
                 response.raise_for_status()
-                chunks, size = [], 0
-                async for chunk in response.aiter_bytes():
-                    size += len(chunk)
-                    if size > MAX_REQUIREMENTS_BYTES:
-                        raise AA2Error("Requirements document exceeds 4 MiB")
-                    chunks.append(chunk)
-                raw = b"".join(chunks)
+                raw = await read_body(response)
                 kind = response.headers.get("content-type", "")
         text, _ = extract_document(raw, kind)
     else:

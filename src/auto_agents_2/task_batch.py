@@ -3,9 +3,11 @@ import asyncio
 
 
 async def collect_batch(coroutines):
-    tasks = [asyncio.create_task(coroutine) for coroutine in coroutines]
-    pending = set(tasks)
+    tasks = []
     try:
+        for coroutine in coroutines:
+            tasks.append(asyncio.create_task(coroutine))
+        pending = set(tasks)
         while pending:
             completed, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             if any(task.cancelled() for task in completed):

@@ -159,7 +159,7 @@ async def execute(project, requirements=None, provider=None, run_id=None):
                     result = attached
                     break
                 try:
-                    result = await supervised_start(run_id=run_id)
+                    result = await supervised_start(run_id=run_id, allow_resume=False)
                     break
                 except BusyProject:
                     continue

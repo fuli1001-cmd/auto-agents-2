@@ -1,41 +1,70 @@
-"""Async subprocess facade with a private supervisor control channel."""
+"""Async subprocess facade with a durable lifecycle and private control channel."""
 import asyncio
+import json
 import socket
 import sys
 from pathlib import Path
 
+from .errors import PolicyViolation
+from .util import identifier, write_json
+
+
+async def joined(task):
+    """Delay cancellation until an owned operation finishes; never abandon it."""
+    cancelled = None
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                raise
+            cancelled = exc
+        except BaseException as exc:
+            if cancelled:
+                cancelled.add_note("Owned operation failed: " + type(exc).__name__)
+                raise cancelled
+            raise
+    if cancelled:
+        raise cancelled
+    return result
+
 
 class ManagedProcess:
-    def __init__(self, process, reader, writer):
+    def __init__(self, process, reader, writer, record):
         self.supervisor = process
         self.pid = process.pid
         self.command_pid = None
+        self.record = record
+        self.start = json.loads(record.read_text()).get("start")
         self.stdin, self.stdout, self.stderr = process.stdin, process.stdout, process.stderr
         self.returncode = None
         self.control = writer
         self.completed = asyncio.get_running_loop().create_future()
         self.started = asyncio.get_running_loop().create_future()
+        self.cleanup_confirmed = False
         self.stop_task = None
         self.monitor = asyncio.create_task(self._monitor(reader))
 
     async def _monitor(self, reader):
-        import json
         try:
             while line := await reader.readline():
                 event = json.loads(line)
                 if "started" in event:
                     self.command_pid = event["started"]
+                    self.start = json.loads(self.record.read_text()).get("start")
                     if not self.started.done():
                         self.started.set_result(None)
                 if "exited" in event:
                     self.returncode = event["exited"]
                     if not self.completed.done():
                         self.completed.set_result(self.returncode)
+                if event.get("cleaned"):
+                    self.cleanup_confirmed = True
         finally:
             if not self.started.done():
-                self.started.set_exception(RuntimeError("Process supervisor failed to start workload"))
+                self.started.set_exception(PolicyViolation("Process supervisor failed to start workload"))
             if not self.completed.done():
-                # A killed workload cannot report before the anchor's final kill.
                 self.returncode = -9
                 self.completed.set_result(self.returncode)
 
@@ -56,27 +85,67 @@ class ManagedProcess:
         return stdout, stderr
 
 
-async def spawn_managed(command, cwd, env):
+async def finish_supervisor(process, record):
+    deadline = asyncio.get_running_loop().time() + 6
+    while process.returncode is None and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.02)
+    if process.returncode is None:
+        raise PolicyViolation("Child termination could not be confirmed; process recovery record retained")
+    for stream in (process.stdout, process.stderr):
+        if stream is not None and not stream.at_eof():
+            transport = getattr(stream, "_transport", None)
+            if transport is not None:
+                transport.close()
+    await asyncio.wait_for(process.wait(), 2)
+    if json.loads(record.read_text()).get("status") != "cleaned":
+        raise PolicyViolation("Supervisor exited without cleanup confirmation; resources retained")
+
+
+async def spawn_managed(command, cwd, env, state_root, paths):
+    record = state_root / "processes" / (identifier("process") + ".json")
+    write_json(record, {"version": 3, "status": "starting", "paths": [str(p) for p in paths], "cwd": str(cwd)})
     parent, child = socket.socketpair()
+    process = None
+    managed = None
+    creation = asyncio.create_task(asyncio.create_subprocess_exec(
+        sys.executable, "-I", str(Path(__file__).with_name("process_supervisor.py")), str(child.fileno()), str(record), *command,
+        cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE, start_new_session=True, pass_fds=(child.fileno(),), limit=8 * 1024 * 1024))
     try:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "-I", str(Path(__file__).with_name("process_supervisor.py")), str(child.fileno()), *command,
-            cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE, start_new_session=True, pass_fds=(child.fileno(),), limit=8 * 1024 * 1024)
-    except BaseException:
-        parent.close()
+        process = await asyncio.shield(creation)
+        child.close()
+        reader, writer = await asyncio.open_connection(sock=parent)
+        managed = ManagedProcess(process, reader, writer, record)
+        await asyncio.shield(managed.started)
+        return managed
+    except BaseException as original:
+        async def cleanup():
+            nonlocal process
+            try:
+                process = process or await creation
+            except BaseException:
+                record.unlink(missing_ok=True)  # No subprocess was created.
+                return
+            finally:
+                child.close()
+            if managed:
+                managed.control.close()
+            else:
+                parent.close()
+            await finish_supervisor(process, record)
+            if managed:
+                try:
+                    await managed.monitor
+                finally:
+                    if managed.started.done() and not managed.started.cancelled():
+                        managed.started.exception()
+            record.unlink(missing_ok=True)
+        try:
+            await joined(asyncio.create_task(cleanup()))
+        except BaseException as exc:
+            original.add_note("Startup cleanup failed; retain process records: " + type(exc).__name__)
         raise
     finally:
         child.close()
-    try:
-        reader, writer = await asyncio.open_connection(sock=parent)
-    except BaseException:
-        parent.close()  # EOF asks the live anchor to clean up, without PID signalling.
-        raise
-    managed = ManagedProcess(process, reader, writer)
-    try:
-        await asyncio.shield(managed.started)
-    except BaseException:
-        writer.close()
-        raise
-    return managed
+        if process is None:
+            parent.close()

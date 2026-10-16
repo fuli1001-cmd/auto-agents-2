@@ -40,7 +40,7 @@ def collect_artifacts(store):
                                 db.execute("INSERT OR IGNORE INTO artifact_kinds VALUES(?,?)", (sha, kind))
                                 kinds.setdefault(sha, set()).add(kind)
                             if keep_logs:
-                                live.add(sha)
+                                mark_object(sha, True)
                         else:
                             mark_object(sha, keep_logs)
                     for child in value.values():
@@ -61,15 +61,42 @@ def collect_artifacts(store):
                         data = prefix + stream.read() if prefix.lstrip().startswith((b"{", b"[")) else None
                     if data is not None and digest(data) == sha:
                         mark(json.loads(data), keep_logs)
-                        return
+                        if not keep_logs:
+                            return
                 except (OSError, ValueError, UnicodeError):
                     pass
                 # Opaque/legacy dependency edges cannot prove a diagnostic is optional.
                 for child in edges.get(sha, []):
                     mark_object(child, True)
 
+            # A hold protects its complete dependency closure, regardless of the
+            # root's diagnostic/non-diagnostic role or owner run status.
+            from .resources import valid_receipt
+            quarantined = set()
+            for rid, raw in db.execute("SELECT run_id,data FROM checkpoints WHERE key='delivery/receipt'"):
+                try:
+                    receipt = json.loads(raw)
+                except ValueError:
+                    receipt = {}
+                if not valid_receipt(receipt):
+                    quarantined.add(rid)
+            held = set(live) | {sha for sha, runs in owners.items() if runs & quarantined}
+            from .config import Cleanup
+            from .resources import ResourceManager
+            for path in ResourceManager(store, Cleanup()).process_paths():
+                if path.is_relative_to(root) and len(path.name) == 64:
+                    held.add(path.name)
+                elif root.is_relative_to(path):
+                    held.update(owners)
+            for sha in held:
+                mark_object(sha, True)
             for row in rows:
-                value = json.loads(row["data"])
+                try:
+                    value = json.loads(row["data"])
+                except ValueError:
+                    if row["key"] == "delivery/receipt":
+                        continue  # Its entire owned dependency closure is quarantined.
+                    raise
                 active = row["status"] not in {"SUCCEEDED", "CANCELLED"}
                 if row["key"] == "issues":
                     for issue in value.values():

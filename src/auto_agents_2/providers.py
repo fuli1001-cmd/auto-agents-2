@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
 import time
 from pathlib import Path
 from typing import Protocol
@@ -20,7 +19,7 @@ from .materials import bundle
 from .models import Usage, strict_schema
 from .progress import capture_output
 from .prompts import PROMPT_VERSION, PromptCompiler
-from .readview import VIEW_VERSION, create_view, sensitive_values
+from .readview import VIEW_VERSION, create_view
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
 from .store import Store
@@ -135,11 +134,22 @@ class ProviderRouter:
             state["grant"] += cfg.execution.infra_retries + 1
             self.store.checkpoint(run_id, key, state)
 
+    def effective(self, stage, candidate):
+        effective = self.config.resolve(stage, candidate)
+        try:
+            transport = self.transports[effective["kind"]]
+            native = transport.native_home(effective["environment"])
+            sources = {file.relative_to(native).as_posix(): file_digest(file)
+                       for pattern in transport.auth_patterns for file in native.glob(pattern) if file.is_file()}
+        except (OSError, KeyError) as exc:
+            raise ConfigurationError("Cannot inspect provider native inputs") from exc
+        return {**effective, "fingerprint": digest([effective["fingerprint"], "native-inputs-v1", sources])}
+
     def execution_identity(self, stage):
         identities = []
         for candidate in self.config.load().providers:
             try:
-                identities.append((candidate, self.config.resolve(stage, candidate)["fingerprint"]))
+                identities.append((candidate, self.effective(stage, candidate)["fingerprint"]))
             except ConfigurationError:
                 # Resolution errors remain the router's responsibility so fallback
                 # providers can still run. No configuration contents are recorded.
@@ -162,16 +172,20 @@ class ProviderRouter:
                     errors.append(f"{candidate}: persisted retry budget exhausted")
                     break
                 try:
-                    effective = self.config.resolve(stage, candidate)
+                    effective = self.effective(stage, candidate)
                     state["pending"] = True
                     self.store.checkpoint(run_id, key, state)
                     result = await self._call(effective, stage, context, schema, workspace, run_id, operation, fresh)
                     state["pending"] = False
                     self.store.checkpoint(run_id, key, state)
                     if candidate != cfg.active_provider:
-                        old, new = self.config.activate(candidate, expected_revision=cfg.config_revision)
-                        if old != new:
-                            self.store.event(run_id, "provider.changed", {"from": old, "to": new, "reason": "failover"})
+                        try:
+                            old, new = self.config.activate(candidate, expected_revision=cfg.config_revision)
+                            if old != new:
+                                self.store.event(run_id, "provider.changed", {"from": old, "to": new, "reason": "failover"})
+                        except (ConfigurationError, OSError):
+                            from .progress import safe_event
+                            safe_event(self.store, run_id, "provider.preference_pending", {"provider": candidate})
                     return result
                 except ConfigurationError as exc:
                     state["pending"] = False
@@ -276,10 +290,6 @@ class ProviderRouter:
                         locate(child)
             locate(context)
             prompt, family = self.compiler.compile(stage, context, eff["model"], eff["prompt_profile"])
-            confidential = sensitive_values(original_workspace, self.config.load().sensitive_paths)
-            # Preserve exact editable text: never silently rewrite model-visible file content.
-            if any(value in prompt for value in confidential):
-                raise ProviderError("Required material includes a protected value; provide a safe execution contract before model delivery")
             atomic_write(root / "prompt.txt", prompt)
             session_key = f"session/{operation}/{eff['provider']}/{VIEW_VERSION}/{PROMPT_VERSION}/{eff['fingerprint']}/{digest(self.config.load().sensitive_paths)}"
             previous = self.store.get(run_id, session_key) if not fresh else None
@@ -303,10 +313,6 @@ class ProviderRouter:
             context_files = [Path(p) for p in context.get("context_files", [])]
             if any(not p.is_file() or not p.resolve().is_relative_to(self.store.root / "artifacts") for p in context_files):
                 raise ProviderError("Required context attachment cannot be delivered")
-            for attachment in context_files:
-                body = attachment.read_bytes()
-                if any(value.encode() in body for value in confidential):
-                    raise ProviderError("Required attachment includes protected data and cannot be delivered")
             image_read = eff["kind"] == "antigravity" and bool(assets)
             if stage != "material_probe" and (context_files or image_read):
                 await self._ensure_material_read(eff, workspace, run_id, image_read)
@@ -427,7 +433,8 @@ class ProviderRouter:
                 artifact = ArtifactStore(self.store.root).put(result.model_dump(mode="json"), stage)
                 self.store.checkpoints(run_id, {
                     f"provider-result/{operation}": {"attempt": aid, "artifact": artifact, "usage": decoder.usage.model_dump()},
-                    f"invocation/{operation}": {"identity": input_identity, "result": result.model_dump(mode="json"), "artifact": artifact},
+                    f"invocation/{operation}": {"identity": input_identity, "result": result.model_dump(mode="json"), "artifact": artifact,
+                                                "cleanup_record": str(process.record)},
                 }, usage=(eff["provider"], aid, decoder.usage.model_dump()))
                 outcome = "success"
                 return result
@@ -438,20 +445,26 @@ class ProviderRouter:
                 outcome = "error"
                 raise
             finally:
+                cleanup_error = None
                 if process:
-                    await self.sandbox.stop(process)
+                    try:
+                        await self.sandbox.stop(process)
+                    except BaseException as exc:
+                        cleanup_error = exc
                 self.store.add_usage(run_id, eff["provider"], aid, "invocation", decoder.usage.model_dump())
                 self.store.event(run_id, "agent.finished", {"attempt": aid, "complete": decoder.finished,
                                                            "outcome": outcome, "last_output": last_output,
                                                            "diagnostic": diagnostic_summary(decoder.error or "".join(errors))
                                                            if outcome == "error" else ""})
+                if cleanup_error is not None:
+                    raise cleanup_error
                 # Candidate responses have been consumed; persistent sessions and usage survive.
         except OSError as exc:
             raise ProviderError("Provider material preparation failed") from exc
         finally:
-            shutil.rmtree(root, ignore_errors=True)
             if resource_id is not None:
                 resource_manager.release(resource_id)
+                resource_manager.collect()
 
     @staticmethod
     def _has_images(value):
@@ -492,11 +505,25 @@ class ProviderRouter:
         mirror = self.store.root / "sessions" / run_id / digest(eff["provider"])[:16] / digest(operation)[:20]
         mirror.mkdir(parents=True, exist_ok=True)
         ResourceManager(self.store, self.config.load().cleanup).register(mirror, "session", run_id)
+        # Remember the native source digest independently of provider-written
+        # mirror refreshes. A changed native source replaces an old credential.
+        source_key = "native-auth/" + digest(str(mirror))
+        sources = self.store.get(run_id, source_key, {})
+        updated = {}
         # Copy only configuration/auth inputs, never all historical sessions.
         for pattern in transport.auth_patterns:
             for file in native.glob(pattern):
                 if file.is_file():
                     dest = mirror / file.relative_to(native)
-                    if file.name != "auth.json" or not dest.exists():
-                        atomic_write(dest, file.read_bytes())
+                    relative = file.relative_to(native).as_posix()
+                    raw = file.read_bytes()
+                    source_hash = digest(raw)
+                    if not dest.exists() or relative in sources and sources[relative] != source_hash:
+                        atomic_write(dest, raw)
+                    elif relative not in sources and file.name != "auth.json":
+                        atomic_write(dest, raw)
+                    updated[relative] = source_hash
+        for relative in sources.keys() - updated.keys():
+            (mirror / relative).unlink(missing_ok=True)
+        self.store.checkpoint(run_id, source_key, updated)
         return [(mirror, native)] if native.exists() else []

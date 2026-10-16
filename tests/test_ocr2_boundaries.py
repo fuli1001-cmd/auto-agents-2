@@ -31,7 +31,7 @@ from auto_agents_2.verification import VerificationService
 
 
 @pytest.mark.parametrize("mode", ["json", "copy", "hardlink", "embedded"])
-def test_sensitive_values_and_aliases_under_excluded_directories(tmp_path, mode):
+def test_ordinary_aliases_are_admitted_by_path_policy(tmp_path, mode):
     secret = tmp_path / (".credentials/config.json" if mode == "json" else "build/.env")
     secret.parent.mkdir(parents=True)
     value = "FIXTURE-PRIVATE-VALUE"
@@ -43,7 +43,7 @@ def test_sensitive_values_and_aliases_under_excluded_directories(tmp_path, mode)
         public.write_text(secret.read_text() if mode == "copy" else "prefix " + value + " suffix")
     safe = tmp_path / "safe.txt"
     safe.write_text("ordinary source")
-    assert public not in public_files(tmp_path) and safe in public_files(tmp_path)
+    assert public in public_files(tmp_path) and safe in public_files(tmp_path)
 
 
 @pytest.mark.parametrize("secret", ["x", "ab", "abc"])

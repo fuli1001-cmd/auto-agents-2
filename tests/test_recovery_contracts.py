@@ -157,10 +157,8 @@ def test_migration_is_explicit_idempotent_and_preserves_raw_unapplied_proposals(
     state = tmp_path / ".aa2"
     state.mkdir()
     with sqlite3.connect(state / "state.sqlite") as db:
-        db.executescript(";".join(s for s in SCHEMA.replace("'schema_version','5'", "'schema_version','1'").split(";")
+        db.executescript(";".join(s for s in SCHEMA.replace("'schema_version','6'", "'schema_version','1'").split(";")
                                  if "resource_holds" not in s))
-        db.execute("ALTER TABLE questions ADD COLUMN interaction TEXT NOT NULL DEFAULT '{}'")
-        db.execute("ALTER TABLE questions ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0")
     store = Store(tmp_path)
     rid = store.admit("requirements", {})["id"]
     proposal = {"changes": [{"path": "README.md", "operation": "replace", "old_text": "old", "content": "unapplied"}],
@@ -436,6 +434,8 @@ async def test_delivery_repeated_collection_failure_requires_diagnosis_and_keeps
     feedback = {"checks": [result.model_dump()]}
     assert await workflow.recovery.delivery_decision(rid, tmp_path, feedback, ["part.py"]) == "recheck"
     assert not agent.calls
+    workflow.recovery.start_delivery_recheck(rid, tmp_path)
+    workflow.recovery.complete_delivery_recheck(rid, feedback)
     assert await workflow.recovery.delivery_decision(rid, tmp_path, feedback, ["part.py"]) == "repair"
     assert agent.calls == [("review", True)]
     assert workflow.store.get(rid, "delivery/journal") == journal

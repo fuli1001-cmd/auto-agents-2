@@ -9,7 +9,7 @@ from .errors import AA2Error
 
 def package_manifest(path: Path) -> dict:
     try:
-        value = json.loads(path.read_text())
+        value = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(value, dict) or any(not isinstance(value.get(key, {}), dict)
                 for key in ("dependencies", "devDependencies")):
             raise ValueError("Expected dependency mappings")

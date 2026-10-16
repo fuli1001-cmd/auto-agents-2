@@ -20,7 +20,7 @@ from .evidence import (
     input_identity,
     runtime_configuration,
 )
-from .logs import SanitizedLog
+from .logs import AsyncLog, publish_log
 from .models import CheckResult, Command
 from .progress import Activity
 from .readview import sensitive_values
@@ -142,20 +142,22 @@ class VerificationService:
         logs = []
         try:
             for name in ("stdout.log", "stderr.log"):
-                logs.append(SanitizedLog(log_root / name, secrets))
+                log = AsyncLog(log_root / name, secrets)
+                logs.append(log)
+                await log.open()
             process = await self.sandbox.spawn(argv, cwd, env, outputs,
                 [workspace, environment.prefix] if environment else [workspace], overlays=overlays)
         except BaseException:
             for log in logs:
-                log.close()
+                await log.close()
             raise
 
         async def drain(stream, log):
             while chunk := await stream.read(8192):
                 if activity:
                     activity.output()
-                log.feed(chunk)
-            log.finish()
+                await log.feed(chunk)
+            await log.finish()
 
         readers = [asyncio.create_task(drain(process.stdout, logs[0])), asyncio.create_task(drain(process.stderr, logs[1]))]
         timed_out = False
@@ -180,12 +182,12 @@ class VerificationService:
                     outcomes = await asyncio.gather(*readers, return_exceptions=True)
                 finally:
                     for log in logs:
-                        log.close()
+                        await log.close()
         if not timed_out:
             for outcome in outcomes:
                 if isinstance(outcome, BaseException):
                     raise outcome
-        log_refs = [self.artifacts.put_file(log_root / name, "check_log") for name in ("stdout.log", "stderr.log")]
+        log_refs = [await publish_log(self.artifacts, log_root / name, "check_log") for name in ("stdout.log", "stderr.log")]
         for ref, log in zip(log_refs, logs):
             ref["capture_complete"] = log.complete
         output = "".join(log.tail for log in logs)

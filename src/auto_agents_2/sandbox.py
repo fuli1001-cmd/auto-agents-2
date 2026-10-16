@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from .errors import PolicyViolation
-from .util import atomic_write, identifier, write_json
+from .util import atomic_write, identifier
 
 
 class SandboxRunner:
@@ -111,20 +111,8 @@ class SandboxRunner:
         env = {**env, "GIT_OPTIONAL_LOCKS": "0"}
         command = await asyncio.to_thread(self.command, argv, cwd, writable, readable, overlays, hidden)
         from .managed_process import spawn_managed
-        process = await spawn_managed(command, cwd, env)
-        try:
-            process_root = self.root / "processes"
-            process_root.mkdir(parents=True, exist_ok=True)
-            write_json(process_root / f"{process.pid}.json", {
-                "version": 2, "pid": process.pid, "start": process_start(process.pid), "cwd": str(cwd),
-            })
-        except BaseException as exc:
-            try:
-                await self.stop(process)
-            except Exception as cleanup_error:
-                exc.add_note("Process cleanup also failed: " + type(cleanup_error).__name__)
-            raise
-        return process
+        paths = [cwd, *writable, *(readable or []), *(p for pair in overlays or [] for p in pair)]
+        return await spawn_managed(command, cwd, env, self.root, paths)
 
     async def stop(self, process):
         if process.stop_task is None:
@@ -152,24 +140,23 @@ class SandboxRunner:
             process.control.write_eof()
         except (OSError, RuntimeError):
             process.control.close()
-        # Closing the control channel makes the live anchor clean up its group.
-        # Never signal a numeric PID from the controller, even after timeout.
-        deadline = asyncio.get_running_loop().time() + 6
-        while process.supervisor.returncode is None and asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(0.02)
-        if process.supervisor.returncode is None:
-            raise PolicyViolation("Child termination could not be confirmed; process recovery record retained")
-        # On failed/cancelled capture, no reader may remain to resume a full pipe.
-        # Closing it also wakes an existing reader; successful capture is already EOF.
-        for stream in (process.stdout, process.stderr):
-            if stream is not None and not stream.at_eof():
-                transport = getattr(stream, "_transport", None)
-                if transport is not None:
-                    transport.close()
-        await asyncio.wait_for(process.supervisor.wait(), 2)
+        from .managed_process import finish_supervisor
+        await finish_supervisor(process.supervisor, process.record)
         await process.monitor
+        process.cleanup_confirmed = True
         process.control.close()
-        (self.root / "processes" / f"{process.pid}.json").unlink(missing_ok=True)
+        process.record.unlink(missing_ok=True)
+
+    def confirm_record(self, value):
+        record = Path(value)
+        if record.parent != self.root / "processes":
+            raise PolicyViolation("Invalid process cleanup record")
+        if not record.exists():
+            return
+        data = json.loads(record.read_text())
+        if data.get("status") != "cleaned":
+            raise PolicyViolation("Validated provider result awaits process cleanup; preserve it without redispatch")
+        record.unlink(missing_ok=True)
 
     def reap_orphans(self):
         directory = self.root / "processes"
@@ -177,9 +164,16 @@ class SandboxRunner:
             return
         for file in directory.glob("*.json"):
             data = json.loads(file.read_text())
-            pid = data["pid"]
-            if process_start(pid) == data["start"] and data["start"]:
+            if data.get("version") == 3 and data.get("status") == "cleaned":
+                file.unlink(missing_ok=True)
+                continue
+            if not data.get("start") or not data.get("pid"):
+                raise PolicyViolation("Recorded process identity is unknown; preserving recovery record")
+            current = process_start(data["pid"])
+            if current == data["start"]:
                 raise PolicyViolation("A recorded process is still live; preserve its recovery record until owned cleanup completes")
+            if data.get("version") == 3:
+                raise PolicyViolation("Process cleanup lacks confirmation; preserving recovery record and mounted resources")
             file.unlink(missing_ok=True)
 
 
@@ -187,5 +181,7 @@ def process_start(pid: int) -> str:
     try:
         fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
         return "" if fields[0] == "Z" else fields[19]
-    except (OSError, IndexError):
+    except FileNotFoundError:
         return ""
+    except (OSError, IndexError, ValueError) as exc:
+        raise PolicyViolation("Process identity cannot be inspected; preserving recovery state") from exc

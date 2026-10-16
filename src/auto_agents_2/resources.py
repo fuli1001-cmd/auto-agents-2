@@ -13,6 +13,11 @@ from .store import Store
 from .util import file_lock, identifier, now
 
 
+def valid_receipt(receipt):
+    from .util import digest
+    return isinstance(receipt, dict) and digest({k: v for k, v in receipt.items() if k != "digest"}) == receipt.get("digest")
+
+
 class ResourceManager:
     def __init__(self, store: Store, cleanup: Cleanup):
         self.store, self.policy = store, cleanup
@@ -57,12 +62,40 @@ class ResourceManager:
             return [Path(row[0]) for row in db.execute("SELECT path FROM resource_holds")]
         return []
 
+    def process_paths(self):
+        paths = []
+        for record in (self.store.root / "processes").glob("*.json"):
+            try:
+                data = json.loads(record.read_text())
+                if data.get("status") != "cleaned":
+                    paths.extend(Path(value) for value in data.get("paths", [data.get("cwd", str(self.store.root))]))
+            except (OSError, ValueError, TypeError):
+                paths.append(self.store.root)  # Unreadable ownership is not absence.
+        return paths
+
+    def protect_pending_deliveries(self):
+        """Quarantine corrupt receipt resources before any startup collection."""
+        from .util import digest
+        for run in self.store.successful():
+            try:
+                receipt = self.store.get(run["id"], "delivery/receipt")
+            except ValueError:
+                receipt = {}
+            if receipt is not None and not valid_receipt(receipt):
+                with self.store.connect() as db:
+                    rows = list(db.execute("SELECT path FROM resources WHERE run_id=? AND state!='removed'", (run["id"],)))
+                    for row in rows:
+                        db.execute("INSERT OR IGNORE INTO resource_holds VALUES(?,?,?,?)",
+                                   ("receipt/" + run["id"] + "/" + digest(row[0]), row[0], run["id"], "invalid delivery receipt"))
+                self.store.update(run["id"], cleanup_pending=True, cleanup_errors=["Delivery receipt integrity mismatch; resources retained"])
+
     def release_run(self, run_id: str):
         with self.store.connect() as db:
             db.execute("UPDATE resources SET refs=0,touched=? WHERE run_id=?", (now(), run_id))
 
     def recover_disposable(self):
         """Call after obtaining the controller lock and reaping previous children."""
+        self.protect_pending_deliveries()
         with self.store.connect() as db:
             db.execute("UPDATE resources SET refs=0 WHERE kind='temporary'")
         from .artifact_gc import recover_diagnostic_holds
@@ -76,15 +109,18 @@ class ResourceManager:
         try:
             receipt = self.store.get(rid, "delivery/receipt")
             completed = self.store.run(rid)["status"] == "SUCCEEDED"
-        except (OSError, sqlite3.Error):
+        except (OSError, sqlite3.Error, ValueError):
+            self.protect_pending_deliveries()
             return  # complete_delivery already durably set cleanup_pending.
-        if not receipt or not completed:
+        if receipt is None or not completed:
             return
-        from .util import digest
-        if digest({k: v for k, v in receipt.items() if k != "digest"}) != receipt["digest"]:
-            raise PolicyViolation("Delivery receipt integrity mismatch; preserving resources")
         errors = []
         try:
+            if not valid_receipt(receipt):
+                self.protect_pending_deliveries()
+                raise PolicyViolation("Delivery receipt integrity mismatch; preserving resources")
+            with self.store.connect() as db:
+                db.execute("DELETE FROM resource_holds WHERE run_id=? AND purpose='invalid delivery receipt'", (rid,))
             self.release_run(rid)
             errors.extend(self.collect()["errors"])
             with self.store.connect() as db:
@@ -180,6 +216,7 @@ class ResourceManager:
                 retained = [dict(r) for r in db.execute("SELECT * FROM resources WHERE state!='removed'")]
                 pins = [Path(row[0]) for row in db.execute("SELECT path FROM delivery_pins")]
                 pins.extend(self.held_paths(db))
+                pins.extend(self.process_paths())
                 terminal = {row[0] for row in db.execute("SELECT id FROM runs WHERE status IN ('SUCCEEDED','CANCELLED')")}
                 for row in retained:
                     if row["run_id"] in terminal:
@@ -193,7 +230,8 @@ class ResourceManager:
                     counted.append(path)
             cache_size = sum(tree_size(path) for path in counted)
             pressure = shutil.disk_usage(self.store.root).free < self.policy.min_free_bytes
-            for row in rows:
+            removed_paths = {}
+            for row in sorted(rows, key=lambda r: (-len(Path(r["path"]).parts), r["touched"])):
                 path = Path(row["path"])
                 if row["run_id"]:
                     run = self.store.run(row["run_id"])
@@ -207,7 +245,7 @@ class ResourceManager:
                 if path.absolute() != path.resolve() or not path.resolve().is_relative_to(self.store.root.resolve()):
                     result["errors"].append(f"Unsafe resource: {path}")
                     continue
-                size = sizes[row["path"]]
+                size = max(0, sizes[row["path"]] - sum(size for removed, size in removed_paths.items() if removed.is_relative_to(path)))
                 if any(Path(r["path"]) != path and Path(r["path"]).is_relative_to(path) for r in retained):
                     continue  # Registered descendants must be reclaimed under their own policy first.
                 if any(path.is_relative_to(p) or p.is_relative_to(path)
@@ -216,6 +254,8 @@ class ResourceManager:
                 result["candidates"].append(str(path))
                 if dry_run:
                     cache_size -= size if row["kind"] in {"cache", "environment"} else 0
+                    retained = [r for r in retained if r["id"] != row["id"]]
+                    removed_paths[path] = size
                     continue
                 try:
                     with self.store.connect() as db:
@@ -226,6 +266,7 @@ class ResourceManager:
                         protected = [Path(r["path"]) for r in db.execute(
                             "SELECT path FROM resources WHERE state!='removed' AND refs>0 UNION SELECT path FROM delivery_pins")]
                         protected.extend(self.held_paths(db))
+                        protected.extend(self.process_paths())
                         if any(p.is_relative_to(path) or path.is_relative_to(p) for p in protected):
                             continue
                         descendants = [Path(r[0]) for r in db.execute("SELECT path FROM resources WHERE state!='removed' AND id!=?", (row["id"],))]
@@ -244,6 +285,8 @@ class ResourceManager:
                         elif path.exists():
                             path.unlink()
                         db.execute("UPDATE resources SET state='removed' WHERE id=?", (row["id"],))
+                    retained = [r for r in retained if r["id"] != row["id"]]
+                    removed_paths[path] = size
                     result["removed"] += 1
                     result["bytes"] += size
                     cache_size -= size if row["kind"] in {"cache", "environment"} else 0

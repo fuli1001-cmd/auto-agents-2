@@ -11,12 +11,12 @@ from .errors import AA2Error, IncompleteIteration
 from .interaction import validate_answer
 from .recovery import implemented_candidate
 from .replanning import assess
-from .util import digest, identifier, now, redact
+from .util import digest, file_lock, identifier, now, redact
 
 TERMINAL = ("SUCCEEDED", "CANCELLED")
 SCHEMA = """
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            INSERT OR IGNORE INTO meta VALUES('schema_version','5');
+            INSERT OR IGNORE INTO meta VALUES('schema_version','6');
             CREATE TABLE IF NOT EXISTS runs(
                 id TEXT PRIMARY KEY, status TEXT NOT NULL, stage TEXT NOT NULL,
                 created REAL NOT NULL, updated REAL NOT NULL, data TEXT NOT NULL);
@@ -31,7 +31,8 @@ SCHEMA = """
             CREATE TABLE IF NOT EXISTS questions(
                 id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), key TEXT NOT NULL,
                 prompt TEXT NOT NULL, artifact_hash TEXT NOT NULL, answer TEXT,
-                created REAL NOT NULL, UNIQUE(run_id,key,artifact_hash));
+                created REAL NOT NULL, interaction TEXT NOT NULL DEFAULT '{}',
+                superseded INTEGER NOT NULL DEFAULT 0, UNIQUE(run_id,key,artifact_hash));
             CREATE TABLE IF NOT EXISTS usage(
                 event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
                 provider TEXT NOT NULL, attempt TEXT NOT NULL, data TEXT NOT NULL);
@@ -64,24 +65,38 @@ class Store:
             # Readers and engine construction must never perform a migration.
             with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)) as db:
                 meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
-                version = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] if meta else "0"
-                if version not in {"0", "1", "2", "3", "4", "5"}:
+                row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() if meta else None
+                version = row[0] if row else "0"
+                if version not in {"0", "1", "2", "3", "4", "5", "6"}:
                     raise AA2Error("Unsupported state database version")
             return
         if readonly:
             raise AA2Error("Project state database does not exist")
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.root.chmod(0o700)
-        with self.connect() as db:
-            db.executescript(SCHEMA)
-            if db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] != "5":
-                raise AA2Error("Unsupported state database version")
-            db.execute("BEGIN IMMEDIATE")
-            columns = {row[1] for row in db.execute("PRAGMA table_info(questions)")}
-            if "interaction" not in columns:
-                db.execute("ALTER TABLE questions ADD COLUMN interaction TEXT NOT NULL DEFAULT '{}'")
-            if "superseded" not in columns:
-                db.execute("ALTER TABLE questions ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0")
+        with file_lock(self.root / "initialize.lock"):
+            if self.path.exists():
+                return
+            temporary = self.root / "state.initializing.sqlite"
+            temporary.unlink(missing_ok=True)
+            try:
+                with closing(sqlite3.connect(temporary)) as db:
+                    db.execute("PRAGMA synchronous=FULL")
+                    db.execute("BEGIN IMMEDIATE")
+                    for statement in SCHEMA.split(";"):
+                        if statement.strip():
+                            db.execute(statement)
+                    db.commit()
+                with temporary.open("rb") as stream:
+                    os.fsync(stream.fileno())
+                temporary.replace(self.path)
+                fd = os.open(self.root, os.O_DIRECTORY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     @contextmanager
     def connect(self):
@@ -107,8 +122,13 @@ class Store:
             raise AA2Error("Read-only state cannot migrate")
         with self.connect() as db:
             meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
-            version = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] if meta else "0"
-            if version == "5":
+            row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() if meta else None
+            version = row[0] if row else "0"
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            import re
+            required = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", SCHEMA))
+            columns = {row[1] for row in db.execute("PRAGMA table_info(questions)")}
+            if version == "6" and required <= tables and {"interaction", "superseded"} <= columns:
                 return
             backup = self.root / f"state-v{version if version != '0' else '1'}.backup.sqlite"
             if not backup.exists():
@@ -147,7 +167,7 @@ class Store:
                         self._put(db, rid, "task_state/" + task["id"], {
                             "version": 1, "revision": 1, "implementation": "accepted" if task["id"] in done else "pending",
                             "evidence": "stale" if task["id"] in done else "absent"})
-                if version in {"3", "4"}:
+                if version in {"3", "4", "5", "6"}:
                     continue  # v3 data semantics are already current; only its schema needs repair.
                 owners = {}
                 for key, value in records.items():
@@ -168,8 +188,8 @@ class Store:
                     if key.startswith("replanning/evidence/") and key != "replanning/evidence/contracts":
                         self._put(db, rid, key, {**value, "comparable": False,
                                                "comparison_reason": "legacy evidence requires revalidation"})
-            db.execute("UPDATE meta SET value='5' WHERE key='schema_version'")
-            self._event(db, None, "state.migrated", {"version": 5, "backup": str(backup)})
+            db.execute("UPDATE meta SET value='6' WHERE key='schema_version'")
+            self._event(db, None, "state.migrated", {"version": 6, "backup": str(backup)})
 
     def finish_recovery(self, rid, updates, pending, *, replan=None, successor=None):
         """Dispatch and retire the obsolete question together; retain raw history."""

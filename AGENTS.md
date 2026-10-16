@@ -12,3 +12,9 @@ verification, environment management and resource collection separate.
 - A provider response is a proposal. Only verified evidence may advance a gate.
 - Preserve unfinished iterations, user changes, protected tests and recovery artifacts.
 - Do not include credentials or native provider configuration contents in logs.
+- Store real secrets only in designated secret files (such as `.env` or configured
+  `sensitive_paths`). Source, tests, documentation, examples and generated material
+  must reference environment or configuration variables, never real secret literals.
+  Use unmistakable placeholders in examples. Never copy or link secrets into ordinary
+  files, prompts, logs or diagnostics. Model material admission protects secret paths;
+  it does not inspect ordinary file contents, hashes or inodes for secrets.

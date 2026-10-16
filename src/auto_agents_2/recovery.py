@@ -12,7 +12,7 @@ from .util import digest
 
 Action = Literal["diagnose", "recheck", "repair", "plan_patch", "clarify", "provider_research", "prototype", "design", "blocked"]
 COLLECTION_FAILURES = {"test_report_missing", "test_report_invalid", "incomplete_log_capture",
-                       "source_changed", "execution_inputs_changed", "unsupported_test_runner"}
+                       "source_changed", "execution_inputs_changed", "test_attachments_invalid", "unsupported_test_runner"}
 
 
 class ExecutionContract(Record):
@@ -168,16 +168,20 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None)
             raise AA2Error("Diagnosis names unknown tasks")
         if diagnosis.action == "repair" and not diagnosis.task_ids and failure.origin_id != "delivery":
             raise AA2Error("A repair diagnosis must identify existing task scopes")
+        from .workspace import path_allowed
+        targets = {target.task_id: target for target in diagnosis.repair_targets}
+        if failure.origin_id == "delivery" and targets:
+            raise AA2Error("Delivery repair does not support task repair targets")
+        for task_id, target in targets.items():
+            if task_id not in diagnosis.task_ids or task_id not in known:
+                raise AA2Error("Repair target must belong to a named existing task")
+            if (not set(target.evidence_refs) <= set(evidence_references(failure))
+                    or not all(path in evidence_references(failure) and path_allowed(path, known[task_id].allowed_paths)
+                               for path in target.paths)):
+                raise AA2Error("Repair target is outside the evidenced existing task scope; amend the plan if necessary")
         if diagnosis.action == "repair" and set(diagnosis.task_ids) - {failure.task_id} and failure.origin_id != "delivery":
-            from .workspace import path_allowed
-            targets = {target.task_id: target for target in diagnosis.repair_targets}
             if set(targets) != set(diagnosis.task_ids):
                 raise AA2Error("Cross-task repair requires evidence and owned paths for each existing task")
-            for task_id, target in targets.items():
-                if (not set(target.evidence_refs) <= set(evidence_references(failure))
-                        or not all(path in evidence_references(failure) and path_allowed(path, known[task_id].allowed_paths)
-                                   for path in target.paths)):
-                    raise AA2Error("Repair target is outside the evidenced existing task scope; amend the plan if necessary")
         action = "blocked" if diagnosis.action == "diagnose" else diagnosis.action
         tasks, refs, reason = diagnosis.task_ids, diagnosis.evidence_refs, diagnosis.reason
     origins = {t.id: t.origin_id or t.id for t in plan.tasks} if plan else {}
@@ -185,7 +189,7 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None)
     return RecoveryDecision(failure_id=failure.id, action=action, task_ids=tasks,
                             evidence_refs=refs, reason=reason, budget_owner=failure.origin_id,
                             budget_owners=owners,
-                            repair_targets=diagnosis.repair_targets if diagnosis else [])
+                            repair_targets=diagnosis.repair_targets if diagnosis and action == "repair" else [])
 
 
 def failure_summary(checks):

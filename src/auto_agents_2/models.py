@@ -112,7 +112,8 @@ class PreviewSpec(Record):
 class PlanResult(Record):
     summary: str
     document: str
-    tasks: list[TaskSpec] = Field(min_length=1)
+    mode: Literal["implementation", "verification_only"] = "implementation"
+    tasks: list[TaskSpec]
     final_checks: list[Command] = Field(min_length=1)
     environment_file: str = Field(default="", description=(
         "Workspace-root-relative PATH to a Conda YAML file, e.g. environment.yml, or empty for discovery. "
@@ -123,6 +124,14 @@ class PlanResult(Record):
     preview: PreviewSpec | None = None
     runtime_prepare: list[Command] = []
     runtime_probes: list[Command] = []
+
+    @model_validator(mode="after")
+    def task_mode(self):
+        if self.mode == "implementation" and not self.tasks:
+            raise ValueError("Implementation plans require tasks")
+        if self.mode == "verification_only" and self.tasks:
+            raise ValueError("Verification-only plans cannot contain implementation tasks")
+        return self
 
 
 class RecoveryRequest(Record):

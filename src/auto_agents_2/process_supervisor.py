@@ -1,8 +1,4 @@
-"""Private process-group anchor. Invoked directly with an inherited control socket.
-
-Only this still-live group leader signals its own group. Workload completion and
-supervisor teardown are deliberately separate events; control EOF also tears down.
-"""
+"""Private Linux subreaper: retain ownership until every adopted child is reaped."""
 import ctypes
 import json
 import os
@@ -12,68 +8,104 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+
+def save(path, document):
+    temporary = path.with_suffix(".writing")
+    with temporary.open("w", encoding="utf-8") as stream:
+        json.dump(document, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    fd = os.open(path.parent, os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def main():
     control = socket.socket(fileno=int(sys.argv[1]))
     control.set_inheritable(False)
-    # Adopt orphaned descendants so escaped sessions also have an owned parent.
-    if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0):
-        raise RuntimeError("Cannot establish process ownership")
-    signal.signal(signal.SIGTERM, lambda *_: None)
-    child = subprocess.Popen(sys.argv[2:], close_fds=True)
-    for fd in (0, 1, 2):
-        os.close(fd)
+    record = Path(sys.argv[2])
+    document = json.loads(record.read_text())
+    document.update(pid=os.getpid(), start=Path(f"/proc/{os.getpid()}/stat").read_text().rsplit(")", 1)[1].split()[19],
+                    status="running")
+    save(record, document)
+    child = None
+    reported = False
 
     def report(value):
-        control.sendall((json.dumps(value) + "\n").encode())
+        try:
+            control.sendall((json.dumps(value) + "\n").encode())
+        except OSError:
+            pass
 
-    reported = False
+    def reap():
+        nonlocal reported
+        # waitpid(-1) reaps adopted zombies during normal execution as well as
+        # teardown. Account for the original child here, never poll it separately.
+        while True:
+            try:
+                pid, status = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                return
+            if not pid:
+                return
+            if child is not None and pid == child.pid:
+                child.returncode = os.waitstatus_to_exitcode(status)
+                if not reported:
+                    report({"exited": child.returncode})
+                    reported = True
+
     try:
+        if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0):
+            raise RuntimeError("Cannot establish process ownership")
+        signal.signal(signal.SIGTERM, lambda *_: None)
+        child = subprocess.Popen(sys.argv[3:], close_fds=True)
+        for fd in (0, 1, 2):
+            os.close(fd)
         report({"started": child.pid})
         while True:
-            code = child.poll()
-            if code is not None and not reported:
-                report({"exited": code})
-                reported = True
+            reap()
             if select.select([control], [], [], 0.02)[0]:
-                control.recv(1)  # Stop request or EOF both request teardown.
+                control.recv(1)
                 break
     except (OSError, KeyboardInterrupt):
         pass
     finally:
-        os.killpg(os.getpid(), signal.SIGTERM)
+        try:
+            if child is not None:
+                os.killpg(os.getpid(), signal.SIGTERM)
+        except OSError:
+            pass
         deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
-            if child.poll() is not None:
-                if not reported:
-                    try:
-                        report({"exited": child.returncode})
-                    except OSError:
-                        pass
-                    reported = True
-                break
+        while time.monotonic() < deadline and child is not None and child.returncode is None:
+            reap()
             time.sleep(0.02)
-        # These are direct unreaped children: their IDs cannot be reused until
-        # this supervisor reaps them. Repeat after adoption of grandchildren.
-        children_file = f"/proc/{os.getpid()}/task/{os.getpid()}/children"
-        for _ in range(200):
-            with open(children_file) as stream:
-                children = [int(pid) for pid in stream.read().split()]
+        children_file = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
+        # No fixed pass limit: an inspection/permission failure keeps the anchor
+        # and durable record alive. Other children must still be cleaned up.
+        while True:
+            try:
+                reap()
+                children = [int(pid) for pid in children_file.read_text().split()]
+            except OSError:
+                time.sleep(0.05)
+                continue
             if not children:
                 break
             for pid in children:
                 try:
                     os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            for pid in children:
-                try:
-                    os.waitpid(pid, os.WNOHANG)
-                except ChildProcessError:
-                    pass
+                except OSError:
+                    continue
             time.sleep(0.01)
-        os.killpg(os.getpid(), signal.SIGKILL)
+        document["status"] = "cleaned"
+        save(record, document)
+        report({"cleaned": True})
+        control.close()
 
 
 if __name__ == "__main__":

@@ -6,6 +6,8 @@ import os
 import stat
 import subprocess
 import tempfile
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from .errors import AA2Error, IntegrationConflict, PolicyViolation, ProtectedChange
@@ -22,9 +24,23 @@ PROTECTED_NAMES = {"AGENTS.md", "CLAUDE.md", "GEMINI.md", "conftest.py", "pytest
                    "Makefile", "justfile"}
 
 
+_git_environment = ContextVar("git_environment", default=None)
+
+
+@contextmanager
+def isolated_git():
+    variables = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    variables.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    token = _git_environment.set(variables)
+    try:
+        yield variables
+    finally:
+        _git_environment.reset(token)
+
+
 def git(root: Path, *args: str, input: str | None = None, env: dict | None = None) -> str:
     result = subprocess.run(["git", "-C", str(root), *args], input=os.fsencode(input) if input is not None else None,
-                            capture_output=True, env=env, timeout=120)
+                            capture_output=True, env=env if env is not None else _git_environment.get(), timeout=120)
     if result.returncode:
         raise AA2Error(os.fsdecode(result.stderr).strip() or "Git operation failed")
     # NUL-delimited names and leading/trailing pathname whitespace are data.
@@ -74,7 +90,10 @@ def input_entry(path: Path, root: Path, seen=frozenset(), excluded=None, *, omit
     if stat.S_ISLNK(info.st_mode):
         target = os.readlink(path)
         resolved = path.parent / target
-        resolved = Path(os.path.abspath(resolved))
+        try:
+            resolved = resolved.resolve()
+        except RuntimeError:
+            return ["link", target, ["cycle"]]
         return ["link", target, input_entry(resolved, root, seen | {path}, excluded, omitted=omitted, overlay=overlay)]
     if stat.S_ISREG(info.st_mode):
         return ["file", bool(info.st_mode & 0o111), file_digest(path)]
@@ -307,15 +326,18 @@ class WorkspaceManager:
             self._stage_checkpoint(path, env)
             return git(path, "write-tree", env=env)
 
-    def checkpoint(self, path: Path, ref: str, message: str, *, expected_ref=None, expected_tree=None) -> str:
+    def checkpoint(self, path: Path, ref: str, message: str, *, expected_ref=None, expected_tree=None, expected_parents=None) -> str:
         self._stage_checkpoint(path)
         if expected_tree and git(path, "write-tree") != expected_tree:
             raise AA2Error("Prepared checkpoint tree changed; preserving staged user changes")
-        if git(path, "diff", "--cached", "--name-only"):
+        merge_file = Path(git(path, "rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"))
+        if merge_file.exists() or git(path, "diff", "--cached", "--name-only"):
             git(path, "-c", "user.name=aa2", "-c", "user.email=aa2@localhost", "commit", "-m", message)
         commit = git(path, "rev-parse", "HEAD")
         if expected_tree and git(path, "rev-parse", "HEAD^{tree}") != expected_tree:
             raise AA2Error("Prepared checkpoint commit does not contain the complete reviewed tree")
+        if expected_parents is not None and git(path, "rev-list", "--parents", "-n", "1", commit).split()[1:] != expected_parents:
+            raise AA2Error("Prepared checkpoint merge parents changed; preserving recovery state")
         git(self.project, "update-ref", ref, commit, *([] if expected_ref is None else [expected_ref or "0" * len(commit)]))
         return commit
 
@@ -346,6 +368,10 @@ class WorkspaceManager:
         if current_ref not in {intent["ref_before"], head}:
             raise AA2Error("Prepared checkpoint reference changed")
         if head == intent["head"]:
+            merge_file = Path(git(path, "rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"))
+            parents = [head, *(merge_file.read_text().splitlines() if merge_file.exists() else [])]
+            if parents != intent["parents"]:
+                raise AA2Error("Prepared checkpoint merge parents changed; preserving user changes")
             def entries(raw):
                 result = {}
                 for row in raw.split("\0"):
@@ -366,7 +392,8 @@ class WorkspaceManager:
             if self._checkpoint_tree(path, git(path, "ls-files", "--stage", "-z"), git(path, "ls-files", "-v", "-z")) != expected_tree:
                 raise AA2Error("Prepared checkpoint tree changed; preserving staged user changes")
             return self.checkpoint(path, intent["ref"], "aa2: reviewed integration repair",
-                                   expected_ref=current_ref, expected_tree=expected_tree)
+                                   expected_ref=current_ref, expected_tree=expected_tree,
+                                   expected_parents=intent["parents"] if len(intent["parents"]) > 1 or git(path, "rev-parse", "HEAD^{tree}") != expected_tree else None)
         parents = git(path, "rev-list", "--parents", "-n", "1", head).split()[1:]
         if (parents != intent["parents"] or git(path, "diff", "--name-only", "HEAD")
                 or git(path, "rev-parse", "HEAD^{tree}") != expected_tree):

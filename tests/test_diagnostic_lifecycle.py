@@ -11,6 +11,7 @@ from auto_agents_2.logs import capture_diagnostics
 from auto_agents_2.models import Finding, ReviewResult
 from auto_agents_2.resources import ResourceManager
 from auto_agents_2.store import Store
+from auto_agents_2.util import digest
 
 
 def setup(tmp_path):
@@ -28,6 +29,7 @@ def test_log_producer_checkpoint_consumer_and_final_receipt(tmp_path):
     resources.collect_artifacts()
     assert artifacts.read(log) == "full diagnostic"  # Producer not yet published.
     receipt = {"checks": [{"exit_code": 0, "logs": [log], "report": report}]}
+    receipt["digest"] = digest(receipt)
     store.checkpoint(rid, "delivery/receipt", receipt)
     resources.collect_artifacts()
     assert artifacts.read(log)
@@ -243,7 +245,8 @@ async def test_retired_diagnostic_does_not_replace_required_report(tmp_path):
     checks = await VerificationService(store.root, SandboxRunner(store.root), resources).run(
         [command], tmp_path, environment)
     assert checks[0].exit_code == 0 and checks[0].tests == 1
-    store.checkpoint(rid, "delivery/receipt", {"checks": [check.model_dump() for check in checks]})
+    receipt = {"checks": [check.model_dump() for check in checks]}
+    store.checkpoint(rid, "delivery/receipt", {**receipt, "digest": digest(receipt)})
     store.update(rid, status="SUCCEEDED")
     resources.collect_artifacts()
     assert all(artifacts.released(ref) for ref in checks[0].logs)
@@ -268,7 +271,8 @@ async def test_model_view_marks_retired_nested_logs_and_rejects_accidental_loss(
     log = artifacts.put("optional finished check diagnostic", "check_log")
     report = artifacts.put("mandatory structured evidence")
     parent = artifacts.put({"logs": [log], "report": report})
-    store.checkpoint(rid, "delivery/receipt", parent)
+    receipt = {"evidence": parent}
+    store.checkpoint(rid, "delivery/receipt", {**receipt, "digest": digest(receipt)})
     store.update(rid, status="SUCCEEDED")
     resources.collect_artifacts()
     router = ProviderRouter(config, store, SandboxRunner(store.root, _test_unconfined=True))

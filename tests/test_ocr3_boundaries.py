@@ -92,15 +92,15 @@ async def test_provider_result_boundary_in_real_sandbox(tmp_path, mode):
     ('DB_PASS="line one\\nline two"\n', "line one\nline two"),
     ("//registry.invalid/:_authToken=private-token\n", "private-token"),
 ])
-def test_all_protected_assignment_values_are_filtered(tmp_path, content, value):
+def test_protected_values_redact_logs_without_filtering_ordinary_files(tmp_path, content, value):
     (tmp_path / ".env").write_text(content)
     (tmp_path / "public.py").write_text("alias=" + value)
     assert value in sensitive_values(tmp_path)
-    assert tmp_path / "public.py" not in public_files(tmp_path)
+    assert tmp_path / "public.py" in public_files(tmp_path)
 
 
 @pytest.mark.parametrize("name,directory", [(".env", False), (".aws", True), ("secrets", True)])
-def test_sensitive_links_block_model_material_without_mutation(tmp_path, name, directory):
+def test_sensitive_links_are_omitted_without_blocking_ordinary_files(tmp_path, name, directory):
     target = tmp_path / "ordinary"
     if directory:
         target.mkdir()
@@ -109,8 +109,7 @@ def test_sensitive_links_block_model_material_without_mutation(tmp_path, name, d
         target.write_text("DB_PASS=fixture")
     link = tmp_path / name
     link.symlink_to(target)
-    with pytest.raises(PolicyViolation, match="symlinks"):
-        public_files(tmp_path, ["secrets"])
+    assert link not in public_files(tmp_path, ["secrets"])
     assert link.is_symlink() and target.exists()
 
 

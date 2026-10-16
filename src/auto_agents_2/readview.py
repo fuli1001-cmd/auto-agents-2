@@ -10,9 +10,9 @@ from pathlib import Path
 
 from .errors import PolicyViolation
 from .util import SECRET
-from .workspace import EXCLUDED, file_digest, git
+from .workspace import EXCLUDED, git
 
-VIEW_VERSION = "public-v4"
+VIEW_VERSION = "public-v5-paths"
 SENSITIVE_DIRS = {".aws", ".ssh", ".codex", ".gemini", ".credentials"}
 SENSITIVE_FILES = {".netrc", ".npmrc", ".pypirc", ".git-credentials"}
 
@@ -24,42 +24,23 @@ def sensitive(path: Path, extra=()) -> bool:
 
 
 def public_files(root: Path, extra=()):
-    candidates, denied_inodes, denied_hashes = [], set(), set()
-    for path in sensitive_files(root, extra):
-        info = path.stat()
-        denied_inodes.add((info.st_dev, info.st_ino))
-        denied_hashes.add(file_digest(path))
+    """Admission depends only on protected paths, never on file contents or identity."""
+    candidates = []
     for directory, folders, names in os.walk(root, followlinks=False):
-        folders[:] = [n for n in folders if n not in EXCLUDED - SENSITIVE_DIRS
-                      and not Path(directory, n).is_symlink()]
+        folders[:] = [name for name in folders if name not in EXCLUDED
+                      and not Path(directory, name).is_symlink()
+                      and not sensitive(Path(directory, name).relative_to(root), extra)]
         for name in names:
             path = Path(directory, name)
+            relative = path.relative_to(root)
+            if name in EXCLUDED or sensitive(relative, extra) or path.is_symlink() or not path.is_file():
+                continue
             try:
-                path.relative_to(root).as_posix().encode("utf-8")
+                relative.as_posix().encode("utf-8")
             except UnicodeError:
                 raise PolicyViolation("Non-UTF-8 filenames cannot be delivered to the model; rename them explicitly") from None
-            if path.is_symlink() or not path.is_file():
-                continue
-            info = path.stat()
-            inode = (info.st_dev, info.st_ino)
-            if sensitive(path.relative_to(root), extra):
-                denied_inodes.add(inode)
-                denied_hashes.add(file_digest(path))
-            elif name not in EXCLUDED:
-                candidates.append((path, inode))
-    values = [v.encode() for v in sensitive_values(root, extra)]
-    def contains_protected(path):
-        retain = max((len(v) for v in values), default=1) - 1
-        tail = b""
-        with path.open("rb") as stream:
-            while chunk := stream.read(65536):
-                data = tail + chunk
-                if any(v in data for v in values):
-                    return True
-                tail = data[-retain:] if retain else b""
-        return False
-    return [path for path, inode in candidates if inode not in denied_inodes
-            and file_digest(path) not in denied_hashes and not contains_protected(path)]
+            candidates.append(path)
+    return candidates
 
 
 def create_view(workspace: Path, destination: Path, extra=()) -> Path:
@@ -123,7 +104,7 @@ def sensitive_values(workspace: Path, extra=()) -> list[str]:
 
 
 def sensitive_files(root: Path, extra=()):
-    """Output exclusions do not exempt protected files from alias detection."""
+    """Protected values are read only for diagnostic redaction, never admission."""
     for directory, folders, names in os.walk(root, followlinks=False):
         for name in folders + names:
             path = Path(directory, name)

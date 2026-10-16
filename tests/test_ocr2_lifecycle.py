@@ -12,7 +12,7 @@ import test_recovery_contracts as contracts
 from test_runtime import configured
 from test_workflow import CodingAgent, engine
 
-from auto_agents_2 import design, logs, verification
+from auto_agents_2 import design, logs
 from auto_agents_2.artifacts import ArtifactStore
 from auto_agents_2.delivery import DeliveryCoordinator, RuntimeVerificationError
 from auto_agents_2.environment import Environment
@@ -154,12 +154,13 @@ async def test_verifier_closes_logs_when_stopping_fails(tmp_path, monkeypatch):
     async def stop(*a):
         raise OSError("stop failure")
     created = []
-    original = verification.SanitizedLog
+    import auto_agents_2.logs as logging
+    original = logging.SanitizedLog
     def make(*a, **kw):
         log = original(*a, **kw)
         created.append(log)
         return log
-    monkeypatch.setattr(verification, "SanitizedLog", make)
+    monkeypatch.setattr(logging, "SanitizedLog", make)
     service = VerificationService(store.root, SimpleNamespace(spawn=spawn, stop=stop))
     with pytest.raises(OSError, match="stop failure"):
         await service._check(Command(argv=["true"], timeout=1), work, None, "baseline", scratch, log_root=logroot)
@@ -500,7 +501,7 @@ def test_actual_missing_table_schema_migration_is_atomic(tmp_path, version, fail
     store.migrate()
     store.migrate()
     with store.connect() as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "5"
+        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "6"
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='diagnostic_holds'").fetchone()
     assert store.get("old", "rounds/T") == {"round": 4}
     assert (state / f"state-v{version}.backup.sqlite").is_file()

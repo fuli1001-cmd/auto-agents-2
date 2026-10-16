@@ -56,6 +56,12 @@ class RecoveryController:
         evidence_source = tree_hash(work)
         if saved and saved.get("evidence_source_hash", evidence_source) != evidence_source:
             raise AA2Error("Delivery recovery evidence source changed; preserve the candidate")
+        if saved and saved.get("decision", {}).get("action") == "recheck" and saved.get("recheck_key"):
+            reservation = self.store.get(rid, saved["recheck_key"], {})
+            if reservation.get("phase") == "reserved" and reservation.get("observation") == observation:
+                return "recheck"
+            if reservation.get("phase") == "started":
+                raise AA2Error("Interrupted delivery recheck lacks a completed observation; preserve its occupied reservation")
         evidence_ref = "recovery/delivery-evidence/" + observation
         self.store.checkpoint(rid, evidence_ref, feedback)
         kind = "integration" if feedback.get("conflicts") else "review"
@@ -104,11 +110,11 @@ class RecoveryController:
                 decision = adjudicate(failure, diagnosis=diagnosis)
             except AA2Error as exc:
                 rejection = {"diagnosis": diagnosis.model_dump(), "validation_error": str(exc)}
-                self.store.checkpoints(rid, {key: {"failure": failure.model_dump(), "diagnosis_feedback": rejection},
+                self.store.checkpoints(rid, {key: {"failure": failure.model_dump(), "evidence_source_hash": evidence_source, "diagnosis_feedback": rejection},
                     f"recovery/diagnosis-rejections/{failure.id}/{saved['round']}": rejection})
                 return await self.delivery_decision(rid, work, feedback, scopes, observation=original_observation)
         if decision.action not in {"repair", "recheck"}:
-            self.store.checkpoint(rid, key, {"failure": failure.model_dump(), "blocked_decision": decision.model_dump()})
+            self.store.checkpoint(rid, key, {"failure": failure.model_dump(), "evidence_source_hash": evidence_source, "blocked_decision": decision.model_dump()})
             raise AA2Error("交付恢复需要核对已保留的发布记录：" + decision.reason)
         if tree_hash(work) != evidence_source:
             raise AA2Error("Delivery recovery evidence source changed before dispatch; preserve the candidate")
@@ -116,12 +122,35 @@ class RecoveryController:
                          "evidence_source_hash": evidence_source}}
         if decision.action == "recheck":
             if already_rechecked:
-                self.store.checkpoint(rid, key, {"failure": failure.model_dump(), "blocked_decision": decision.model_dump()})
+                self.store.checkpoint(rid, key, {"failure": failure.model_dump(), "evidence_source_hash": evidence_source, "blocked_decision": decision.model_dump()})
                 raise AA2Error("同一交付输入已自动复验一次；保留证据并等待新的修复或输入")
-            updates[recheck_key] = {"observation": observation, "failure": failure.id}
+            updates[recheck_key] = {"observation": observation, "failure": failure.id, "phase": "reserved",
+                                    "workspace": str(work), "source_hash": evidence_source}
+            updates[key]["recheck_key"] = recheck_key
+            updates["recovery/delivery-recheck-active"] = recheck_key
         self.store.checkpoints(rid, updates)
         self.store.event(rid, "recovery.decided", decision.model_dump())
         return decision.action
+
+    def start_delivery_recheck(self, rid, work):
+        key = self.store.get(rid, "recovery/delivery-recheck-active")
+        if not key:
+            return
+        saved = self.store.get(rid, key, {})
+        if saved.get("phase") != "reserved":
+            raise AA2Error("Interrupted delivery recheck has no durable completion; reservation remains occupied")
+        if saved.get("workspace") != str(work) or saved.get("source_hash") != tree_hash(work):
+            raise AA2Error("Reserved delivery recheck input changed; preserve recovery evidence")
+        self.store.checkpoint(rid, key, {**saved, "phase": "started"})
+
+    def complete_delivery_recheck(self, rid, outcome):
+        key = self.store.get(rid, "recovery/delivery-recheck-active")
+        if not key:
+            return
+        saved = self.store.get(rid, key, {})
+        if saved.get("phase") == "started":
+            self.store.checkpoints(rid, {key: {**saved, "phase": "completed", "outcome": outcome},
+                                        "recovery/delivery-recheck-active": None})
 
     def _approval(self, rid, work):
         prototype = self.store.get(rid, "prototype", {})
@@ -341,13 +370,18 @@ class RecoveryController:
         if failure.evidence.get("checks"):
             pending["verification_recheck"] = {"checks": failure.evidence["checks"]}
             self.store.checkpoint(rid, "replanning/pending", pending)
+        baseline_key = "recovery/patch-baseline/" + identity
+        baseline = self.store.get(rid, baseline_key)
+        if baseline is None:
+            baseline = {"source_hash": tree_hash(work), "base_commit": git(work, "rev-parse", "HEAD")}
+            self.store.checkpoint(rid, baseline_key, baseline)
         await engine._grant_replan(rid, pending)
         revision = self.store.get(rid, "plan_revision/current", {}).get("revision", 1)
-        baseline = {"source_hash": tree_hash(work), "base_commit": git(work, "rev-parse", "HEAD")}
         def unchanged(proposal):
             if tree_hash(work) != baseline["source_hash"] or git(work, "rev-parse", "HEAD") != baseline["base_commit"]:
                 self.store.checkpoint(rid, "recovery/patch-drift/" + identity, {**baseline, **proposal})
                 raise AA2Error("Integration baseline changed during plan amendment; preserved proposal requires reconciliation")
+        unchanged({"phase": "approved"})
         patch = await engine._invoke("plan", {"plan_patch": True, "base_revision": revision,
             "plan": plan.model_dump(), "failure": failure.model_dump(), "task_origins": self.store.task_origin_state(rid),
             "specification": self.store.get(rid, "clarify"), "project": engine.contexts.build(work)},
