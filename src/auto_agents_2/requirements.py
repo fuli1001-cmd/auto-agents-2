@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 
 from .artifacts import ArtifactStore
-from .errors import AA2Error
+from .errors import AA2Error, PolicyViolation
 from .models import IntakeResult
 from .util import contained, digest, now
 
@@ -52,7 +52,7 @@ class TextExtractor(HTMLParser):
             self.parts.append(data)
 
 
-def decode_response(raw: bytes, content_type: str) -> str:
+def decode_document(raw: bytes, content_type: str) -> tuple[str, str]:
     encoding = None
     for marks, codec in (((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE), "utf-32"),
                          ((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE), "utf-16"),
@@ -67,9 +67,23 @@ def decode_response(raw: bytes, content_type: str) -> str:
         match = re.search(rb"<meta\b[^>]*charset\s*=\s*[\"']?\s*([a-zA-Z0-9._-]+)", raw[:4096], re.I)
         encoding = match[1].decode("ascii") if match else None
     try:
-        return raw.decode(encoding or "utf-8-sig")
+        return raw.decode(encoding or "utf-8-sig"), encoding or "utf-8-sig"
     except (LookupError, UnicodeError) as exc:
-        raise AA2Error("Requirements response has unsupported or invalid text encoding") from exc
+        raise AA2Error("Document has unsupported or invalid text encoding") from exc
+
+
+def decode_response(raw: bytes, content_type: str) -> str:
+    return decode_document(raw, content_type)[0]
+
+
+def extract_document(raw: bytes, content_type: str) -> tuple[str, str]:
+    text, encoding = decode_document(raw, content_type)
+    if content_type.partition(";")[0].strip().lower() in {"text/html", "application/xhtml+xml"}:
+        parser = TextExtractor()
+        parser.feed(text)
+        parser.close()
+        text = "".join(parser.parts)
+    return text, encoding
 
 
 async def capture(source: str, artifacts: ArtifactStore) -> dict:
@@ -85,11 +99,7 @@ async def capture(source: str, artifacts: ArtifactStore) -> dict:
                     chunks.append(chunk)
                 raw = b"".join(chunks)
                 kind = response.headers.get("content-type", "")
-        text = decode_response(raw, kind)
-        if kind.partition(";")[0].strip().lower() in {"text/html", "application/xhtml+xml"}:
-            parser = TextExtractor()
-            parser.feed(text)
-            text = "".join(parser.parts)
+        text, _ = extract_document(raw, kind)
     else:
         file = Path(source).expanduser().resolve()
         if file.suffix.lower() not in {".md", ".txt", ".markdown"}:
@@ -119,6 +129,10 @@ def validate_coverage(result: IntakeResult, workspace: Path) -> tuple[bool, list
             if not item.rationale.strip() or not item.evidence_paths:
                 problems.append(f"{item.requirement_id}: no current implementation evidence")
             for path in item.evidence_paths:
-                if not contained(workspace, path).is_file():
+                try:
+                    exists = contained(workspace, path).is_file()
+                except (PolicyViolation, OSError, ValueError):
+                    exists = False
+                if not exists:
                     problems.append(f"{item.requirement_id}: missing evidence {path}")
     return bool(result.coverage) and not problems and all(c.status == "satisfied" for c in result.coverage), problems

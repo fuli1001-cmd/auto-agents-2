@@ -5,6 +5,7 @@ import hashlib
 import os
 import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .errors import AA2Error, IntegrationConflict, PolicyViolation, ProtectedChange
@@ -22,12 +23,13 @@ PROTECTED_NAMES = {"AGENTS.md", "CLAUDE.md", "GEMINI.md", "conftest.py", "pytest
 
 
 def git(root: Path, *args: str, input: str | None = None, env: dict | None = None) -> str:
-    result = subprocess.run(["git", "-C", str(root), *args], input=input, text=True,
+    result = subprocess.run(["git", "-C", str(root), *args], input=os.fsencode(input) if input is not None else None,
                             capture_output=True, env=env, timeout=120)
     if result.returncode:
-        raise AA2Error(result.stderr.strip() or "Git operation failed")
+        raise AA2Error(os.fsdecode(result.stderr).strip() or "Git operation failed")
     # NUL-delimited names and leading/trailing pathname whitespace are data.
-    return result.stdout if "-z" in args else result.stdout.removesuffix("\n")
+    output = os.fsdecode(result.stdout)
+    return output if "-z" in args else output.removesuffix("\n")
 
 
 def repository_workspace(root: Path) -> bool:
@@ -279,31 +281,66 @@ class WorkspaceManager:
         git(self.project, "worktree", "add", "--detach", str(path), base)
         return path
 
-    def checkpoint(self, path: Path, ref: str, message: str, *, expected_ref=None) -> str:
+    @staticmethod
+    def _stage_checkpoint(path, env=None):
         # Preserve already tracked files, including user .env files; never add new secrets.
-        git(path, "add", "-u")
-        new_files = [p for p in git(path, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
+        git(path, "add", "-u", env=env)
+        new_files = [p for p in git(path, "ls-files", "--others", "--exclude-standard", "-z", env=env).split("\0")
                      if p and not any(part in EXCLUDED for part in Path(p).parts)
                      and Path(p).name != ".env" and (not Path(p).name.startswith(".env.") or Path(p).name == ".env.example")]
         for start in range(0, len(new_files), 100):
-            git(path, "add", "--", *new_files[start:start + 100])
+            git(path, "add", "--", *new_files[start:start + 100], env=env)
+
+    def _checkpoint_tree(self, path, index, flags=""):
+        with tempfile.TemporaryDirectory(prefix="aa2-index-") as scratch:
+            env = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "index")}
+            git(path, "read-tree", "--empty", env=env)
+            git(path, "update-index", "-z", "--index-info", input=index, env=env)
+            for row in flags.split("\0"):
+                if not row:
+                    continue
+                tag, name = row[0], row[2:]
+                if tag.upper() == "S":
+                    git(path, "update-index", "--skip-worktree", "--", name, env=env)
+                if tag.islower():
+                    git(path, "update-index", "--assume-unchanged", "--", name, env=env)
+            self._stage_checkpoint(path, env)
+            return git(path, "write-tree", env=env)
+
+    def checkpoint(self, path: Path, ref: str, message: str, *, expected_ref=None, expected_tree=None) -> str:
+        self._stage_checkpoint(path)
+        if expected_tree and git(path, "write-tree") != expected_tree:
+            raise AA2Error("Prepared checkpoint tree changed; preserving staged user changes")
         if git(path, "diff", "--cached", "--name-only"):
             git(path, "-c", "user.name=aa2", "-c", "user.email=aa2@localhost", "commit", "-m", message)
         commit = git(path, "rev-parse", "HEAD")
+        if expected_tree and git(path, "rev-parse", "HEAD^{tree}") != expected_tree:
+            raise AA2Error("Prepared checkpoint commit does not contain the complete reviewed tree")
         git(self.project, "update-ref", ref, commit, *([] if expected_ref is None else [expected_ref or "0" * len(commit)]))
         return commit
 
     def checkpoint_intent(self, path, ref):
         head = git(path, "rev-parse", "HEAD")
+        index = git(path, "ls-files", "--stage", "-z")
+        flags = git(path, "ls-files", "-v", "-z")
         merge_file = Path(git(path, "rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"))
-        return {"head": head, "parents": [head, *(merge_file.read_text().splitlines() if merge_file.exists() else [])],
+        return {"version": 2, "tree": self._checkpoint_tree(path, index, flags), "index_flags": flags,
+                "head": head, "parents": [head, *(merge_file.read_text().splitlines() if merge_file.exists() else [])],
                 "ref": ref, "ref_before": git(self.project, "for-each-ref", "--format=%(objectname)", ref),
-                "source": tree_hash(path), "index": git(path, "ls-files", "--stage", "-z")}
+                "source": tree_hash(path), "index": index}
 
     def finish_checkpoint(self, path, intent):
         """Reconcile an interrupted, reviewed commit without accepting unrelated index/HEAD edits."""
         if tree_hash(path) != intent["source"]:
             raise AA2Error("Prepared checkpoint source changed; preserving user changes")
+        expected_tree = intent.get("tree")
+        if expected_tree is None:
+            if "index" not in intent:
+                raise AA2Error("Legacy checkpoint lacks enough evidence to reconstruct its tree")
+            flags = git(path, "ls-files", "-v", "-z")
+            if any(row and row[0] != "H" for row in flags.split("\0")):
+                raise AA2Error("Legacy checkpoint lacks the original index flags; preserve it for reconciliation")
+            expected_tree = self._checkpoint_tree(path, intent["index"])
         head = git(path, "rev-parse", "HEAD")
         current_ref = git(self.project, "for-each-ref", "--format=%(objectname)", intent["ref"])
         if current_ref not in {intent["ref_before"], head}:
@@ -326,9 +363,13 @@ class WorkspaceManager:
                 expected = [f"{actual['mode']} {actual['oid']} 0"] if actual and "oid" in actual else None
                 if current.get(name) != expected:
                     raise AA2Error("Prepared checkpoint index changed; preserving staged user changes")
-            return self.checkpoint(path, intent["ref"], "aa2: reviewed integration repair", expected_ref=current_ref)
+            if self._checkpoint_tree(path, git(path, "ls-files", "--stage", "-z"), git(path, "ls-files", "-v", "-z")) != expected_tree:
+                raise AA2Error("Prepared checkpoint tree changed; preserving staged user changes")
+            return self.checkpoint(path, intent["ref"], "aa2: reviewed integration repair",
+                                   expected_ref=current_ref, expected_tree=expected_tree)
         parents = git(path, "rev-list", "--parents", "-n", "1", head).split()[1:]
-        if parents != intent["parents"] or git(path, "diff", "--name-only", "HEAD"):
+        if (parents != intent["parents"] or git(path, "diff", "--name-only", "HEAD")
+                or git(path, "rev-parse", "HEAD^{tree}") != expected_tree):
             raise AA2Error("Prepared checkpoint HEAD changed; preserving user commits")
         git(self.project, "update-ref", intent["ref"], head, current_ref or "0" * len(head))
         return head

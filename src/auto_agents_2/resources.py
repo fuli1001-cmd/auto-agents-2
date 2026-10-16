@@ -21,7 +21,7 @@ class ResourceManager:
         resolved = path.resolve()
         if path.absolute() != resolved or not resolved.is_relative_to(self.store.root.resolve()):
             raise PolicyViolation("Managed resources cannot use symlinked paths")
-        allowed = [self.store.root / p for p in ("tmp", "worktrees", "environments", "cache", "attempts", "sessions")]
+        allowed = [self.store.root / p for p in ("tmp", "worktrees", "environments", "cache", "attempts", "sessions", "recovery")]
         if not any(resolved.is_relative_to(p.resolve()) and resolved != p.resolve() for p in allowed):
             raise PolicyViolation(f"Unmanaged resource path: {path}")
         if path.is_symlink():
@@ -38,6 +38,24 @@ class ResourceManager:
     def release(self, rid: str):
         with self.store.connect() as db:
             db.execute("UPDATE resources SET refs=MAX(0,refs-1),touched=? WHERE id=?", (now(), rid))
+
+    def hold(self, path, purpose, run_id=None):
+        if path.absolute() != path.resolve() or not path.is_relative_to(self.store.root):
+            raise PolicyViolation("Resource hold must name an owned path without symlinks")
+        key = identifier("hold")
+        with self.store.connect() as db:
+            db.execute("INSERT INTO resource_holds VALUES(?,?,?,?)", (key, str(path), run_id, purpose))
+        return key
+
+    def release_holds(self, holds):
+        with self.store.connect() as db:
+            db.executemany("DELETE FROM resource_holds WHERE id=?", [(key,) for key in holds])
+
+    @staticmethod
+    def held_paths(db):
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='resource_holds'").fetchone():
+            return [Path(row[0]) for row in db.execute("SELECT path FROM resource_holds")]
+        return []
 
     def release_run(self, run_id: str):
         with self.store.connect() as db:
@@ -161,6 +179,7 @@ class ResourceManager:
                     ORDER BY touched""")]
                 retained = [dict(r) for r in db.execute("SELECT * FROM resources WHERE state!='removed'")]
                 pins = [Path(row[0]) for row in db.execute("SELECT path FROM delivery_pins")]
+                pins.extend(self.held_paths(db))
                 terminal = {row[0] for row in db.execute("SELECT id FROM runs WHERE status IN ('SUCCEEDED','CANCELLED')")}
                 for row in retained:
                     if row["run_id"] in terminal:
@@ -179,7 +198,7 @@ class ResourceManager:
                 if row["run_id"]:
                     run = self.store.run(row["run_id"])
                     recoverable = bool(json.loads(row["data"]).get("recovery_ref"))
-                    if run["status"] not in {"SUCCEEDED", "CANCELLED"} and row["kind"] != "temporary" and not recoverable:
+                    if run["status"] not in {"SUCCEEDED", "CANCELLED"} and row["kind"] not in {"temporary", "build_recovery"} and not recoverable:
                         continue
                 if row["kind"] in {"cache", "environment"}:
                     expired = now() - row["touched"] > self.policy.cache_ttl_seconds
@@ -206,6 +225,7 @@ class ResourceManager:
                             continue
                         protected = [Path(r["path"]) for r in db.execute(
                             "SELECT path FROM resources WHERE state!='removed' AND refs>0 UNION SELECT path FROM delivery_pins")]
+                        protected.extend(self.held_paths(db))
                         if any(p.is_relative_to(path) or path.is_relative_to(p) for p in protected):
                             continue
                         descendants = [Path(r[0]) for r in db.execute("SELECT path FROM resources WHERE state!='removed' AND id!=?", (row["id"],))]

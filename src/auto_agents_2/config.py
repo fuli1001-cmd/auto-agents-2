@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import tomllib
@@ -143,27 +142,37 @@ class ConfigStore:
             raise ConfigurationError("Cannot read or validate configuration") from None
 
     def select_target(self, branch: str):
-        with file_lock(self.path.with_suffix(".lock")):
-            body = json.loads(self.path.read_text())
-            body.setdefault("delivery", {})["target_branch"] = branch
-            body["config_revision"] = body.get("config_revision", 0) + 1
-            Config.model_validate(body)
-            write_json(self.path, body)
+        try:
+            with file_lock(self.path.with_suffix(".lock")):
+                cfg = self.load()
+                body = cfg.model_dump(mode="json")
+                body["delivery"]["target_branch"] = branch
+                body["config_revision"] = cfg.config_revision + 1
+                Config.model_validate(body)
+                write_json(self.path, body)
+        except (OSError, ValueError, TypeError):
+            raise ConfigurationError("Cannot validate or update configuration") from None
 
     def activate(self, provider: str, expected_revision: int | None = None) -> tuple[str, str]:
-        with file_lock(self.path.with_suffix(".lock")):
-            cfg = self.load()
-            if provider not in cfg.providers:
-                raise ConfigurationError(f"Provider is not configured: {provider}")
-            old = cfg.active_provider
-            if expected_revision is not None and cfg.config_revision != expected_revision:
-                return old, old
-            # Keep user ordering and fields, replacing only the active selection.
-            body = json.loads(self.path.read_text())
-            body["active_provider"] = provider
-            body["config_revision"] = cfg.config_revision + 1
-            write_json(self.path, body)
-            return old, provider
+        try:
+            with file_lock(self.path.with_suffix(".lock")):
+                cfg = self.load()
+                if provider not in cfg.providers:
+                    raise ConfigurationError(f"Provider is not configured: {provider}")
+                old = cfg.active_provider
+                if expected_revision is not None and cfg.config_revision != expected_revision:
+                    return old, old
+                # Mutate the validated snapshot, avoiding a second unvalidated read.
+                body = cfg.model_dump(mode="json")
+                body["active_provider"] = provider
+                body["config_revision"] = cfg.config_revision + 1
+                try:
+                    write_json(self.path, body)
+                except OSError:
+                    raise ConfigurationError("Cannot update configuration") from None
+                return old, provider
+        except (OSError, ValueError, TypeError):
+            raise ConfigurationError("Cannot validate or update configuration") from None
 
     def resolve(self, stage: str, provider: str | None = None) -> dict:
         cfg = self.load()
@@ -251,8 +260,8 @@ class ConfigStore:
         try:
             native = Path(environment.get("CODEX_HOME", "~/.codex")).expanduser() / "config.toml"
             native_hash = digest(native.read_bytes()) if spec.kind == "codex" and native.is_file() else ""
-            public["fingerprint"] = digest(["provider-execution-v2", public, str(Path(binary).resolve()),
-                file_digest(Path(binary)), spec.environment, profile.environment, native_hash])
+            public["fingerprint"] = digest(["provider-execution-v3", public, str(Path(binary).resolve()),
+                file_digest(Path(binary)), environment, native_hash])
         except OSError as exc:
             raise ConfigurationError("Cannot establish provider execution identity") from exc
         return {**public, "binary": binary, "environment": environment, "args": extra}

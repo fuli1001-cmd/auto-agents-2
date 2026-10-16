@@ -8,10 +8,11 @@ import re
 import shutil
 from pathlib import Path
 
+from .errors import PolicyViolation
 from .util import SECRET
 from .workspace import EXCLUDED, file_digest, git
 
-VIEW_VERSION = "public-v3"
+VIEW_VERSION = "public-v4"
 SENSITIVE_DIRS = {".aws", ".ssh", ".codex", ".gemini", ".credentials"}
 SENSITIVE_FILES = {".netrc", ".npmrc", ".pypirc", ".git-credentials"}
 
@@ -33,6 +34,10 @@ def public_files(root: Path, extra=()):
                       and not Path(directory, n).is_symlink()]
         for name in names:
             path = Path(directory, name)
+            try:
+                path.relative_to(root).as_posix().encode("utf-8")
+            except UnicodeError:
+                raise PolicyViolation("Non-UTF-8 filenames cannot be delivered to the model; rename them explicitly") from None
             if path.is_symlink() or not path.is_file():
                 continue
             info = path.stat()
@@ -94,13 +99,20 @@ def sensitive_values(workspace: Path, extra=()) -> list[str]:
             document = json.loads(text)
             strings(document, True)
         except ValueError:
-            for line in text.splitlines():
-                match = re.match(r"\s*([^=]+)\s*=\s*(.*)", line) if "=" in line else re.match(r"\s*([^:]+)\s*:\s*(.*)", line)
-                if match and not line.lstrip().startswith("#"):
-                    key, value = match.groups()
-                    value = value.strip().strip("\"'")
-                    if SECRET.search(key) or re.search(r"://[^/\s]+:[^/\s]+@", value):
-                        strings(value, True)
+            # Every assignment in an explicitly protected file is confidential,
+            # irrespective of its key. Quoted values can span physical lines.
+            assignments = r'''(?m)^\s*(?:export\s+)?(?:[^\n#=]+=[ \t]*|[^\n#=:]+:[ \t]*)("(?:\\.|[^"\\])*"|'[^']*'|[^\n]*)'''
+            for match in re.finditer(assignments, text):
+                value = match[1].strip()
+                if value.startswith(("'", '"')):
+                    double_quoted = value.startswith('"')
+                    value = value[1:-1]
+                    if double_quoted:
+                        escapes = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "\\": "\\"}
+                        strings(re.sub(r'\\([nrt"\\])', lambda match: escapes[match[1]], value), True)
+                else:
+                    value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+                strings(value, True)
             if "PRIVATE KEY" in text:
                 for line in text.splitlines():
                     if line.strip() and not line.startswith("-----"):
@@ -113,6 +125,10 @@ def sensitive_values(workspace: Path, extra=()) -> list[str]:
 def sensitive_files(root: Path, extra=()):
     """Output exclusions do not exempt protected files from alias detection."""
     for directory, folders, names in os.walk(root, followlinks=False):
+        for name in folders + names:
+            path = Path(directory, name)
+            if path.is_symlink() and sensitive(path.relative_to(root), extra):
+                raise PolicyViolation("Protected paths must not be symlinks; preserve and resolve them before model delivery")
         folders[:] = [name for name in folders if not Path(directory, name).is_symlink()]
         for name in names:
             path = Path(directory, name)

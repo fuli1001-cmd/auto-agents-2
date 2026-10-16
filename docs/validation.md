@@ -1,5 +1,27 @@
 # 验证记录
 
+## 第三轮 OCR 修复验收（2026-10-16）
+
+基于 `425db9d` 实施后的工作树。R3 的 35 条评论经核对，31 条成立、1 条部分成立，本轮处理合计 32 条；1 条误报和 2 条不纳入项保留结论。逐条根因、三轮关系及反证见 [三轮 OCR 对照](quality-first-implementation.md#第三轮-ocr-核对与三轮对照2026-10-16)。其中两处为第二轮引入的回归，不把所有第三轮发现统称为新问题。
+
+最终全量 **771 项通过，0 失败、0 跳过**，耗时 **473.89 秒**。相较第二轮的 674 项增加 97 项：第三轮三个测试模块包含 95 项，旧结构迁移扩展到 v4 增加 2 项。[完整 JUnit](evidence/ocr3-fixes-suite.xml) 单独归档，既有证据未改写。先完成受影响子系统和故障注入验证，再执行完整套件；中间全量发现的显示器夹具问题已补建真实迭代并保留原清理断言，最终全量针对更新后的全部源码重新执行。
+
+实际运行覆盖真实 bubblewrap、Chromium、Git、子进程与本地 TCP。沙箱内创建的 result.json 链接无法使控制器读取屏蔽文件，FIFO 和超大结果被拒绝，缺失结果仍能使用有效 stdout。工作命令退出后仍能清理创建新会话的后代，重复 stop 不在控制器中发送数字进程组信号。错误预览服务在三次有界尝试中均收不到 HTTP 字节；正常受管应用仍能完成双视口截图与动作验证。第二个原型上下文创建失败时，首个视口的截图保留。
+
+Git 验证包括 CR 与非 UTF-8 文件名的身份变化、私有 JSON 往返、模型文本入口明确拒绝，以及漏掉新文件的部分提交不能完成检查点。预期树覆盖原索引的 skip-worktree / assume-unchanged 标志。诊断授权等待期间源码变化会保留证据基线，后续恢复也不能悄悄接受新基线；已提交未集成的任务保留候选定位。构建发布与回滚双重故障后，在 RUNNING、CANCELLED、SUCCEEDED 三种状态下，旧副本、工作区和临时输入均被保留；解除注入后可以核验恢复并释放 holds。快照复制这些恢复资源并仅重绑定可变定位，原库字节保持不变。
+
+真实 pip 在无索引、无依赖下载模式下，从私有副本安装本地 wheel 到临时 target，覆盖直接 wheel、--find-links、-f 和 file URI。原目录 wheel 在安装前移除，证明未回读旧工作区。安装器恢复仍使用受控 Conda/npm 命令边界验证错误标记和旧实例保留；本轮没有重跑远端 Conda/npm 安装、收费模型或 GitHub 托管 CI，也没有声称 OCR 再扫描已零问题。需求/研究解码、权限读取失败、配置错误、秘密别名和错误收集器分类另有自动回归。
+
+Ruff、`git diff --check`、项目 Conda 环境的 `pip check` 和 wheel 构建通过；wheel 中全部 52 个 Python 源文件与当前源码逐字节一致，包括五个新增运行模块。模型、推理设置及执行权限沿用用户配置。数据库 v5、公开视图 v4、调用身份 v4、检查器 v9、浏览器检查器 v5 的兼容行为见 [设计](design.md#2026-10-16-第三轮-ocr-修订) 和 [运行说明](operations.md#第三轮-ocr-修订后的恢复注意事项)。
+
+```bash
+.conda-env/bin/python -m pytest -q --junitxml=/tmp/ocr3-final-suite.xml
+.conda-env/bin/python -m ruff check src tests
+git diff --check
+.conda-env/bin/python -m pip check
+.conda-env/bin/python -m hatchling build -t wheel -d /tmp/ocr3-wheel-output
+```
+
 ## 第二轮 OCR 修复验收（2026-10-15）
 
 基于 `f46a690` 核验第二份报告的 52 条评论：51 条成立，第 35 条部分成立，原有调用内源码漂移防护继续保留，补足 HEAD 和跨步骤基线。逐条落点见 [第二轮实施对照](quality-first-implementation.md#第二轮-ocr-核对后实施2026-10-15)。历史验收文件未修改。

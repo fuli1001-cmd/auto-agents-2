@@ -98,6 +98,13 @@ async def main(prefix, installations):
                 if label == "failed-hook":
                     if not (result.process_exit_code == 17 and "process_failed" in result.failure_reasons):
                         raise RuntimeError('Manual verification failed')
+                expected_reasons = ({"process_failed"} if label == "failed-hook" else
+                                    {"process_failed", "test_report_failed", "insufficient_test_cases"} if label == "failed-test" else
+                                    {"insufficient_test_cases"} if label == "skip-only" else set())
+                if (type(result.process_exit_code) is not int or set(result.failure_reasons) != expected_reasons
+                        or result.skipped != (1 if label in {"name-filter", "skip-only"} else 0)
+                        or (result.process_exit_code != 0) != (label in {"failed-test", "failed-hook"})):
+                    raise RuntimeError("Manual report classification failed")
                 if not ((work / "user-report.xml").read_text() == "preserve existing report"):
                     raise RuntimeError('Manual verification failed')
             write_json(work / "package.json", {"name": "aa2-command-matrix", "type": "module", "scripts": {

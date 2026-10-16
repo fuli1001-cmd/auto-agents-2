@@ -10,7 +10,7 @@ from .artifacts import ArtifactStore
 from .errors import AA2Error
 from .models import SourceEvidence
 from .network import PublicHTTPTransport, public_address
-from .requirements import MAX_REQUIREMENTS_BYTES, TextExtractor
+from .requirements import MAX_REQUIREMENTS_BYTES, extract_document
 from .util import SECRET, now
 
 
@@ -53,19 +53,14 @@ class ResearchService:
                         if len(data) > MAX_REQUIREMENTS_BYTES:
                             raise AA2Error("Research response exceeds the supported acquisition size; no claim verified")
                     mime = response.headers.get("content-type", "")
-                    encoding = response.encoding or "utf-8"
                     break
             else:
                 raise AA2Error("Research redirect limit exceeded")
         raw = self.artifacts.put(bytes(data), "research_response")
-        text = bytes(data).decode(encoding)
-        if "html" in mime:
-            parser = TextExtractor()
-            parser.feed(text)
-            text = "".join(parser.parts)
+        text, encoding = extract_document(bytes(data), mime)
         extracted = self.artifacts.put(text, "research_extracted")
         metadata = {"source": url, "final_url": final, "mime_type": mime, "encoding": encoding,
-                    "captured_at": now(), "extractor_version": "structured-text-v2",
+                    "captured_at": now(), "extractor_version": "structured-text-v3",
                     "raw": raw, "artifact": extracted, "hash": extracted["hash"]}
         return {**metadata, "manifest": self.artifacts.put(metadata, "research_manifest")}
 

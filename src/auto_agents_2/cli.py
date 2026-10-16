@@ -102,6 +102,11 @@ async def execute(project, requirements=None, provider=None, run_id=None):
     store = Store(project)
     if requirements is not None and store.current(unfinished=True):
         raise IncompleteIteration(f"上一轮迭代尚未完成。请先执行：aa2 run --project {shlex.quote(str(project))}")
+    if requirements is None and run_id is None:
+        attached = store.current()
+        if not attached:
+            raise AA2Error("尚无可恢复迭代，请通过 --requirements 提供原始需求")
+        run_id = attached["id"]
     stop = asyncio.Event()
     paused = asyncio.Event()
     input_ready = asyncio.Event()
@@ -149,6 +154,10 @@ async def execute(project, requirements=None, provider=None, run_id=None):
             console.print("已连接当前控制进程；使用 aa2 respond 回复待处理问题。")
             while True:
                 await asyncio.sleep(1)
+                attached = store.run(run_id)
+                if attached["status"] in {"SUCCEEDED", "CANCELLED"}:
+                    result = attached
+                    break
                 try:
                     result = await supervised_start(run_id=run_id)
                     break

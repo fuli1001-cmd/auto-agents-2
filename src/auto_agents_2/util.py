@@ -28,7 +28,7 @@ def digest(value: bytes | str | Any) -> str:
     if not isinstance(value, (bytes, str)):
         value = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     if isinstance(value, str):
-        value = value.encode()
+        value = value.encode("utf-8", errors="surrogatepass")
     return hashlib.sha256(value).hexdigest()
 
 
@@ -53,7 +53,7 @@ def atomic_write(path: Path, value: str | bytes, mode: int = 0o600) -> None:
 
 
 def write_json(path: Path, value: Any) -> None:
-    atomic_write(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+    atomic_write(path, json.dumps(value, ensure_ascii=True, indent=2) + "\n")
 
 
 @contextlib.contextmanager
@@ -129,6 +129,10 @@ def scrub_text(text: str, secrets: list[str] | None = None) -> str:
         while start >= 0:
             spans.append((start, start + len(value)))
             start = text.find(value, start + 1)
+    for pattern in (r"(?i)authorization:\s*bearer\s+(\S+)",
+                    r"https?://([^\s/@:]+:[^\s/@]+)@",
+                    r"(?i)[?&](?:api[_-]?key|token|password|secret|access_token)=([^&\s]+)"):
+        spans.extend(match.span(1) for match in re.finditer(pattern, text))
     merged = []
     for start, end in sorted(spans):
         if merged and start <= merged[-1][1]:
@@ -137,7 +141,4 @@ def scrub_text(text: str, secrets: list[str] | None = None) -> str:
             merged.append((start, end))
     for start, end in reversed(merged):
         text = text[:start] + "<redacted>" + text[end:]
-    text = re.sub(r"(?i)(authorization:\s*bearer\s+)\S+", r"\1<redacted>", text)
-    text = re.sub(r"(https?://)[^\s/@:]+:[^\s/@]+@", r"\1<redacted>@", text)
-    text = re.sub(r"(?i)([?&](?:api[_-]?key|token|password|secret|access_token)=)[^&\s]+", r"\1<redacted>", text)
     return text

@@ -71,6 +71,12 @@ async def main(prefix):
                     raise RuntimeError(result.output)
                 if not (result.tests == (1 if scenario == "passing" else 0)):
                     raise RuntimeError('Manual verification failed')
+                expected_reasons = ({"process_failed", "test_report_failed", "insufficient_test_cases"} if scenario == "failing" else
+                                    {"insufficient_test_cases"} if scenario == "skip_only" else set())
+                if (type(result.process_exit_code) is not int or set(result.failure_reasons) != expected_reasons
+                        or result.skipped != (2 if scenario == "skip_only" else 1)
+                        or (result.process_exit_code != 0) != (scenario == "failing")):
+                    raise RuntimeError("Manual report classification failed")
                 if name == "playwright" and scenario != "skip_only":
                     if not (any(verifier.artifacts.bytes(a["artifact"]) == b"fixture attachment" for a in result.attachments)):
                         raise RuntimeError('Manual verification failed')

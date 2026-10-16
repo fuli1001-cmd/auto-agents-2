@@ -11,14 +11,16 @@ from .errors import AA2Error
 from .util import contained, digest
 from .workspace import input_entry, tree_hash
 
-CHECKER_VERSION = "verification-v8"
+CHECKER_VERSION = "verification-v9"
 NODE_RUNTIME_CACHES = {".cache", ".vite", ".vite-temp", ".tmp"}
 RUNTIME_CACHES = {"__pycache__", ".pytest_cache", *NODE_RUNTIME_CACHES}
 
 
 def input_identity(workspace, command):
+    def failed(error):
+        raise error
     entries = [(p, generated_entry(contained(workspace, p), workspace)) for p in command.inputs]
-    for directory, folders, _ in os.walk(workspace, followlinks=False):
+    for directory, folders, _ in os.walk(workspace, followlinks=False, onerror=failed):
         modules = Path(directory) / "node_modules"
         if modules.exists() and any(p.name not in RUNTIME_CACHES for p in modules.iterdir()):
             entries.append((modules.relative_to(workspace).as_posix(), input_entry(modules, workspace, excluded=RUNTIME_CACHES)))
@@ -115,8 +117,8 @@ def reusable(commands, results, workspace: Path, environment, artifacts):
     return ReuseDecision(True, "complete matching controller evidence")
 
 
-def invocation_identity(stage, context, schema, workspace, config, source_hash=None):
+def invocation_identity(stage, context, schema, workspace, config, source_hash=None, execution=None):
     from .prompts import PROMPT_VERSION
     from .readview import VIEW_VERSION
-    return digest(["invocation-v3", PROMPT_VERSION, VIEW_VERSION, stage, context, schema.model_json_schema(),
-                   source_hash or tree_hash(workspace), config.model_dump(mode="json")])
+    return digest(["invocation-v4", PROMPT_VERSION, VIEW_VERSION, stage, context, schema.model_json_schema(),
+                   source_hash or tree_hash(workspace), config.model_dump(mode="json"), execution])

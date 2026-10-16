@@ -20,7 +20,7 @@ class ArtifactStore:
         self.store = Store(root.parent)
 
     def put(self, value: str | bytes | dict | list, kind: str = "document") -> dict:
-        text = value if isinstance(value, (str, bytes)) else json.dumps(value, ensure_ascii=False, sort_keys=True)
+        text = value if isinstance(value, (str, bytes)) else json.dumps(value, ensure_ascii=True, sort_keys=True)
         sha = digest(text)
         path = self.root / sha[:2] / sha
         with self.store.connect() as db:

@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -99,7 +98,7 @@ class SandboxRunner:
                                     capture_output=True, text=True, timeout=10)
             ok = result.returncode == 0 and protected.read_text() == "original" and (out / "ok").exists()
             return ok, "read-only enforcement passed" if ok else result.stderr[-2000:]
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except (OSError, subprocess.TimeoutExpired, PolicyViolation) as exc:
             return False, str(exc)
         finally:
             shutil.rmtree(scratch)
@@ -111,15 +110,13 @@ class SandboxRunner:
         argv = [executable, *argv[1:]]
         env = {**env, "GIT_OPTIONAL_LOCKS": "0"}
         command = await asyncio.to_thread(self.command, argv, cwd, writable, readable, overlays, hidden)
-        process = await asyncio.create_subprocess_exec(
-            *command, cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            start_new_session=True, limit=8 * 1024 * 1024)
+        from .managed_process import spawn_managed
+        process = await spawn_managed(command, cwd, env)
         try:
             process_root = self.root / "processes"
             process_root.mkdir(parents=True, exist_ok=True)
             write_json(process_root / f"{process.pid}.json", {
-                "pid": process.pid, "start": process_start(process.pid), "cwd": str(cwd),
+                "version": 2, "pid": process.pid, "start": process_start(process.pid), "cwd": str(cwd),
             })
         except BaseException as exc:
             try:
@@ -130,7 +127,9 @@ class SandboxRunner:
         return process
 
     async def stop(self, process):
-        task = asyncio.create_task(self._stop(process))
+        if process.stop_task is None:
+            process.stop_task = asyncio.create_task(self._stop(process))
+        task = process.stop_task
         cancelled = None
         while True:
             try:
@@ -149,25 +148,16 @@ class SandboxRunner:
             raise cancelled
 
     async def _stop(self, process):
-        if process.returncode is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            # Observe the child watcher, not Process.wait(): paused pipe transports
-            # can keep wait() pending even after the kernel has reaped the child.
-            deadline = asyncio.get_running_loop().time() + 2
-            while process.returncode is None and asyncio.get_running_loop().time() < deadline:
-                await asyncio.sleep(0.02)
-        # A leader can exit before its children. The owned process group still needs reaping.
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        deadline = asyncio.get_running_loop().time() + 2
-        while process.returncode is None and asyncio.get_running_loop().time() < deadline:
+            process.control.write_eof()
+        except (OSError, RuntimeError):
+            process.control.close()
+        # Closing the control channel makes the live anchor clean up its group.
+        # Never signal a numeric PID from the controller, even after timeout.
+        deadline = asyncio.get_running_loop().time() + 6
+        while process.supervisor.returncode is None and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.02)
-        if process.returncode is None:
+        if process.supervisor.returncode is None:
             raise PolicyViolation("Child termination could not be confirmed; process recovery record retained")
         # On failed/cancelled capture, no reader may remain to resume a full pipe.
         # Closing it also wakes an existing reader; successful capture is already EOF.
@@ -176,7 +166,9 @@ class SandboxRunner:
                 transport = getattr(stream, "_transport", None)
                 if transport is not None:
                     transport.close()
-        await asyncio.wait_for(process.wait(), 2)
+        await asyncio.wait_for(process.supervisor.wait(), 2)
+        await process.monitor
+        process.control.close()
         (self.root / "processes" / f"{process.pid}.json").unlink(missing_ok=True)
 
     def reap_orphans(self):
@@ -186,16 +178,14 @@ class SandboxRunner:
         for file in directory.glob("*.json"):
             data = json.loads(file.read_text())
             pid = data["pid"]
-            try:
-                if process_start(pid) == data["start"] and data["start"] and os.getpgid(pid) == pid:
-                    os.killpg(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            if process_start(pid) == data["start"] and data["start"]:
+                raise PolicyViolation("A recorded process is still live; preserve its recovery record until owned cleanup completes")
             file.unlink(missing_ok=True)
 
 
 def process_start(pid: int) -> str:
     try:
-        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return "" if fields[0] == "Z" else fields[19]
     except (OSError, IndexError):
         return ""

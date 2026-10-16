@@ -110,14 +110,15 @@ class EnvironmentManager:
                 conda_document["dependencies"] = [d for d in dependencies if isinstance(d, str)]
             except (ValueError, AttributeError, yaml.YAMLError) as exc:
                 raise AA2Error("Invalid Conda environment document") from exc
-        inputs = pip_inputs(workspace, pip_name, extra_pip)
+        inputs = pip_inputs(workspace, pip_name, extra_pip, protected=self.config.load().sensitive_paths)
         local = inputs.local
-        fingerprint = digest({"format": 3, "platform": platform.platform(), "python": cfg.python_version,
+        fingerprint = digest({"format": 4, "platform": platform.platform(), "python": cfg.python_version,
                               "node": cfg.node_version, "profile": profile, "manifests": inputs.manifests,
                               "resolver_configuration": digest({k: v for k, v in os.environ.items()
                                                                   if k.startswith(("PIP_", "CONDA_"))}),
                               "conda": conda_file.read_text() if conda_file else "",
                               "requirements": inputs.requirements, "constraints": inputs.constraints,
+                              "local_paths": inputs.local_paths,
                               "private_source": [str(workspace), tree_hash(workspace)] if local else None,
                               **({"source_copy_version": 2} if local else {})})
         location = self.root / "environment-records" / fingerprint / "instance.json"
@@ -129,7 +130,7 @@ class EnvironmentManager:
                     selected = Path(json.loads(location.read_text())["prefix"])
                     if selected.parent == prefix.parent:
                         prefix = selected
-                except (ValueError, KeyError):
+                except (OSError, ValueError, KeyError, TypeError):
                     pass
             if self.valid(prefix, fingerprint):
                 self.resources.register(prefix, "environment", run["id"] if run else None)
@@ -152,7 +153,7 @@ class EnvironmentManager:
                     selected_conda = scratch / "environment.yml"
                     atomic_write(selected_conda, yaml.safe_dump(conda_document))
                 try:
-                    await self._prepare(prefix, ready, fingerprint, profile, selected_conda, pip_file, workspace, [], local)
+                    await self._prepare(prefix, ready, fingerprint, profile, selected_conda, pip_file, workspace, [], local, inputs)
                 except DependencyResolutionError as exc:
                     raise DependencyResolutionError(f"Conda manifest {conda_file.relative_to(workspace)}: {exc}") from exc
             write_json(location, {"prefix": str(prefix)})
@@ -173,6 +174,9 @@ class EnvironmentManager:
     def valid(cls, prefix: Path, fingerprint: str) -> bool:
         try:
             ready = json.loads((prefix / "aa2-ready.json").read_text())
+            if not isinstance(ready, dict) or any(not isinstance(ready.get(key), str)
+                    for key in ("fingerprint", "integrity")):
+                return False
             return (fingerprint in {ready.get("fingerprint"), cls.installed_identity(prefix)} and (prefix / "bin/python").is_file()
                     and ready.get("integrity") == cls.integrity(prefix))
         except (OSError, ValueError, KeyError, RecursionError):
@@ -215,7 +219,7 @@ class EnvironmentManager:
         finally:
             await self.sandbox.stop(process)
 
-    async def _prepare(self, prefix, ready, fingerprint, profile, conda_file, pip_file, workspace, dependencies, local):
+    async def _prepare(self, prefix, ready, fingerprint, profile, conda_file, pip_file, workspace, dependencies, local, inputs=None):
         with DiagnosticOperation(self.store, self.resources, "prepare/" + str(prefix)):
             cfg = self.config.load().environment
             if prefix.exists():
@@ -254,7 +258,7 @@ class EnvironmentManager:
                 if local:
                     # Editable bindings live in this private environment and never point into another task.
                     install_workspace = prefix / "aa2-source"
-                    copy_execution_source(workspace, install_workspace)
+                    copy_execution_source(workspace, install_workspace, inputs)
                 if dependencies and pip_file is None:
                     pip_file = scratch / "dependencies.txt"
                     atomic_write(pip_file, "\n".join(dependencies) + "\n")
@@ -325,6 +329,8 @@ class EnvironmentManager:
                 try:
                     installed = json.loads(marker.read_text())
                 except (OSError, ValueError):
+                    installed = {}
+                if not isinstance(installed, dict):
                     installed = {}
                 actual = digest(input_entry(modules, modules, excluded=RUNTIME_CACHES)) if modules.exists() else ""
                 if installed.get("fingerprint") == identity and installed.get("integrity") == actual:

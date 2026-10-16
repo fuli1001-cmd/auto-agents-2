@@ -16,7 +16,7 @@ from .util import digest, identifier, now, redact
 TERMINAL = ("SUCCEEDED", "CANCELLED")
 SCHEMA = """
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            INSERT OR IGNORE INTO meta VALUES('schema_version','1');
+            INSERT OR IGNORE INTO meta VALUES('schema_version','5');
             CREATE TABLE IF NOT EXISTS runs(
                 id TEXT PRIMARY KEY, status TEXT NOT NULL, stage TEXT NOT NULL,
                 created REAL NOT NULL, updated REAL NOT NULL, data TEXT NOT NULL);
@@ -40,6 +40,8 @@ SCHEMA = """
                 state TEXT NOT NULL, refs INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL,
                 touched REAL NOT NULL, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS delivery_pins(path TEXT PRIMARY KEY, run_id TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS resource_holds(
+                id TEXT PRIMARY KEY, path TEXT NOT NULL, run_id TEXT, purpose TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS artifact_owners(hash TEXT NOT NULL, run_id TEXT NOT NULL,
                 PRIMARY KEY(hash,run_id));
             CREATE TABLE IF NOT EXISTS artifact_edges(parent TEXT, child TEXT, PRIMARY KEY(parent,child));
@@ -63,7 +65,7 @@ class Store:
             with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)) as db:
                 meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
                 version = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] if meta else "0"
-                if version not in {"0", "1", "2", "3", "4"}:
+                if version not in {"0", "1", "2", "3", "4", "5"}:
                     raise AA2Error("Unsupported state database version")
             return
         if readonly:
@@ -72,7 +74,7 @@ class Store:
         self.root.chmod(0o700)
         with self.connect() as db:
             db.executescript(SCHEMA)
-            if db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] != "1":
+            if db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] != "5":
                 raise AA2Error("Unsupported state database version")
             db.execute("BEGIN IMMEDIATE")
             columns = {row[1] for row in db.execute("PRAGMA table_info(questions)")}
@@ -106,7 +108,7 @@ class Store:
         with self.connect() as db:
             meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
             version = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] if meta else "0"
-            if version == "4":
+            if version == "5":
                 return
             backup = self.root / f"state-v{version if version != '0' else '1'}.backup.sqlite"
             if not backup.exists():
@@ -145,7 +147,7 @@ class Store:
                         self._put(db, rid, "task_state/" + task["id"], {
                             "version": 1, "revision": 1, "implementation": "accepted" if task["id"] in done else "pending",
                             "evidence": "stale" if task["id"] in done else "absent"})
-                if version == "3":
+                if version in {"3", "4"}:
                     continue  # v3 data semantics are already current; only its schema needs repair.
                 owners = {}
                 for key, value in records.items():
@@ -166,8 +168,8 @@ class Store:
                     if key.startswith("replanning/evidence/") and key != "replanning/evidence/contracts":
                         self._put(db, rid, key, {**value, "comparable": False,
                                                "comparison_reason": "legacy evidence requires revalidation"})
-            db.execute("UPDATE meta SET value='4' WHERE key='schema_version'")
-            self._event(db, None, "state.migrated", {"version": 4, "backup": str(backup)})
+            db.execute("UPDATE meta SET value='5' WHERE key='schema_version'")
+            self._event(db, None, "state.migrated", {"version": 5, "backup": str(backup)})
 
     def finish_recovery(self, rid, updates, pending, *, replan=None, successor=None):
         """Dispatch and retire the obsolete question together; retain raw history."""
@@ -194,7 +196,7 @@ class Store:
 
     def _put(self, db, rid, key, value):
         db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
-                   (rid, key, json.dumps(value, ensure_ascii=False)))
+                   (rid, key, json.dumps(value, ensure_ascii=True)))
         adopt_logs(db, self.root, value)
 
     def activate_plan_patch(self, rid, journal_id):
@@ -289,7 +291,7 @@ class Store:
 
     def _event(self, db, rid, kind, data):
         db.execute("INSERT INTO events(run_id,time,kind,data) VALUES(?,?,?,?)",
-                   (rid, now(), kind, json.dumps(redact(data), ensure_ascii=False)))
+                   (rid, now(), kind, json.dumps(redact(data), ensure_ascii=True)))
 
     def event(self, rid, kind, data):
         with self.connect() as db:
@@ -322,7 +324,7 @@ class Store:
                     if existing:
                         data = {**data, "round": max(data.get("round", 0), json.loads(existing[0]).get("round", 0))}
                 db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
-                           (rid, key, json.dumps(data, ensure_ascii=False)))
+                           (rid, key, json.dumps(data, ensure_ascii=True)))
                 adopt_logs(db, self.root, data)
                 self._event(db, rid, "checkpoint.saved", {"key": key})
 
@@ -357,7 +359,7 @@ class Store:
                    "evaluation": state["evaluations"], "generation": body.get("replans", 0), "granted": False}
         for key, data in (("replanning/progress", state), ("replanning/pending", pending)):
             db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
-                       (rid, key, json.dumps(data, ensure_ascii=False)))
+                       (rid, key, json.dumps(data, ensure_ascii=True)))
         self._event(db, rid, "replan.assessed", {"stage": stage, **decision})
         return pending
 
@@ -393,7 +395,7 @@ class Store:
             if pending.get("verification_recheck"):
                 feedback["verification_recheck"] = pending["verification_recheck"]
             db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
-                       (rid, "replan_feedback", json.dumps(feedback, ensure_ascii=False)))
+                       (rid, "replan_feedback", json.dumps(feedback, ensure_ascii=True)))
             db.execute("UPDATE runs SET status='RUNNING',stage=?,updated=?,data=? WHERE id=?",
                        (pending["stage"], now(), json.dumps(body), rid))
             db.execute("DELETE FROM checkpoints WHERE run_id=? AND key='replanning/pending'", (rid,))
@@ -414,7 +416,7 @@ class Store:
                     raise AA2Error("Task recovery state changed; preserve the candidate and retry")
             for key, value in ((recovery_key, {**record, "recovered": True}), (task_key, updated)):
                 db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
-                           (rid, key, json.dumps(value, ensure_ascii=False)))
+                           (rid, key, json.dumps(value, ensure_ascii=True)))
                 adopt_logs(db, self.root, value)
             db.execute("DELETE FROM checkpoints WHERE run_id=? AND key='replanning/pending'", (rid,))
             db.execute("UPDATE questions SET superseded=1 WHERE run_id=? AND key=?",
@@ -425,6 +427,11 @@ class Store:
     def _question(row):
         values = dict(row)
         return {**values, "interaction": json.loads(values.get("interaction", "{}")), "superseded": values.get("superseded", 0)}
+
+    def question(self, qid):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone()
+            return self._question(row) if row else None
 
     def request(self, rid, key, prompt, artifact_hash="", interaction=None) -> dict:
         with self.connect() as db:

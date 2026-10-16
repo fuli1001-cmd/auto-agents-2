@@ -202,6 +202,9 @@ def strict_schema(model: type[BaseModel]) -> dict:
     def visit(item):
         if isinstance(item, dict):
             if item.get("type") == "object":
+                if item.get("additionalProperties") not in (None, False):
+                    from .errors import ConfigurationError
+                    raise ConfigurationError("Strict provider schemas do not support arbitrary property maps")
                 item["additionalProperties"] = False
                 item["required"] = list(item.get("properties", {}))
             item.pop("default", None)

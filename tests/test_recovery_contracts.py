@@ -152,6 +152,15 @@ def test_patch_rejects_invalid_or_budget_evading_changes(defect):
 
 
 def test_migration_is_explicit_idempotent_and_preserves_raw_unapplied_proposals(tmp_path):
+    # Build the historical v1 schema, including its genuinely absent v5 table.
+    from auto_agents_2.store import SCHEMA
+    state = tmp_path / ".aa2"
+    state.mkdir()
+    with sqlite3.connect(state / "state.sqlite") as db:
+        db.executescript(";".join(s for s in SCHEMA.replace("'schema_version','5'", "'schema_version','1'").split(";")
+                                 if "resource_holds" not in s))
+        db.execute("ALTER TABLE questions ADD COLUMN interaction TEXT NOT NULL DEFAULT '{}'")
+        db.execute("ALTER TABLE questions ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0")
     store = Store(tmp_path)
     rid = store.admit("requirements", {})["id"]
     proposal = {"changes": [{"path": "README.md", "operation": "replace", "old_text": "old", "content": "unapplied"}],

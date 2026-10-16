@@ -5,12 +5,17 @@ import asyncio
 import ipaddress
 import socket
 from contextlib import contextmanager
+from contextvars import ContextVar
 from urllib.parse import urlsplit, urlunsplit
 
 import httpcore
 import httpx
 
 from .errors import AA2Error
+from .process_ownership import PreviewOwnershipError, verify_connection
+
+preview_owner = ContextVar("preview_owner", default=None)
+OWNERSHIP_FAILURE = "Preview connection ownership could not be verified"
 
 
 @contextmanager
@@ -115,6 +120,8 @@ class PreviewProxy:
 
     def __init__(self, origin, errors):
         self.origin, self.errors = urlsplit(origin), errors
+        self.owner = preview_owner.get()
+        self.ownership_failed = False
         self.tasks = set()
 
     async def start(self):
@@ -156,6 +163,8 @@ class PreviewProxy:
                     await writer.drain()
                     return
                 incoming, upstream = await asyncio.open_connection(self.origin.hostname, self.origin.port)
+                if self.owner is not None:
+                    await verify_connection(self.owner, upstream)
                 if method == "CONNECT":
                     writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                     await writer.drain()
@@ -178,6 +187,9 @@ class PreviewProxy:
                     await destination.drain()
             pumps = [asyncio.create_task(relay(reader, upstream)), asyncio.create_task(relay(incoming, writer))]
             await asyncio.gather(*pumps)
+        except PreviewOwnershipError:
+            self.ownership_failed = True
+            self.errors.append(OWNERSHIP_FAILURE)
         except (OSError, ValueError, TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
             pass  # Navigation/connection failures remain visible to the browser inspector.
         finally:

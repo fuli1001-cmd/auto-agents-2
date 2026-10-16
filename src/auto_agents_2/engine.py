@@ -542,9 +542,16 @@ class WorkflowEngine:
         while question["answer"] is None:
             if self.question_handler:
                 async with self.question_lock:
+                    question = self.store.question(question["id"])
+                    if not question or question["superseded"]:
+                        raise asyncio.CancelledError()
+                    if question["answer"] is not None:
+                        break
                     async def external_answer():
                         while True:
-                            current = self.store.request(rid, key, prompt, artifact_hash, interaction)
+                            current = self.store.question(question["id"])
+                            if not current or current["superseded"]:
+                                raise asyncio.CancelledError()
                             if current["answer"] is not None:
                                 return current["answer"]
                             await asyncio.sleep(self.config.load().execution.wait_poll_seconds)
@@ -556,7 +563,7 @@ class WorkflowEngine:
                             self.store.answer(question["id"], answer, artifact_hash)
                         except AA2Error:
                             # Only a competing valid response may win this race.
-                            current = self.store.request(rid, key, prompt, artifact_hash, interaction)
+                            current = self.store.question(question["id"])
                             if current["answer"] is None:
                                 raise
                     finally:
@@ -565,7 +572,9 @@ class WorkflowEngine:
                         await asyncio.gather(*tasks, return_exceptions=True)
             else:
                 await asyncio.sleep(self.config.load().execution.wait_poll_seconds)
-            question = self.store.request(rid, key, prompt, artifact_hash, interaction)
+            question = self.store.question(question["id"])
+            if not question or question["superseded"]:
+                raise asyncio.CancelledError()
             if self.store.run(rid)["status"] == "CANCELLED":
                 raise AA2Error("Iteration cancelled")
         self.store.update(rid, status="RUNNING")
@@ -581,7 +590,8 @@ class WorkflowEngine:
     async def _invoke(self, stage, context, schema, workspace, rid, key, fresh=False):
         invocation_key = "invocation/" + key
         source_before = tree_hash(workspace)
-        identity = invocation_identity(stage, context, schema, workspace, self.config.load(), source_before)
+        execution = self.agent.execution_identity(stage) if isinstance(self.agent, ProviderRouter) else None
+        identity = invocation_identity(stage, context, schema, workspace, self.config.load(), source_before, execution)
         saved = self.store.get(rid, invocation_key, {})
         if saved.get("identity") == identity and saved.get("result"):
             return schema.model_validate(saved["result"])
@@ -1253,7 +1263,8 @@ class WorkflowEngine:
             if not batch:
                 raise AA2Error("Task graph cannot make progress")
             base = git(integration, "rev-parse", "HEAD")
-            outcomes = await asyncio.gather(*(self._task(rid, task, base, plan, context) for task in batch), return_exceptions=True)
+            from .task_batch import collect_batch
+            outcomes = await collect_batch([self._task(rid, task, base, plan, context) for task in batch])
             failures = []
             for task, outcome in zip(batch, outcomes):
                 if isinstance(outcome, BaseException):

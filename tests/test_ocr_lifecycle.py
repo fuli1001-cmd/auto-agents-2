@@ -192,6 +192,7 @@ async def test_runtime_failures_are_bounded_across_restarts(tmp_path, monkeypatc
 
 async def test_renderer_failure_unwinds_workflow(tmp_path, monkeypatch):
     ConfigStore(tmp_path).initialize()
+    Store(tmp_path).admit("renderer fixture", {})
     cancelled = asyncio.Event()
     async def render(*args):
         raise OSError("display failed")

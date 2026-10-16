@@ -469,7 +469,7 @@ def test_initialization_rejects_subdirectory_and_patch_rejects_conflicting_files
     assert not (tmp_path / "a").exists()
 
 
-@pytest.mark.parametrize("version", ["1", "2", "3"])
+@pytest.mark.parametrize("version", ["1", "2", "3", "4"])
 @pytest.mark.parametrize("fail", [False, True])
 def test_actual_missing_table_schema_migration_is_atomic(tmp_path, version, fail):
     state = tmp_path / ".aa2"
@@ -480,7 +480,7 @@ def test_actual_missing_table_schema_migration_is_atomic(tmp_path, version, fail
     document.write_text("legacy document")
     # Historical schemas predate these tables; do not initialize a modern Store first.
     statements = [s for s in SCHEMA.split(";") if not any(name in s for name in (
-        "artifact_edges", "artifact_kinds", "diagnostic_holds", "retired_diagnostics"))]
+        "artifact_edges", "artifact_kinds", "diagnostic_holds", "retired_diagnostics", "resource_holds"))]
     with sqlite3.connect(state / "state.sqlite") as db:
         db.executescript(";".join(statements))
         db.execute("UPDATE meta SET value=? WHERE key='schema_version'", (version,))
@@ -500,7 +500,7 @@ def test_actual_missing_table_schema_migration_is_atomic(tmp_path, version, fail
     store.migrate()
     store.migrate()
     with store.connect() as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "4"
+        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "5"
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='diagnostic_holds'").fetchone()
     assert store.get("old", "rounds/T") == {"round": 4}
     assert (state / f"state-v{version}.backup.sqlite").is_file()

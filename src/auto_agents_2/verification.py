@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import shutil
-import stat
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -27,7 +25,7 @@ from .models import CheckResult, Command
 from .progress import Activity
 from .readview import sensitive_values
 from .resources import ResourceManager
-from .safe_files import regular_files
+from .safe_files import read_regular, regular_files
 from .sandbox import SandboxRunner
 from .store import Store
 from .test_reports import is_python, read_junit, report_command, test_runner
@@ -39,19 +37,7 @@ MAX_REPORT_BYTES = 32 * 1024 * 1024
 
 def report_bytes(directory: Path) -> bytes:
     """Read the sandbox's report once, without privileged symlink traversal."""
-    parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        fd = os.open("junit.xml", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
-        with os.fdopen(fd, "rb") as stream:
-            info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_REPORT_BYTES:
-                raise ValueError("Report must be a bounded regular file")
-            data = stream.read(MAX_REPORT_BYTES + 1)
-            if len(data) > MAX_REPORT_BYTES:
-                raise ValueError("Report exceeds supported parsing capacity")
-            return data
-    finally:
-        os.close(parent)
+    return read_regular(directory / "junit.xml", MAX_REPORT_BYTES)
 
 
 class VerificationService:
@@ -61,6 +47,8 @@ class VerificationService:
         self.artifacts = ArtifactStore(root)
 
     async def run(self, commands: list[Command], workspace: Path, environment: Environment | None = None) -> list[CheckResult]:
+        from .build_publication import BuildPublication
+        BuildPublication(self.resources).recover(workspace)
         commands = verification_commands(commands, workspace)
         results = []
         baseline = tree_hash(workspace)
@@ -251,7 +239,7 @@ class VerificationService:
                 reasons.append("build_outputs_missing_or_invalid")
                 output += "\n" + str(exc)
         if command.outputs and not reasons:
-            self._publish_outputs(command, workspace, generated, scratch / "previous-outputs")
+            self._publish_outputs(command, workspace, generated)
         code = process.returncode if process.returncode is not None else -1
         if reasons:
             code = code or 1
@@ -269,24 +257,10 @@ class VerificationService:
                            tests=tests, skipped=skipped, timed_out=timed_out, test_ids=test_ids,
                            passed_test_ids=passed_test_ids, report=report)
 
-    @staticmethod
-    def _publish_outputs(command, workspace, generated, backup):
+    def _publish_outputs(self, command, workspace, generated):
         """Publish only a successful, validated build; failed builds retain old files."""
-        backup.mkdir()
-        moved = []
-        try:
-            for index, output in enumerate(command.outputs):
-                destination = contained(workspace, output)
-                previous = backup / str(index)
-                destination.rename(previous)
-                moved.append((destination, previous, generated / output))
-                (generated / output).rename(destination)
-        except BaseException:
-            for destination, previous, staged in reversed(moved):
-                if destination.exists():
-                    destination.rename(staged)
-                previous.rename(destination)
-            raise
+        from .build_publication import BuildPublication
+        BuildPublication(self.resources).publish(command, workspace, generated)
 
 
 def passed(results: list[CheckResult]) -> bool:

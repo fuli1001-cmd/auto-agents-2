@@ -36,6 +36,17 @@ def regular_file(parent, name):
         raise
 
 
+def read_regular(path: Path, limit: int) -> bytes:
+    """Read one bounded, regular file without following any path component links."""
+    with directory_fd(path.parent) as parent, regular_file(parent, path.name) as stream:
+        if os.fstat(stream.fileno()).st_size > limit:
+            raise ValueError("File exceeds the supported size")
+        data = stream.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError("File exceeds the supported size")
+        return data
+
+
 def regular_files(directory: Path):
     """Yield open files; directory and leaf links are rejected, never traversed."""
     def visit(parent, prefix):

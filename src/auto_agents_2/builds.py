@@ -1,11 +1,11 @@
 """Generated-output contracts and dependency order, independent of process execution."""
 from __future__ import annotations
 
-import json
 from pathlib import Path, PurePosixPath
 
 from .errors import AA2Error, PolicyViolation, VerificationPreparationError
 from .models import Command
+from .profiles import package_manifest
 from .util import contained, digest
 from .workspace import git, input_entry, repository_workspace
 
@@ -20,17 +20,16 @@ def normalized(command: Command, workspace: Path) -> Command:
     if not outputs and Path(command.argv[0]).name == "npm" and command.argv[1:] == ["run", "build"]:
         manifest = cwd / "package.json"
         try:
-            data = json.loads(manifest.read_text())
-            if not isinstance(data, dict) or any(not isinstance(data.get(key, {}), dict)
-                    for key in ("dependencies", "devDependencies")):
-                raise ValueError("Expected dependency mappings")
+            if not manifest.exists():
+                return command
+            data = package_manifest(manifest)
             dependencies = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
             directory = ".next" if "next" in dependencies else "dist" if "vite" in dependencies else None
             if directory:
                 outputs = [(PurePosixPath(command.cwd) / directory).as_posix()]
         except FileNotFoundError:
             pass
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, AA2Error) as exc:
             raise VerificationPreparationError(f"Cannot infer build outputs from {command.cwd}/package.json") from exc
     allowed = {cwd / "dist", cwd / ".next"}
     for output in outputs:
@@ -90,7 +89,7 @@ def overlaps(workspace, first, second):
 def runtime_commands(plan, workspace, environment):
     commands = verification_commands(plan.runtime_probes, workspace, plan.runtime_prepare, prepare_all=True) if plan else []
     return commands or [Command(argv=[str(environment.prefix / "bin/python"), "-c",
-                                      "import sys; assert sys.prefix == " + repr(str(environment.prefix))])]
+                                      "import sys; sys.exit(0 if sys.prefix == " + repr(str(environment.prefix)) + " else 1)"])]
 
 
 def verification_commands(commands: list[Command], workspace: Path, preparations=(), *, prepare_all=False) -> list[Command]:

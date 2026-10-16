@@ -1,6 +1,7 @@
 """Select pip inputs once and resolve all roots in a single transaction."""
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import tomllib
@@ -11,7 +12,7 @@ from urllib.parse import quote, unquote, urlsplit
 from packaging.requirements import InvalidRequirement, Requirement
 
 from .errors import AA2Error
-from .util import contained
+from .util import contained, digest
 
 
 def manifest_reference(value: str, field: str) -> str:
@@ -34,6 +35,34 @@ class PipInputs:
     requirements: list[str] = field(default_factory=list)
     constraints: list[str] = field(default_factory=list)
     local: bool = False
+    local_paths: dict[str, str] = field(default_factory=dict)
+    protected: tuple[str, ...] = ()
+
+    def include_local(self, workspace, path):
+        from .readview import sensitive
+        from .workspace import EXCLUDED, input_entry
+        seen = set()
+        def collect(item):
+            name = item.relative_to(workspace).as_posix()
+            if sensitive(Path(name), self.protected) or set(Path(name).parts) & {".git", ".aa2", ".venv", ".conda-env"}:
+                raise AA2Error("Local dependency cannot include protected inputs")
+            if item in seen:
+                return
+            seen.add(item)
+            if item.is_symlink():
+                target = item.resolve()
+                if not target.is_relative_to(workspace) or not target.exists():
+                    raise AA2Error("Local dependency links must remain within the execution workspace")
+                collect(target)
+            if item.is_dir() and not item.is_symlink():
+                # Directory roots may be explicit generated inputs (e.g. dist).
+                self.local_paths[name] = digest(["directory"])
+                for child in sorted(item.iterdir()):
+                    if child.name not in EXCLUDED and not sensitive(child.relative_to(workspace), self.protected):
+                        collect(child)
+            else:
+                self.local_paths[name] = digest(input_entry(item, workspace))
+        collect(path)
 
     def rendered(self, source: Path) -> tuple[str, str]:
         # Placeholder paths bind local dependencies to the owned immutable source copy.
@@ -54,8 +83,8 @@ class PipInputs:
                      for lines in (self.requirements, self.constraints))
 
 
-def pip_inputs(workspace: Path, explicit: str = "", additional=()) -> PipInputs:
-    result = PipInputs()
+def pip_inputs(workspace: Path, explicit: str = "", additional=(), *, protected=()) -> PipInputs:
+    result = PipInputs(protected=tuple(protected))
 
     def options(line):
         quoted, escaped = "", False
@@ -96,6 +125,33 @@ def pip_inputs(workspace: Path, explicit: str = "", additional=()) -> PipInputs:
         return parts[0]
 
     def normalize(line: str, base: Path) -> str:
+        find_links = re.match(r"^(?:--find-links(?:=|\s+)|-f\s*)(.+)$", line)
+        if find_links:
+            operand = include_name(find_links[1])
+            if urlsplit(operand).scheme in {"http", "https"}:
+                return "--find-links " + operand
+            if operand.startswith("file:"):
+                url = urlsplit(operand)
+                if url.netloc not in {"", "localhost"} or url.query or url.fragment:
+                    raise AA2Error("Invalid local find-links URL")
+                operand = unquote(url.path)
+            path = Path(os.path.abspath(base / operand))
+            if not path.resolve().is_relative_to(workspace.resolve()) or not path.exists():
+                raise AA2Error("Local find-links must exist inside the execution workspace")
+            result.include_local(workspace.resolve(), path)
+            result.local = True
+            return "--find-links {AA2_SOURCE_URI}/" + quote(path.relative_to(workspace.resolve()).as_posix(), safe="/")
+        if line.startswith("-") and not re.match(r"^(?:-e\s+|--editable[=\s]+)", line):
+            # Explicitly support pip's non-path requirement-file options only.
+            if not re.match(r"^--(?:no-index|pre|prefer-binary|require-hashes|only-binary|no-binary|index-url|extra-index-url|trusted-host|use-feature)(?:\s|=|$)", line):
+                raise AA2Error("Unsupported pip requirement-file option")
+            if "file:" in line:
+                raise AA2Error("Unsupported local path in pip option")
+            if re.match(r"^--(?:index-url|extra-index-url)(?:=|\s)", line):
+                value = re.split(r"[=\s]", line, maxsplit=1)[1].strip()
+                if urlsplit(value).scheme not in {"http", "https"}:
+                    raise AA2Error("Pip index options must name HTTP(S) URLs")
+            return line
         line, requirement_options = options(line)
         editable = re.match(r"^(?:-e\s+|--editable[=\s]+)(.+)$", line)
         value = editable[1] if editable else line
@@ -131,9 +187,11 @@ def pip_inputs(workspace: Path, explicit: str = "", additional=()) -> PipInputs:
                 if url.netloc not in {"", "localhost"} or url.query or url.fragment:
                     raise AA2Error("Local dependency must use a local file URL")
                 operand = unquote(url.path)
-            path = (base / operand).resolve()
-            if not path.is_relative_to(workspace.resolve()) or not path.exists():
+            path = (base / operand).absolute()
+            if not path.resolve().is_relative_to(workspace.resolve()) or not path.exists():
                 raise AA2Error("Local dependency must exist inside the execution workspace")
+            path = Path(os.path.normpath(path))
+            result.include_local(workspace.resolve(), path)
             result.local = True
             relative = path.relative_to(workspace.resolve()).as_posix()
             value = ((direct[1] + "{AA2_SOURCE_URI}/" + quote(relative, safe="/")) if direct else
@@ -191,15 +249,19 @@ def pip_inputs(workspace: Path, explicit: str = "", additional=()) -> PipInputs:
     return result
 
 
-def copy_execution_source(workspace: Path, destination: Path):
+def copy_execution_source(workspace: Path, destination: Path, inputs: PipInputs | None = None):
     """Copy declared project inputs with internal links bound to the private copy."""
-    import os
     import shutil
 
+    from .readview import sensitive
     from .workspace import EXCLUDED, files, git, repository_workspace
     paths = set(files(workspace))
     if repository_workspace(workspace):
         paths.update(workspace / name for name in git(workspace, "ls-files", "-z").split("\0") if name)
+    paths = {path for path in paths if not sensitive(path.relative_to(workspace), inputs.protected if inputs else ())
+             and not set(path.relative_to(workspace).parts) & {".aa2", ".git", ".venv", ".conda-env"}}
+    if inputs:
+        paths.update(workspace / name for name in inputs.local_paths)
     directories = {parent for path in paths for parent in path.parents if parent.is_relative_to(workspace)}
     for directory, folders, names in os.walk(workspace, followlinks=False):
         directories.add(Path(directory))
@@ -207,6 +269,9 @@ def copy_execution_source(workspace: Path, destination: Path):
                      if name not in EXCLUDED and name != ".env" and not name.startswith(".env.")
                      and Path(directory, name).is_symlink())
         folders[:] = [name for name in folders if name not in EXCLUDED and not Path(directory, name).is_symlink()]
+    protected = inputs.protected if inputs else ()
+    paths = {path for path in paths if not sensitive(path.relative_to(workspace), protected)}
+    directories = {path for path in directories if not sensitive(path.relative_to(workspace), protected)}
     copied = set()
     def copy(path):
         if path in copied:
@@ -233,3 +298,10 @@ def copy_execution_source(workspace: Path, destination: Path):
             shutil.copy2(path, target)
     for path in sorted(paths):
         copy(path)
+    if inputs:
+        from .workspace import input_entry
+        for name, identity in inputs.local_paths.items():
+            copied_path = destination / name
+            actual = digest(["directory"]) if copied_path.is_dir() and not copied_path.is_symlink() else digest(input_entry(copied_path, destination))
+            if actual != identity:
+                raise AA2Error("Local dependency changed during source preparation")

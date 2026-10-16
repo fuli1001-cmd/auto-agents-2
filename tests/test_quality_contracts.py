@@ -362,7 +362,7 @@ async def test_conda_pip_and_multiple_roots_share_one_resolver_input(tmp_path):
     (tmp_path / "deps.txt").write_text("shared<3\n-c constraints.txt\n-e .\n")
     (tmp_path / "constraints.txt").write_text("transitive<2\n")
     observed = []
-    async def prepare(prefix, ready, fingerprint, profile, conda_file, pip_file, workspace, dependencies, local):
+    async def prepare(prefix, ready, fingerprint, profile, conda_file, pip_file, workspace, dependencies, local, inputs=None):
         observed.append(pip_file.read_text())
         assert all(isinstance(d, str) for d in yaml.safe_load(conda_file.read_text())["dependencies"])
         constraint_file = Path(pip_file.read_text().splitlines()[0].removeprefix("-c "))
@@ -599,11 +599,16 @@ async def test_stdout_pass_claim_cannot_supply_test_case_evidence(tmp_path):
     assert result.tests == 0 and result.exit_code != 0
 
 
-def test_public_configuration_literals_are_not_mistaken_for_credentials(tmp_path):
+def test_all_values_in_explicitly_protected_files_are_confidential(tmp_path):
     (tmp_path / ".env").write_text("HOST=localhost\nPORT=8000\nPASSWORD=private-password-value\n")
     (tmp_path / "server.py").write_text("HOST = 'localhost'\nPORT = 8000\n")
     (tmp_path / "leak.py").write_text("PASSWORD = 'private-password-value'\n")
-    assert {p.name for p in public_files(tmp_path)} == {"server.py"}
+    # A key name cannot prove that its value is public. Publish safe defaults
+    # separately in .env.example when they must reach the model.
+    assert not public_files(tmp_path)
+    (tmp_path / ".env").write_text("PASSWORD=private-password-value\n")
+    (tmp_path / ".env.example").write_text("HOST=localhost\nPORT=8000\n")
+    assert {p.name for p in public_files(tmp_path)} == {"server.py", ".env.example"}
 
 
 def test_issue_scope_survives_task_renaming(tmp_path):

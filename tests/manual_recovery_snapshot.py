@@ -34,10 +34,25 @@ CHECKPOINT_PATHS = {
 }
 
 
-def validate_copy(root):
+def validate_copy(root, original=None):
+    origin = original or root
     for directory, folders, names in os.walk(root, followlinks=False):
+        folder = Path(directory)
+        if (folder / "HEAD").is_file() and (folder / "objects").is_dir() and folder != root / ".git":
+            raise ValueError("Nested Git repositories require explicit snapshot support")
         for name in [*folders, *names]:
             path = Path(directory) / name
+            if name == ".git" and path != root / ".git":
+                parts = path.relative_to(root).parts
+                if (len(parts) != 5 or parts[:2] != (".aa2", "worktrees")
+                        or not path.is_file() or path.is_symlink()):
+                    raise ValueError("Nested Git repositories require explicit snapshot support")
+                pointer = path.read_text().strip()
+                if not pointer.startswith("gitdir: "):
+                    raise ValueError("Invalid managed Git worktree pointer")
+                target = Path(os.path.abspath(origin / path.parent.relative_to(root) / pointer[8:]))
+                if target.parent != origin / ".git/worktrees":
+                    raise ValueError("Managed Git pointer references an external repository")
             if path.is_symlink():
                 if Path(os.readlink(path)).is_absolute() or not path.resolve().is_relative_to(root):
                     raise ValueError("Snapshot contains an external or absolute symlink; source remains untouched")
@@ -46,6 +61,20 @@ def validate_copy(root):
     alternates = root / ".git/objects/info/alternates"
     if alternates.exists() and alternates.read_text().strip():
         raise ValueError("External Git object databases cannot be safely relocated")
+    for metadata in (root / ".git/worktrees").glob("*"):
+        if not metadata.is_dir() or metadata.is_symlink():
+            raise ValueError("Invalid Git worktree metadata")
+        common = metadata / "commondir"
+        if not common.is_file() or Path(os.path.abspath(origin / metadata.relative_to(root) / common.read_text().strip())) != origin / ".git":
+            raise ValueError("External Git common directory cannot be safely relocated")
+        backlink = metadata / "gitdir"
+        if not backlink.is_file():
+            raise ValueError("Missing Git worktree backlink")
+        target = Path(os.path.abspath(origin / metadata.relative_to(root) / backlink.read_text().strip()))
+        if not target.is_relative_to(origin / ".aa2/worktrees") or target.name != ".git":
+            raise ValueError("External Git worktree backlink cannot be safely relocated")
+        if (metadata / "objects/info/alternates").exists():
+            raise ValueError("Unsupported Git object database indirection")
     variables = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     variables.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
     for config in [root / ".git/config", root / ".git/config.worktree", *(root / ".git/worktrees").glob("*/config.worktree")]:
@@ -95,11 +124,11 @@ def snapshot(source, destination):
                 subprocess.run(["cp", "-a", "--reflink=auto", str(path), str(destination / path.name)], check=True)
         state = destination / ".aa2"
         state.mkdir(mode=0o700)
-        for name in ("artifacts", "worktrees", "cache", "environment-records", "node-records", "visuals", "config.json"):
+        for name in ("artifacts", "worktrees", "cache", "environment-records", "node-records", "visuals", "recovery", "config.json"):
             path = source / ".aa2" / name
             if path.exists() or path.is_symlink():
                 subprocess.run(["cp", "-a", "--reflink=auto", str(path), str(state / name)], check=True)
-        validate_copy(destination)  # Before opening any copied path for writing.
+        validate_copy(destination, source)  # Before opening any copied path for writing.
         database = source / ".aa2/state.sqlite"
         if database.is_symlink() or (source / ".aa2").is_symlink():
             raise ValueError("Source state must be a local regular database")
@@ -159,7 +188,20 @@ def snapshot(source, destination):
             if not current or current[1] not in {"PAUSED", "WAITING_USER"}:
                 raise ValueError("Snapshot requires a paused or waiting run")
             rid = current[0]
-            for table in ("resources", "delivery_pins"):
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "resource_holds" in tables:
+                for path, in db.execute("SELECT DISTINCT path FROM resource_holds"):
+                    target = Path(relocate(path))
+                    held_source = Path(path)
+                    if held_source.absolute() != held_source.resolve() or not held_source.is_relative_to(source / ".aa2"):
+                        raise ValueError("Unsupported held recovery path")
+                    if not target.exists() and held_source.exists():
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        subprocess.run(["cp", "-a", "--reflink=auto", str(held_source), str(target)], check=True)
+                validate_copy(destination, source)
+            for table in ("resources", "delivery_pins", "resource_holds"):
+                if table not in tables:
+                    continue
                 for rowid, path in db.execute(f'SELECT rowid,path FROM "{table}"').fetchall():
                     db.execute(f'UPDATE "{table}" SET path=? WHERE rowid=?', (relocate(path), rowid))
             for owner, key, data in db.execute("SELECT run_id,key,data FROM checkpoints").fetchall():
@@ -176,6 +218,10 @@ def snapshot(source, destination):
                            (new_key, json.dumps(value, ensure_ascii=False), owner, key))
         # Immutable artifact bodies, events, questions, receipts and run provenance
         # are never rewritten. Only an instance locator is mutable here.
+        for path in (state / "recovery").glob("build_*/journal.json"):
+            value = json.loads(path.read_text())
+            field(value, "workspace")
+            safe_write(path, destination, json.dumps(value, ensure_ascii=True))
         for path in (state / "environment-records").glob("*/instance.json"):
             value = json.loads(path.read_text())
             field(value, "prefix")

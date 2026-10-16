@@ -50,7 +50,12 @@ class RecoveryController:
         key = "recovery/delivery/" + observation
         saved = self.store.get(rid, key)
         if saved and saved.get("decision", {}).get("action") == "repair":
+            # The caller validates a partially applied repair against its saved
+            # patch preimage. An already dispatched repair may legitimately edit.
             return saved["decision"]["action"]
+        evidence_source = tree_hash(work)
+        if saved and saved.get("evidence_source_hash", evidence_source) != evidence_source:
+            raise AA2Error("Delivery recovery evidence source changed; preserve the candidate")
         evidence_ref = "recovery/delivery-evidence/" + observation
         self.store.checkpoint(rid, evidence_ref, feedback)
         kind = "integration" if feedback.get("conflicts") else "review"
@@ -75,9 +80,13 @@ class RecoveryController:
         if decision.action == "diagnose":
             project = self.engine.contexts.build(work)
             failure = failure.model_copy(update={"evidence_refs": evidence_references(failure, project)})
+            saved = {**(saved or {}), "failure": failure.model_dump(), "evidence_source_hash": evidence_source}
+            self.store.checkpoint(rid, key, saved)
             if not saved or not saved.get("round"):
                 if count["round"] >= self.engine.config.load().execution.max_diagnosis_rounds:
                     await self._grant(rid, count_key + f"/grant/{count['round']}", "交付故障已达到诊断上限。继续只增加一次独立诊断机会。")
+                if tree_hash(work) != evidence_source:
+                    raise AA2Error("Delivery recovery evidence source changed during diagnosis approval; preserve the candidate")
                 count["round"] += 1
                 saved = {**(saved or {}), "failure": failure.model_dump(), "round": count["round"]}
                 self.store.checkpoints(rid, {key: saved, count_key: count,
@@ -89,6 +98,8 @@ class RecoveryController:
                 "specification": self.store.get(rid, "clarify"), "delivery_journal": self.store.get(rid, "delivery/journal"),
                 "constraint": "Delivery may only repair within supplied allowed_paths or recheck. Gate/plan changes require user reconciliation; never invalidate a published journal."},
                 Diagnosis, work, rid, f"recovery/diagnose/{failure.id}/{saved['round']}", fresh=True)
+            if tree_hash(work) != evidence_source:
+                raise AA2Error("Delivery recovery evidence source changed during diagnosis; preserve the candidate")
             try:
                 decision = adjudicate(failure, diagnosis=diagnosis)
             except AA2Error as exc:
@@ -99,7 +110,10 @@ class RecoveryController:
         if decision.action not in {"repair", "recheck"}:
             self.store.checkpoint(rid, key, {"failure": failure.model_dump(), "blocked_decision": decision.model_dump()})
             raise AA2Error("交付恢复需要核对已保留的发布记录：" + decision.reason)
-        updates = {key: {"failure": failure.model_dump(), "decision": decision.model_dump()}}
+        if tree_hash(work) != evidence_source:
+            raise AA2Error("Delivery recovery evidence source changed before dispatch; preserve the candidate")
+        updates = {key: {"failure": failure.model_dump(), "decision": decision.model_dump(),
+                         "evidence_source_hash": evidence_source}}
         if decision.action == "recheck":
             if already_rechecked:
                 self.store.checkpoint(rid, key, {"failure": failure.model_dump(), "blocked_decision": decision.model_dump()})
@@ -175,6 +189,7 @@ class RecoveryController:
                 failure = failure.model_copy(update={"evidence_refs": evidence_references(failure, project)})
                 active["failure"] = failure.model_dump()
                 active["evidence_source_hash"] = tree_hash(work)
+                self.store.checkpoint(rid, "recovery/active", active)
                 budget_key = "recovery/budgets/diagnosis/" + failure.origin_id
                 budget = self.store.get(rid, budget_key,
                                         self.store.get(rid, "recovery/diagnosis/" + failure.id, {"round": 0}))
@@ -183,6 +198,8 @@ class RecoveryController:
                         await self._grant(rid, "diagnosis/" + failure.id + f"/{budget['round']}",
                                           "同一故障已达到独立诊断上限，缺少可执行的恢复结论。继续将只增加一次诊断机会。\n最新失败："
                                           + failure_summary(failure.evidence.get("checks", [])))
+                    if tree_hash(work) != active["evidence_source_hash"]:
+                        raise AA2Error("Recovery evidence source changed during diagnosis approval; preserve the candidate")
                     budget["round"] += 1
                     active["diagnosis_round"] = budget["round"]
                     self.store.checkpoints(rid, {budget_key: budget, "recovery/active": active,
@@ -197,6 +214,8 @@ class RecoveryController:
                     "current_issues": self.store.get(rid, "issues", {}),
                     "observations": self.store.get(rid, "recovery/observations/" + failure.origin_id, []),
                 }, Diagnosis, work, rid, f"recovery/diagnose/{failure.id}/{active['diagnosis_round']}", fresh=True)
+                if tree_hash(work) != active["evidence_source_hash"]:
+                    raise AA2Error("Recovery evidence source changed during diagnosis; preserve the candidate")
                 try:
                     decision = adjudicate(failure, attempts=active["attempt"] - 1, diagnosis=diagnosis, plan=plan)
                 except AA2Error as exc:
@@ -240,6 +259,8 @@ class RecoveryController:
             return
         if decision.action not in {"repair", "recheck"}:
             raise AA2Error("Recovery has no executable action")
+        if active.get("evidence_source_hash") and tree_hash(work) != active["evidence_source_hash"]:
+            raise AA2Error("Recovery evidence source changed before dispatch; preserve the candidate")
         affected = descendants(plan, decision.task_ids) if plan else set()
         updates = {}
         done = set(self.store.get(rid, "develop/done", []))
@@ -256,7 +277,9 @@ class RecoveryController:
             state.update(implementation="needs_repair" if repair else ("accepted" if accepted else "pending"), evidence="stale")
             if accepted:
                 state["revision"] += 1
-                saved = {"previous_evidence": saved}
+                retained = {k: saved[k] for k in ("workspace", "source_hash", "recovery_ref", "baseline")
+                            if k in saved} if task_id not in done else {}
+                saved = {**retained, "previous_evidence": saved}
             feedback = dict(saved.get("feedback", {}))
             if retained_repair:
                 feedback["upstream_recovery"] = decision.model_dump()

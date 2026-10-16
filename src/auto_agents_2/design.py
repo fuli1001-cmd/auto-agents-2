@@ -17,13 +17,14 @@ import httpx
 
 from .errors import AA2Error, PrototypeBrowserError
 from .evidence import NODE_RUNTIME_CACHES
-from .network import PreviewProxy
+from .network import OWNERSHIP_FAILURE, PreviewProxy, preview_owner
+from .process_ownership import PreviewOwnershipError
 from .progress import capture_output, current_activity
 from .safe_files import directory_fd, regular_file
 from .sandbox import SandboxRunner
 from .util import atomic_write, digest, scrub_text
 
-PROTOTYPE_BROWSER_VERSION = 4
+PROTOTYPE_BROWSER_VERSION = 5
 
 
 class DesignCatalog:
@@ -277,15 +278,16 @@ async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[d
                 for route, resolved in routes:
                     for width, height in ((1440, 900), (390, 844)):
                         errors = []
-                        context = await preview_context(browser, server.url, errors, width, height)
-                        page = await context.new_page()
-                        page.on("pageerror", lambda error: errors.append(scrub_text(str(error))))
                         completed = []
                         row = {"page": unquote(urlsplit(resolved).path).lstrip("/"), "route": route,
                                "resolved_route": resolved, "viewport": width, "status": 0,
                                "errors": errors, "actions": completed}
                         results.append(row)
+                        context, page = None, None
                         try:
+                            context = await preview_context(browser, server.url, errors, width, height)
+                            page = await context.new_page()
+                            page.on("pageerror", lambda error: errors.append(scrub_text(str(error))))
                             response = await page.goto(server.url.rstrip("/") + resolved, wait_until="networkidle")
                             row["status"] = response.status if response else 0
                             await exercise(page, actions, route, completed)
@@ -296,18 +298,36 @@ async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[d
                                 row["failed_action"] = sequence[len(completed)].model_dump()
                         image = output / f"route-{digest(route)[:16]}-{width}.png"
                         try:
-                            await page.screenshot(path=str(image), full_page=True)
+                            if page is not None:
+                                await page.screenshot(path=str(image), full_page=True)
+                            else:
+                                raise AA2Error("Prototype page creation failed")
                             row["screenshot"] = str(image)
                         except Exception as exc:
                             errors.append(scrub_text(str(exc)))
                         if activity:
                             activity.output()
                             activity.progress(len(results), len(routes) * 2)
-                        await context.close()
+                        if context is not None:
+                            try:
+                                await context.close()
+                            except Exception as exc:
+                                errors.append("Browser context cleanup failed: " + scrub_text(str(exc)))
                         if errors or not 200 <= row["status"] < 400:
                             raise PrototypeBrowserError("Prototype browser checks failed: " + json.dumps(row), results)
+            except PrototypeBrowserError:
+                raise
+            except Exception as exc:
+                raise PrototypeBrowserError("Prototype browser check failed: " + scrub_text(str(exc)), results) from exc
             finally:
-                await browser.close()
+                original = sys.exception()
+                try:
+                    await browser.close()
+                except Exception as exc:
+                    if original is not None:
+                        original.add_note("Browser cleanup failed: " + type(exc).__name__)
+                    else:
+                        raise PrototypeBrowserError("Prototype browser cleanup failed", results) from exc
     return results
 
 
@@ -317,7 +337,13 @@ async def inspect_application(spec, workspace, output, environment, sandbox, roo
     from .store import Store
     resources = ResourceManager(Store(root.parent), ConfigStore(root.parent).load().cleanup)
     with resources.temporary("preview") as scratch:
-        return await _inspect_application(spec, workspace, output, environment, sandbox, root, scratch)
+        for attempt in range(3):
+            try:
+                return await _inspect_application(spec, workspace, output, environment, sandbox, root, scratch)
+            except PreviewOwnershipError:
+                if attempt == 2:
+                    raise
+                scratch.mkdir(exist_ok=True)
 
 
 async def _inspect_application(spec, workspace, output, environment, sandbox, root, scratch):
@@ -348,25 +374,32 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
             del tail[:-30]
 
     drains, results = [], []
+    owner_token = preview_owner.set(process)
+    readiness = None
     try:
         drains = [asyncio.create_task(drain(process.stdout)), asyncio.create_task(drain(process.stderr))]
         activity = current_activity.get()
         if activity:
             activity.progress(0, len(spec.routes) * 2)
         output.mkdir(parents=True, exist_ok=True)
-        async with httpx.AsyncClient(timeout=2, trust_env=False) as client:
+        readiness = await PreviewProxy(f"http://127.0.0.1:{port}", []).start()
+        async with httpx.AsyncClient(timeout=2, trust_env=False, proxy=readiness.url) as client:
             for _ in range(60):
                 if process.returncode is not None:
+                    if any(marker in "".join(tail).lower() for marker in ("address already in use", "eaddrinuse")):
+                        raise PreviewOwnershipError("Preview launch collided with another listener")
                     raise AA2Error("Preview process exited: " + "".join(tail))
                 try:
                     response = await client.get(f"http://127.0.0.1:{port}/")
                     if response.status_code < 500:
                         break
                 except httpx.HTTPError:
-                    pass
+                    if readiness.ownership_failed:
+                        raise PreviewOwnershipError(OWNERSHIP_FAILURE) from None
                 await asyncio.sleep(1)
             else:
                 raise AA2Error("Preview server readiness timeout: " + "".join(tail))
+        await readiness.close()
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch()
             try:
@@ -400,26 +433,46 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
                                 activity.output()
                                 activity.progress(len(results), len(spec.routes) * 2)
                         finally:
-                            await context.close()
+                            original = sys.exception()
+                            try:
+                                await context.close()
+                            except Exception as exc:
+                                if original is not None:
+                                    original.add_note("Browser context cleanup failed: " + type(exc).__name__)
+                                else:
+                                    errors.append("Browser context cleanup failed: " + scrub_text(str(exc)))
+                        if OWNERSHIP_FAILURE in errors:
+                            raise PreviewOwnershipError(OWNERSHIP_FAILURE)
                         if errors or not 200 <= row["status"] < 400:
                             raise PrototypeBrowserError("Implemented UI browser checks failed", results)
             finally:
-                await browser.close()
+                original = sys.exception()
+                try:
+                    await browser.close()
+                except Exception as exc:
+                    if original is None:
+                        raise
+                    original.add_note("Browser cleanup failed: " + type(exc).__name__)
         if not results:
             raise PrototypeBrowserError("Implemented UI browser checks produced no evidence", results)
         return results
-    except PrototypeBrowserError:
+    except (PrototypeBrowserError, PreviewOwnershipError):
         raise
     except Exception as exc:
         raise PrototypeBrowserError("Application browser check failed: " + scrub_text(str(exc)), results) from exc
     finally:
         original = sys.exception()
+        preview_owner.reset(owner_token)
+        cleanup_errors = []
+        if readiness is not None:
+            try:
+                await readiness.close()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
         try:
             await sandbox.stop(process)
         except BaseException as exc:
-            if original is None:
-                raise
-            original.add_note("Preview process cleanup failed: " + type(exc).__name__)
+            cleanup_errors.append(exc)
         finally:
             try:
                 for reader in drains:
@@ -427,6 +480,11 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
                 await asyncio.gather(*drains, return_exceptions=True)
             finally:
                 shutil.rmtree(scratch, ignore_errors=True)
+        if cleanup_errors:
+            if original is None:
+                raise cleanup_errors[0]
+            for error in cleanup_errors:
+                original.add_note("Preview cleanup failed: " + type(error).__name__)
 
 
 def browser_environment(cache: Path):

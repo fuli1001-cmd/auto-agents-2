@@ -135,6 +135,17 @@ class ProviderRouter:
             state["grant"] += cfg.execution.infra_retries + 1
             self.store.checkpoint(run_id, key, state)
 
+    def execution_identity(self, stage):
+        identities = []
+        for candidate in self.config.load().providers:
+            try:
+                identities.append((candidate, self.config.resolve(stage, candidate)["fingerprint"]))
+            except ConfigurationError:
+                # Resolution errors remain the router's responsibility so fallback
+                # providers can still run. No configuration contents are recorded.
+                identities.append((candidate, "unavailable"))
+        return digest(identities)
+
     async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
         cfg = self.config.load()
         candidates = [cfg.active_provider] + [n for n in cfg.providers if n != cfg.active_provider]
@@ -189,7 +200,8 @@ class ProviderRouter:
         if eff["kind"] not in self.transports:
             raise ConfigurationError(f"No installed provider transport: {eff['kind']}")
         transport = self.transports[eff["kind"]]
-        input_identity = invocation_identity(stage, context, schema, workspace, self.config.load())
+        input_identity = invocation_identity(stage, context, schema, workspace, self.config.load(),
+                                            execution=self.execution_identity(stage))
         aid = identifier("attempt")
         root = self.store.root / "attempts" / run_id / aid
         out = root / "out"
@@ -400,7 +412,13 @@ class ProviderRouter:
                     message = decoder.error or "".join(errors)[-2000:]
                     raise ProviderError(diagnostic_summary(message) + f"；未取得完整结果（退出码 {process.returncode}）",
                         retryable=any(t in message.lower() for t in ("timeout", "timed out", "429", "503", "connection", "rate limit", "capacity", "overloaded")))
-                response = (out / "result.json").read_text() if (out / "result.json").exists() else (decoder.messages[-1] if decoder.messages else "")
+                from .safe_files import read_regular
+                try:
+                    response = read_regular(out / "result.json", 32 * 1024 * 1024).decode("utf-8")
+                except FileNotFoundError:
+                    response = decoder.messages[-1] if decoder.messages else ""
+                except (OSError, ValueError) as exc:
+                    raise ProviderError("Unsafe or invalid structured response file") from exc
                 try:
                     validate(json.loads(response), strict_schema(schema))
                     result = schema.model_validate_json(response)
