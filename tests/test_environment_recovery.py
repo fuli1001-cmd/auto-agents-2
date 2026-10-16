@@ -166,7 +166,7 @@ async def test_infrastructure_failure_keeps_applied_candidate_for_retry(tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("max_rounds,expected,rounds", [(4, RecoveryNeeded, 3), (2, RecoveryNeeded, 2)])
+@pytest.mark.parametrize("max_rounds,expected,rounds", [(4, RecoveryNeeded, 2), (2, RecoveryNeeded, 2)])
 async def test_dependency_repair_preserves_round_and_stall_budgets(tmp_path, max_rounds, expected, rounds):
     agent = CodingAgent()
     workflow = engine(tmp_path, agent)
@@ -185,8 +185,14 @@ async def test_dependency_repair_preserves_round_and_stall_budgets(tmp_path, max
 
     workflow._environment = unresolved
     workflow._ask = wait
-    with pytest.raises(expected):
+    with pytest.raises(expected) as caught:
         await workflow._task(rid, proposal.tasks[0], base, proposal, {"specification": {}})
     assert workflow.store.get(rid, "rounds/T1")["round"] == rounds
     saved = workflow.store.get(rid, "develop/task/T1")
     assert not saved.get("commit") and not saved.get("checks")
+    assert workflow.convergence.state(rid, "T1")["missing"] == 2
+    before = len(agent.calls)
+    workflow.recovery.submit(rid, caught.value.failure)
+    with pytest.raises(Waiting):
+        await workflow.recovery.resume(rid)
+    assert len(agent.calls) == before  # No diagnostic/decision call after the stop.

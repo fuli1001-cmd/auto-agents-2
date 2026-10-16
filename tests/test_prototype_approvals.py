@@ -333,6 +333,6 @@ async def test_delivery_repair_supplies_approval_to_implementation_and_review(tm
     workflow, rid, _, question, contexts, _ = approval_fixture(tmp_path, monkeypatch, legacy=False)
     await workflow._ensure_prototype_approval(rid, tmp_path)
     await workflow._delivery_repair(rid, tmp_path, {"runtime_failure": "repair"}, ["calc.py", "tests"])
-    assert [stage for stage, _ in contexts] == ["review", "implement", "review"]
+    assert [stage for stage, _ in contexts] == ["recovery_diagnosis", "implement", "review"]
     assert contexts[0][1]["review_kind"] == "recovery_diagnosis"
     assert all(c["prototype_approval"]["human"]["question_id"] == question["id"] for _, c in contexts)

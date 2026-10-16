@@ -353,6 +353,48 @@ class Store:
             row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
             return json.loads(row[0]) if row else default
 
+    @staticmethod
+    def _decision_questions(db, rid, keys):
+        if not keys:
+            return []
+        slots = ",".join("?" for _ in keys)
+        return [dict(row) for row in db.execute(
+            f"SELECT id,key,artifact_hash,answer FROM questions WHERE run_id=? AND superseded=0 AND key IN ({slots}) ORDER BY id",
+            (rid, *keys))]
+
+    def decision_questions(self, rid, keys):
+        with self.connect() as db:
+            return self._decision_questions(db, rid, keys)
+
+    def apply_decision(self, rid, receipt, request, result, actor, guards, updates, questions, question_keys,
+                       *, result_key=None, answers=None, supersede_keys=None):
+        """CAS the state, human answers, grant and audit receipt in one transaction."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM checkpoints WHERE run_id=? AND key=?", (rid, receipt)).fetchone():
+                return True
+            status = db.execute("SELECT status FROM runs WHERE id=?", (rid,)).fetchone()[0]
+            if status not in {"RUNNING", "WAITING_USER"}:
+                return False
+            for key, expected in guards.items():
+                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                if (json.loads(row[0]) if row else None) != expected:
+                    return False
+            current = self._decision_questions(db, rid, question_keys)
+            if current != questions or actor != "human" and any(q["answer"] is not None for q in current):
+                return False
+            for key, value in updates.items():
+                self._put(db, rid, key, value)
+            self._put(db, rid, receipt, {"actor": actor, "request": request, "result": result,
+                "result_key": result_key, "answers": answers or {}, "applied": True})
+            if actor != "human":
+                for key in question_keys if supersede_keys is None else supersede_keys:
+                    db.execute("UPDATE questions SET superseded=1 WHERE run_id=? AND key=? AND answer IS NULL", (rid, key))
+            self._event(db, rid, "decision.applied", {"actor": actor, "kind": request["kind"],
+                "owner": request["owner"], "action": result["action"], "budget": request.get("budget", {}),
+                "reason": result["reason"]})
+            return True
+
     def invalidate(self, rid, keys: list[str]):
         with self.connect() as db:
             for key in keys:
@@ -569,7 +611,8 @@ class Store:
         with self.connect() as db:
             return {row["key"]: json.loads(row["data"]) for row in db.execute(
                 "SELECT key,data FROM checkpoints WHERE run_id=? AND "
-                "(key LIKE 'recovery/budgets/%' OR key LIKE 'rounds/%' OR key LIKE 'budget_grants/%')", (rid,))}
+                "(key LIKE 'recovery/budgets/%' OR key LIKE 'rounds/%' OR key LIKE 'budget_grants/%' "
+                "OR key LIKE 'automation/%' OR key LIKE 'decisions/applied/%' OR key LIKE 'recovery/diagnosis_grants/%')", (rid,))}
 
     def delivery_evidence(self, rid):
         result = {}
@@ -580,7 +623,7 @@ class Store:
                     result[key] = {k: value[k] for k in ("commit", "checks", "review", "source_hash") if k in value}
                 elif key in {"capture", "clarify", "provider_research", "prototype", "prototype_approval", "design", "plan", "issues",
                              "coverage_checks", "verify/identity", "verify/checks", "verify/review", "verify/visuals"} or key.startswith(
-                                 ("rounds/", "budget_grants/", "plan_revision/", "task_state/", "recovery/", "migration/")):
+                                 ("rounds/", "budget_grants/", "plan_revision/", "task_state/", "recovery/", "migration/", "automation/", "decisions/")):
                     result[key] = value
             result["approvals"] = [dict(r) for r in db.execute("SELECT key,artifact_hash,answer FROM questions WHERE run_id=? AND answer IS NOT NULL", (rid,))]
         return result

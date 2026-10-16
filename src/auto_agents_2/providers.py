@@ -14,7 +14,7 @@ from .artifacts import ArtifactStore
 from .capabilities import ReadChallengeResult, challenge_files, confirm_read
 from .config import ConfigStore
 from .diagnostics import references
-from .errors import ConfigurationError, PostCommitError, ProviderError
+from .errors import ConfigurationError, InvalidStructuredResponse, PostCommitError, ProviderError
 from .evidence import invocation_identity
 from .materials import bundle
 from .models import Usage, strict_schema
@@ -170,16 +170,21 @@ class ProviderRouter:
     async def _invoke_candidates(self, stage, context, schema, workspace, run_id, operation, fresh=False):
         cfg = self.config.load()
         candidates = [cfg.active_provider] + [n for n in cfg.providers if n != cfg.active_provider]
+        retries = cfg.execution.infra_retries
+        if stage == "decision":
+            # One request is one provider call. Format correction is owned by the
+            # decision service, not multiplied by transport retry/failover loops.
+            candidates, retries = [cfg.active_provider], 0
         errors = []
         for candidate in candidates:
-            for retry in range(cfg.execution.infra_retries + 1):
+            for retry in range(retries + 1):
                 key = f"infra/{operation}/{candidate}"
                 state = self.store.get(run_id, key, {"failures": 0, "grant": 0, "pending": False})
                 if state["pending"]:
                     state["failures"] += 1  # An interrupted request consumed its attempt.
                     state["pending"] = False
                     self.store.checkpoint(run_id, key, state)
-                if state["failures"] >= cfg.execution.infra_retries + 1 + state["grant"]:
+                if state["failures"] >= retries + 1 + state["grant"]:
                     errors.append(f"{candidate}: persisted retry budget exhausted")
                     break
                 previous = self.store.get(run_id, f"provider-result/{operation}")
@@ -214,7 +219,9 @@ class ProviderRouter:
                     state.update(pending=False, failures=state["failures"] + 1)
                     self.store.checkpoint(run_id, key, state)
                     errors.append(f"{candidate}: {exc}")
-                    if not exc.retryable or retry == cfg.execution.infra_retries:
+                    if stage == "decision" or stage == "recovery_diagnosis" and isinstance(exc, InvalidStructuredResponse):
+                        raise
+                    if not exc.retryable or retry == retries:
                         break
                     self.store.event(run_id, "agent.retrying", {"operation": operation, "provider": candidate,
                                      "retry": retry + 1, "delay": min(2 ** retry, 15)})
@@ -458,7 +465,7 @@ class ProviderRouter:
                     validate(json.loads(response), strict_schema(schema))
                     result = schema.model_validate_json(response)
                 except (ValueError, ValidationError) as exc:
-                    raise ProviderError("Invalid structured response: schema validation failed") from exc
+                    raise InvalidStructuredResponse("Invalid structured response: schema validation failed") from exc
                 artifact = ArtifactStore(self.store.root).put(result.model_dump(mode="json"), stage)
                 self.store.checkpoints(run_id, {
                     f"provider-result/{operation}": {"attempt": aid, "artifact": artifact, "usage": decoder.usage.model_dump()},

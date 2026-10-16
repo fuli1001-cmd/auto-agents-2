@@ -64,7 +64,8 @@ source .aa2/runtime.sh
   "efforts": {
     "clarify": "deep", "provider_research": "deep", "prototype": "max",
     "design": "deep", "plan": "max", "implement": "deep",
-    "review": "balanced", "verify": "balanced", "readme": "balanced"
+    "review": "balanced", "verify": "balanced", "readme": "balanced",
+    "recovery_diagnosis": "max", "decision": "deep"
   },
   "providers": {
     "codex": {
@@ -94,6 +95,8 @@ source .aa2/runtime.sh
 
 Codex 字符串 profile 使用 `$CODEX_HOME/<name>.config.toml`。其他 provider 可以使用内联 profile 或相对配置目录的 JSON 文件。level 是任意配置名称，不会被 aa2 擅自转换成某个模型。
 
+故障独立诊断使用 `efforts.recovery_diagnosis`，默认映射到 `max`；决策代理使用 `efforts.decision`，默认映射到 `deep`。具体模型和实际思考深度以对应用户 profile 为准。普通审查仍用 `review`。缺少所选 profile 时报告配置错误，不回退到普通审查深度。
+
 `environment` 中 `null` 移除继承变量，空字符串保留。`extra_args` 是 argv 数组，支持模型、effort 和兼容的模型配置覆盖；输出协议和权限参数受保护。
 
 ```bash
@@ -104,6 +107,28 @@ aa2 provider use codex --project ./demo
 显式切换和成功故障切换会保存 active provider。模型从配置获得，不自动升级。审查默认使用当前 provider 的新会话。原生 provider 的配置及认证输入在受控会话目录中使用，不改写全局模型设置。
 
 填写明确的 `model` 可启用对应模型家族的 prompt 适配；模型留空时遵从 CLI 默认，使用通用 prompt。两种 CLI 都从标准输入接收需求，避免较长文档超过进程参数长度限制。
+
+## 自动恢复与停止
+
+新项目及旧项目续跑默认启用自动决策，复用当前 provider，无需新增 API 账号。以下字段可加入 `.aa2/config.json`：
+
+```json
+{
+  "automation": {
+    "enabled": true,
+    "max_implementation_rounds": 12,
+    "max_diagnosis_rounds": 4
+  }
+}
+```
+
+每个任务按原始任务血缘累计：`execution.max_rounds` 默认 4，是触发诊断及追加授权的阈值；自动授权每次只增加 1 轮，累计最多 12 轮。诊断的原阈值 `execution.max_diagnosis_rounds` 默认 2，自动追加后累计最多 4 次。达到自动上限后等待用户，人工也只能明确批准一次操作。额度不因重启、改名、切换 provider 或修改配置而清零。
+
+控制器比较固定验收项的历史最好成绩。首次有效观察建立基线；只有固定项新增通过且已通过项没有退步，才算进展。其后连续两次未满足这个条件，就进入等待。诊断、换措辞、增加简单测试、退步后恢复都不算进展。缺少有效证据最多自动补采一次。停止后不会再自动调用实现、诊断或决策代理。人工批准一次后再次评估，不重置历史。
+
+自动处理范围包括限定修复/诊断额度、规则明确的复验、既有需求内通过审查的局部计划修订，以及引用既定配置/计划技术事实的澄清。业务取舍、原型人工审核、凭据、资源上限、发布后的例外处理仍等待用户。决策不会跳过类型检查、测试、独立审查或受保护文件规则；自动授权会单独记录为 `agent`，不伪造人工回答。无法给出有效决策时转人工，最多一次格式修正。
+
+设置 `automation.enabled=false` 可关闭新的代理决策，保留原有人审流程和进度停止规则。旧配置读取时补充缺失默认字段，保留显式设置、累计计数和有效产物。升级程序后，等待中的技术授权会在续跑时重新核对；显式暂停的任务需要用户执行 `aa2 run --project ...` 续跑。正在运行的进程不会热加载新代码，请在暂停后重新启动。
 
 ## 对话与审批
 
@@ -135,7 +160,7 @@ pytest 验证保存控制器生成的 JUnit 报告与用例清单；只跳过测
 
 首期 Node 安装器支持 npm 与 `package-lock.json`。已有 pnpm/yarn 项目会明确提示需要相应安装器，保留其包管理器。Next.js 15.5+ 的类型声明在受控准备步骤生成，业务源码和测试在正式验证期间保持只读。Python 的本地/editable 依赖使用独立环境与源码副本，通过 requirements 文件声明，不在共享环境中绑定任务工作区。
 
-默认两个并行开发任务；单任务最多四轮实现；连续无进展触发诊断。自动回退没有累计次数硬上限：有可验证改进就继续；第一次回退建立基线，其后连续两次未证实改进时停止自动执行，保留现场并等待处理。可通过 `execution.max_stalled_replans` 调整停滞阈值（默认 `2`）。
+默认两个并行开发任务；单任务四轮后需要诊断及追加授权，自动累计最多 12 轮。连续两次未证实进展直接停止并等待处理。实际计划回退另按固定验收项比较进展，其停滞阈值为 `execution.max_stalled_replans`（默认 `2`）；任务实现/复验的阈值为 `execution.max_stalled_rounds`（默认 `2`）。完整规则见上方“自动恢复与停止”。
 
 进展比较实际测试通过项、浏览器断言及控制器契约检查；模型自称改进、改名、减少检查或重复恢复到曾经通过的状态不计功。缺少可比较证据也会触发停滞。`status` 显示待回退阶段和评估结果，日志显示连续无改进次数。用户确认可再尝试一次，历史计数保留。恢复、任务改名或切换 provider 不清零历史消耗；实现轮数限制仍独立生效。累计 token 只计量，不再触发停止；旧 `execution.max_tokens` 字段可读但不生效。基础设施重试也持久计数；用户确认重试后明确授予新一组重试机会。
 

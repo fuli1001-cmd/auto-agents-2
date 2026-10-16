@@ -39,7 +39,7 @@ def assess(previous: dict, observations: dict) -> tuple[dict, dict]:
     return state, decision
 
 
-def check_criteria(commands, results, source_hash: str, environment_hash: str) -> dict[str, bool]:
+def check_criteria(commands, results, source_hash: str, environment_hash: str, *, process_exit=False) -> dict[str, bool]:
     """Use actual exits and controller-owned JUnit cases, never stdout pass counts."""
     actual = {(tuple(r.argv), r.cwd, r.command_hash): r for r in results}
     criteria = {}
@@ -50,13 +50,15 @@ def check_criteria(commands, results, source_hash: str, environment_hash: str) -
         key = digest(obligation)
         result = actual.get((tuple(command.argv), command.cwd, digest(data)))
         invalid_evidence = {"execution_inputs_changed", "source_changed", "incomplete_log_capture",
-                            "build_outputs_missing_or_invalid",
+                            "build_outputs_missing_or_invalid", "evidence_collection_failed",
                             "test_report_missing", "test_report_invalid", "test_attachments_invalid", "unsupported_test_runner"}
         valid = bool(result and result.checker_version == CHECKER_VERSION
                      and not invalid_evidence.intersection(result.failure_reasons)
                      and result.command_hash == digest(data) and not result.timed_out and result.source_hash == source_hash
                      and result.environment_hash == environment_hash)
-        criteria["command/" + key] = bool(valid and result.exit_code == 0)
+        # Progress must not reward merely reaching expected_tests by adding easy
+        # cases. Acceptance still uses the controller exit and minimum count.
+        criteria["command/" + key] = bool(valid and (result.process_exit_code if process_exit else result.exit_code) == 0)
         if result:
             for test_id in result.test_ids:
                 criteria[f"test/{key}/{test_id}"] = bool(valid and result.report_status == "valid"

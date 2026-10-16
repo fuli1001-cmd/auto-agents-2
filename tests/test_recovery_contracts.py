@@ -437,7 +437,7 @@ async def test_delivery_repeated_collection_failure_requires_diagnosis_and_keeps
     workflow.recovery.start_delivery_recheck(rid, tmp_path)
     workflow.recovery.complete_delivery_recheck(rid, feedback)
     assert await workflow.recovery.delivery_decision(rid, tmp_path, feedback, ["part.py"]) == "repair"
-    assert agent.calls == [("review", True)]
+    assert agent.calls == [("recovery_diagnosis", True)]
     assert workflow.store.get(rid, "delivery/journal") == journal
     assert workflow.store.get(rid, "rounds/delivery") is None
 

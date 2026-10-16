@@ -16,6 +16,7 @@ DEFAULT_EFFORTS = {
     "clarify": "deep", "coverage_review": "balanced", "provider_research": "deep",
     "prototype": "max", "design": "deep", "plan": "max", "implement": "deep",
     "review": "balanced", "verify": "balanced", "readme": "balanced",
+    "recovery_diagnosis": "max", "decision": "deep",
 }
 
 
@@ -60,6 +61,12 @@ class Cleanup(Record):
     min_free_bytes: int = Field(default=5 * 1024**3, ge=0)
 
 
+class Automation(Record):
+    enabled: bool = True
+    max_implementation_rounds: int = Field(default=12, ge=1)
+    max_diagnosis_rounds: int = Field(default=4, ge=1)
+
+
 class EnvironmentConfig(Record):
     conda: str = "conda"
     python_version: str = "3.11"
@@ -89,6 +96,7 @@ class Config(Record):
     providers: dict[str, ProviderConfig]
     efforts: dict[str, str] = DEFAULT_EFFORTS
     execution: Execution = Execution()
+    automation: Automation = Automation()
     cleanup: Cleanup = Cleanup()
     attachment_capture: AttachmentCapture = AttachmentCapture()
     environment: EnvironmentConfig = EnvironmentConfig()
@@ -98,6 +106,13 @@ class Config(Record):
     sandbox_binary: str = "bwrap"
     sensitive_paths: list[str] = []
     prompting: dict[str, str] = {"model_adaptation": "auto"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def merge_stage_defaults(cls, value):
+        if isinstance(value, dict) and isinstance(value.get("efforts", {}), dict):
+            value = {**value, "efforts": {**DEFAULT_EFFORTS, **value.get("efforts", {})}}
+        return value
 
     @model_validator(mode="after")
     def validate_providers(self):

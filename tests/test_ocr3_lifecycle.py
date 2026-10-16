@@ -243,6 +243,9 @@ async def test_committed_unintegrated_task_keeps_its_candidate_workspace(tmp_pat
 
 async def test_diagnosis_grant_source_drift_preserves_active_recovery(tmp_path):
     workflow = engine(tmp_path, CodingAgent())
+    config = workflow.config.load().model_dump(mode="json")
+    config["automation"]["enabled"] = False
+    write_json(workflow.config.path, config)
     (tmp_path / "part3.py").write_text("original")
     base = workflow.workspaces.checkpoint(tmp_path, "refs/aa2/base", "baseline")
     rid = workflow.store.admit("fixture", {})["id"]
@@ -253,8 +256,9 @@ async def test_diagnosis_grant_source_drift_preserves_active_recovery(tmp_path):
         "recovery/budgets/diagnosis/T3": {"round": workflow.config.load().execution.max_diagnosis_rounds}})
     async def grant(*args):
         (work / "part3.py").write_text("user edit during grant")
-    workflow.recovery._grant = grant
-    with pytest.raises(AA2Error, match="changed during diagnosis approval"):
+        return "y"
+    workflow.question_handler = grant
+    with pytest.raises(AA2Error, match="evidence source changed"):
         await workflow.recovery.resume(rid)
     assert workflow.store.get(rid, "recovery/active")
     assert workflow.store.get(rid, "recovery/active")["evidence_source_hash"] != tree_hash(work)

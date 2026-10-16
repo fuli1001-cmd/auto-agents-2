@@ -15,6 +15,7 @@ from auto_agents_2.models import Command
 from auto_agents_2.recovery import Diagnosis, RecoveryNeeded, RepairTarget, adjudicate
 from auto_agents_2.replanning import assess
 from auto_agents_2.store import Store
+from auto_agents_2.util import write_json
 from auto_agents_2.workspace import tree_hash
 
 
@@ -76,6 +77,9 @@ async def test_partial_success_closes_only_proven_cases_and_never_accepts_task(t
 
 async def test_diagnosis_budget_is_shared_across_different_failure_kinds(tmp_path):
     workflow = engine(tmp_path, CodingAgent())
+    config = workflow.config.load().model_dump(mode="json")
+    config["automation"]["enabled"] = False
+    write_json(workflow.config.path, config)
     rid = workflow.store.admit("same origin", {})["id"]
     base = workflow.workspaces.committed_baseline(rid, "main")
     workflow.workspaces.allocate(rid, "integration", base)
@@ -94,7 +98,7 @@ async def test_diagnosis_budget_is_shared_across_different_failure_kinds(tmp_pat
     workflow.recovery.submit(rid, failure(kind="environment", step="environment"))
 
     async def exhausted(question):
-        assert "诊断上限" in question["prompt"]
+        assert "诊断额度" in question["prompt"]
         raise asyncio.CancelledError()
 
     workflow.question_handler = exhausted
@@ -194,6 +198,9 @@ async def test_upstream_recovery_preserves_downstream_outstanding_repair(tmp_pat
 async def test_implementation_limit_diagnoses_current_failure_before_requesting_grant(tmp_path):
     from test_verification_recovery import blocked_workflow as report_workflow
     workflow, rid, proposal, base, work, _ = await report_workflow(tmp_path, failing=True)
+    config = workflow.config.load().model_dump(mode="json")
+    config["automation"]["enabled"] = False
+    write_json(workflow.config.path, config)
     rows = await workflow.verifier.run(proposal.tasks[0].checks, work, await workflow._environment())
     saved = {"phase": "rejected", "workspace": str(work), "checks": [r.model_dump() for r in rows]}
     workflow.store.checkpoints(rid, {"develop/task/T1": saved, "rounds/T1": {"round": 4, "stalled": 0}})

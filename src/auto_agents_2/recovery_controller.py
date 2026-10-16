@@ -6,7 +6,7 @@ from pathlib import Path
 from .builds import verification_commands
 from .collection import policy_identity
 from .design import PROTOTYPE_BROWSER_VERSION
-from .errors import AA2Error
+from .errors import AA2Error, InvalidStructuredResponse
 from .evidence import assess_observation
 from .interaction import choice_spec
 from .models import CheckResult, Command, PlanResult, ReviewResult
@@ -112,28 +112,32 @@ class RecoveryController:
             saved = {**(saved or {}), "failure": failure.model_dump(), "evidence_source_hash": evidence_source}
             self.store.checkpoint(rid, key, saved)
             if not saved or not saved.get("round"):
-                if count["round"] >= self.engine.config.load().execution.max_diagnosis_rounds:
-                    await self._grant(rid, count_key + f"/grant/{count['round']}", "交付故障已达到诊断上限。继续只增加一次独立诊断机会。")
+                if count["round"] >= self.engine.config.load().execution.max_diagnosis_rounds or saved.get("diagnosis_errors", 0) >= 2:
+                    await self._grant(rid, count_key + f"/grant/{count['round']}",
+                        "交付故障已达到诊断额度或诊断修正仍不合格。继续只增加一次独立诊断机会。\n" + self._summary(failure, saved))
                 if tree_hash(work) != evidence_source:
                     raise AA2Error("Delivery recovery evidence source changed during diagnosis approval; preserve the candidate")
                 count["round"] += 1
                 saved = {**(saved or {}), "failure": failure.model_dump(), "round": count["round"]}
                 self.store.checkpoints(rid, {key: saved, count_key: count,
                     "recovery/diagnosis/" + failure.id: {"round": count["round"]}})
-            diagnosis = await self.engine._invoke("review", {"review_kind": "recovery_diagnosis",
+            diagnosis, schema_error = await self._diagnose({"review_kind": "recovery_diagnosis",
                 **self._approval(rid, work),
                 "failure": failure.model_dump(), "project": project,
                 "diagnosis_feedback": saved.get("diagnosis_feedback"),
                 "specification": self.store.get(rid, "clarify"), "delivery_journal": self.store.get(rid, "delivery/journal"),
                 "constraint": "Delivery may only repair within supplied allowed_paths or recheck. Gate/plan changes require user reconciliation; never invalidate a published journal."},
-                Diagnosis, work, rid, f"recovery/diagnose/{failure.id}/{saved['round']}", fresh=True)
+                work, rid, f"recovery/diagnose/{failure.id}/{saved['round']}")
             if tree_hash(work) != evidence_source:
                 raise AA2Error("Delivery recovery evidence source changed during diagnosis; preserve the candidate")
             try:
+                if schema_error:
+                    raise AA2Error(schema_error)
                 decision = adjudicate(failure, diagnosis=diagnosis)
             except AA2Error as exc:
-                rejection = {"diagnosis": diagnosis.model_dump(), "validation_error": str(exc)}
-                self.store.checkpoints(rid, {key: {"failure": failure.model_dump(), "evidence_source_hash": evidence_source, "diagnosis_feedback": rejection},
+                rejection = {"diagnosis": diagnosis.model_dump() if diagnosis else None, "validation_error": str(exc)}
+                self.store.checkpoints(rid, {key: {"failure": failure.model_dump(), "evidence_source_hash": evidence_source,
+                    "diagnosis_feedback": rejection, "diagnosis_errors": saved.get("diagnosis_errors", 0) + 1},
                     f"recovery/diagnosis-rejections/{failure.id}/{saved['round']}": rejection})
                 return await self.delivery_decision(rid, work, feedback, scopes, observation=original_observation)
         if decision.action not in {"repair", "recheck"}:
@@ -251,17 +255,29 @@ class RecoveryController:
                 budget = self.store.get(rid, budget_key,
                                         self.store.get(rid, "recovery/diagnosis/" + failure.id, {"round": 0}))
                 if not active.get("diagnosis_round"):
-                    if budget["round"] >= engine.config.load().execution.max_diagnosis_rounds:
-                        await self._grant(rid, "diagnosis/" + failure.id + f"/{budget['round']}",
-                                          "同一故障已达到独立诊断上限，缺少可执行的恢复结论。继续将只增加一次诊断机会。\n最新失败："
-                                          + failure_summary(failure.evidence.get("checks", [])))
+                    cfg = engine.config.load()
+                    threshold = min(cfg.execution.max_diagnosis_rounds, cfg.automation.max_diagnosis_rounds) if cfg.automation.enabled else cfg.execution.max_diagnosis_rounds
+                    limit_key = "recovery/diagnosis_grants/" + failure.origin_id
+                    if budget["round"] >= max(threshold, self.store.get(rid, limit_key, 0)):
+                        await engine.decisions.grant(rid, kind="diagnosis_grant", owner=failure.origin_id,
+                            count=budget["round"], limit_key=limit_key, work=work,
+                            question_key="diagnosis/" + failure.id + f"/{budget['round']}",
+                            reason="已达到独立诊断额度。继续只增加一次诊断机会。\n当前阻塞：\n" + self._summary(failure, active),
+                            evidence={"failure": failure.model_dump(), "diagnosis_feedback": active.get("diagnosis_feedback"),
+                                      "progress": engine.convergence.state(rid, failure.origin_id)},
+                            force_human=active.get("diagnosis_errors", 0) >= 2)
+                    elif active.get("diagnosis_errors", 0) >= 2:
+                        await engine.decisions.human_action(rid, failure.origin_id, f"diagnosis/{budget['round'] + 1}",
+                            "诊断经一次格式修正后仍未通过校验，停止自动调用。\n" + self._summary(failure, active))
+                    else:
+                        await engine.decisions.ensure_progress(rid, failure.origin_id, f"diagnosis/{budget['round'] + 1}")
                     if tree_hash(work) != active["evidence_source_hash"]:
                         raise AA2Error("Recovery evidence source changed during diagnosis approval; preserve the candidate")
                     budget["round"] += 1
                     active["diagnosis_round"] = budget["round"]
                     self.store.checkpoints(rid, {budget_key: budget, "recovery/active": active,
                         "recovery/diagnosis/" + failure.id: {"round": budget["round"]}})
-                diagnosis = await engine._invoke("review", {
+                diagnosis, schema_error = await self._diagnose({
                     "review_kind": "recovery_diagnosis", "failure": failure.model_dump(),
                     "plan": plan_data, "project": project,
                     "specification": self.store.get(rid, "clarify"), "design": self.store.get(rid, "design"),
@@ -270,18 +286,23 @@ class RecoveryController:
                     "diagnosis_feedback": active.get("diagnosis_feedback"),
                     "current_issues": self.store.get(rid, "issues", {}),
                     "observations": self.store.get(rid, "recovery/observations/" + failure.origin_id, []),
-                }, Diagnosis, work, rid, f"recovery/diagnose/{failure.id}/{active['diagnosis_round']}", fresh=True)
+                }, work, rid, f"recovery/diagnose/{failure.id}/{active['diagnosis_round']}")
                 if tree_hash(work) != active["evidence_source_hash"]:
                     raise AA2Error("Recovery evidence source changed during diagnosis; preserve the candidate")
                 try:
+                    if schema_error:
+                        raise AA2Error(schema_error)
                     decision = adjudicate(failure, attempts=active["attempt"] - 1, diagnosis=diagnosis, plan=plan)
                 except AA2Error as exc:
-                    rejection = {"diagnosis": diagnosis.model_dump(), "validation_error": str(exc)}
+                    rejection = {"diagnosis": diagnosis.model_dump() if diagnosis else None, "validation_error": str(exc)}
                     rejected_round = active.pop("diagnosis_round")
                     active["diagnosis_feedback"] = rejection
+                    active["diagnosis_errors"] = active.get("diagnosis_errors", 0) + 1
                     self.store.checkpoints(rid, {"recovery/active": active,
                         f"recovery/diagnosis-rejections/{failure.id}/{rejected_round}": rejection})
                     return
+                active.pop("diagnosis_feedback", None)
+                active.pop("diagnosis_errors", None)
             if decision.action == "recheck":
                 identity = digest([failure.origin_id, tree_hash(work), failure.evidence.get("commands"),
                     [{k: c.get(k) for k in ("cwd", "argv", "environment_hash", "input_hash", "runtime_config_hash", "checker_version", "capture_policy_hash")}
@@ -297,26 +318,33 @@ class RecoveryController:
                     active["recheck_reservation"] = recheck_key
                     self.store.checkpoints(rid, {recheck_key: reservation, "recovery/active": active})
             active["decision"] = decision.model_dump()
+            active["actor"] = "agent" if active.get("diagnosis_round") else "rule"
             self.store.checkpoint(rid, "recovery/active", active)
-            self.store.event(rid, "recovery.decided", decision.model_dump())
+            self.store.event(rid, "recovery.decided", {**decision.model_dump(), "actor": active["actor"]})
+        if decision.action == "recheck":
+            await engine.decisions.ensure_progress(rid, failure.origin_id, f"recheck/{failure.id}/{active['attempt']}")
         if decision.action == "blocked":
             await self._grant(rid, f"recovery-blocked/{failure.id}/{active['attempt']}",
                               "恢复仍缺少证据：" + decision.reason + "。补充证据后继续将重新诊断。")
             self._finish(rid, active, {}, successor=failure.model_dump())
             return
         if decision.action == "plan_patch":
+            await engine.decisions.ensure_progress(rid, failure.origin_id, f"plan_patch/{failure.id}/{active['attempt']}")
             if not plan:
                 raise AA2Error("No accepted plan exists to amend")
             if await self._patch(rid, active, failure, plan, integration):
                 self._finish(rid, active, {"recovery/implementation_pending": True})
             return
         if decision.action in {"clarify", "provider_research", "prototype", "design"}:
+            await engine.decisions.ensure_progress(rid, failure.origin_id, f"{decision.action}/{failure.id}/{active['attempt']}")
             # Only an independently adjudicated genuine gate change reaches this path.
             self._finish(rid, active, {}, replan=(decision.action, decision.reason))
             await engine._resume_replan(rid)
             return
         if decision.action not in {"repair", "recheck"}:
             raise AA2Error("Recovery has no executable action")
+        if decision.action == "repair" and failure.origin_id not in decision.budget_owners:
+            await engine.decisions.ensure_progress(rid, failure.origin_id, f"repair/{failure.id}/{active['attempt']}")
         if active.get("evidence_source_hash") and tree_hash(work) != active["evidence_source_hash"]:
             raise AA2Error("Recovery evidence source changed before dispatch; preserve the candidate")
         affected = descendants(plan, decision.task_ids) if plan else set()
@@ -348,6 +376,8 @@ class RecoveryController:
                 feedback["checks"] = detection["evidence"]["checks"]
             updates[key] = {**saved, "phase": "rejected" if repair else "reverify", "revision": state["revision"],
                             "feedback": feedback}
+            if not repair:
+                updates[key]["observation_id"] = ["recheck", failure.id, active["attempt"], task_id]
             if detection.get("task_id") == task_id and detection.get("evidence", {}).get("checks"):
                 updates[key]["checks"] = detection["evidence"]["checks"]
             # Never replay a proposal that requested recovery, including its unapplied changes.
@@ -359,6 +389,21 @@ class RecoveryController:
         if affected:
             updates["recovery/implementation_pending"] = True
         self._finish(rid, active, updates)
+
+    async def _diagnose(self, context, work, rid, key):
+        try:
+            return await self.engine._invoke("recovery_diagnosis", context, Diagnosis, work, rid, key, fresh=True), None
+        except InvalidStructuredResponse:
+            return None, "诊断返回格式不符合 Diagnosis schema；请按请求的完整结构修正。"
+
+    @staticmethod
+    def _summary(failure, active):
+        evidence = failure.evidence
+        feedback = evidence.get("feedback", {})
+        return failure_summary(evidence.get("checks", feedback.get("checks", [])),
+            review=evidence.get("review", feedback.get("review")),
+            environment_error=evidence.get("environment_error", feedback.get("environment_error")),
+            diagnosis_feedback=active.get("diagnosis_feedback"))
 
     async def _grant(self, rid, key, reason):
         interaction = choice_spec(["授权这一次操作", "暂停，稍后续跑"], ["continue", "pause"], yes_no=True)

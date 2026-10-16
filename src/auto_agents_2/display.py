@@ -13,7 +13,8 @@ from .interaction import user_text
 
 STAGE_LABELS = {"clarify": "需求澄清", "coverage_review": "需求覆盖审查", "provider_research": "外部服务研究",
                 "prototype": "生成界面原型", "design": "架构设计", "plan": "任务规划", "implement": "开发实现",
-                "review": "独立审查", "verify": "最终验收", "readme": "更新文档"}
+                "review": "独立审查", "verify": "最终验收", "readme": "更新文档",
+                "recovery_diagnosis": "故障独立诊断", "decision": "自动决策"}
 
 
 def agent_label(data):
@@ -140,6 +141,16 @@ class ProgressDisplay:
                       "blocked": "缺少证据，等待处理"}.get(data["action"], STAGE_LABELS.get(data["action"], data["action"]))
             owners = ", ".join(data.get("budget_owners", [])) or data["budget_owner"]
             self.message(f"恢复裁决｜{action}｜影响任务：{', '.join(data['task_ids']) or '最终验收'}｜预算归属：{owners}\n{data['reason']}")
+        elif kind == "decision.applied":
+            actor = {"human": "用户", "rule": "控制器规则", "agent": "决策代理"}.get(data["actor"], data["actor"])
+            budget = data.get("budget", {})
+            detail = f"｜授权至第 {budget['grant']} 次｜自动上限 {budget['automatic_ceiling']}" if budget else ""
+            self.message(f"决策已应用｜{actor}｜{data['owner']}{detail}\n{data['reason']}")
+        elif kind == "automation.progress":
+            self.message(f"进度评估｜{data['owner']}｜连续无新增通过 {data['stalled']} 次"
+                         f"｜连续缺少有效证据 {data['missing']} 次")
+        elif kind == "decision.deferred":
+            self.message(f"转人工处理｜{data['owner']}｜{data['reason']}")
         elif kind == "plan.patch_activated":
             self.message(f"计划修订已生效｜版本 {data['revision']}｜复验任务：{', '.join(data['affected'])}")
         elif kind == "replan.assessed":

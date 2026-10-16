@@ -36,6 +36,9 @@ class CodingAgent:
 
     async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
         self.calls.append((stage, fresh))
+        if stage == "decision":
+            from auto_agents_2.decisions import DecisionResult
+            return DecisionResult(action="ask_user", reason="Fixture leaves decisions to the test's human handler")
         if context.get("review_kind") == "recovery_diagnosis":
             from auto_agents_2.recovery import Diagnosis
             assert fresh

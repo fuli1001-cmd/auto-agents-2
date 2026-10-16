@@ -195,18 +195,32 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None)
                             repair_targets=diagnosis.repair_targets if diagnosis and action == "repair" else [])
 
 
-def failure_summary(checks):
-    """A short actionable summary; raw reports remain in status/evidence."""
+def failure_summary(checks, *, review=None, environment_error=None, diagnosis_feedback=None, budget=None):
+    """Describe the current blocker, including a rejected review with green checks."""
     lines = []
+    if not checks:
+        lines.append("当前没有已执行的检查记录；不能据此判断检查通过或失败。")
     for row in checks:
-        if not row.get("exit_code") and not row.get("failure_reasons"):
-            continue
+        reasons = row.get("failure_reasons", [])
+        state = ("尚未执行（前置检查阻塞）" if "not_executed" in reasons else
+                 "证据无效或采集不完整" if COLLECTION_FAILURES.intersection(reasons) else
+                 "检查失败" if row.get("exit_code") or reasons or row.get("timed_out") else "检查通过")
         failed = [c for c in row.get("test_ids", []) if c not in row.get("passed_test_ids", [])]
         lines.append(f"{row.get('cwd', '.')}：{' '.join(row.get('argv', []))}；"
-                     f"退出码 {row.get('process_exit_code')}；通过 {row.get('tests', 0)}/{len(row.get('test_ids', []))}")
+                     f"{state}；退出码 {row.get('process_exit_code', row.get('exit_code'))}"
+                     + (f"；通过 {len(row.get('passed_test_ids', []))}/{len(row['test_ids'])}" if row.get("test_ids") else ""))
         lines.extend("  " + name for name in failed[:6])
-        if not failed:
-            lines.append("  " + ", ".join(row.get("failure_reasons", [])))
-        if row.get("report"):
+        if reasons:
+            lines.append("  " + ", ".join(reasons))
+        if row.get("report") and (failed or reasons):
             lines.append("  报告：" + row["report"]["hash"])
-    return "\n".join(lines) or "当前尚无有效失败报告，需要重新核验。"
+    if review and not review.get("approved"):
+        lines.append("独立审查未通过：" + review.get("summary", "仍有待解决的问题"))
+        lines.extend(f"  {f.get('location', '')}：{f.get('description', '')}" for f in review.get("findings", [])[:6])
+    if environment_error:
+        lines.append("环境准备失败：" + str(environment_error))
+    if diagnosis_feedback:
+        lines.append("上一次诊断结果未通过格式/范围校验：" + diagnosis_feedback.get("validation_error", "未知校验错误"))
+    if budget:
+        lines.append("额度阻塞：" + str(budget))
+    return "\n".join(lines)

@@ -50,6 +50,10 @@ class ProviderError(AA2Error):
         self.retryable = retryable
 
 
+class InvalidStructuredResponse(ProviderError):
+    code = "INVALID_STRUCTURED_RESPONSE"
+
+
 class PrototypeBrowserError(AA2Error):
     """Controller browser failure with the actual completed steps attached."""
 

@@ -1,5 +1,27 @@
 # 验证记录
 
+## 恢复决策与进度停止验收（2026-10-16）
+
+基于 `3afa351` 实现独立诊断配置、已有 provider 的有限决策、任务血缘进度停止及阻塞摘要。诊断默认 `max`，决策默认 `deep`；自动实现累计上限 12、自动诊断累计上限 4，每次追加 1。默认同时适用于新项目与旧项目续跑，不改写用户模型/native profile，不清零历史、不伪造原型人工审批。配置与关闭方法见 [README](../README.md#自动恢复与停止)，契约见 [设计规范](design.md#恢复与有界循环)。
+
+先验证受影响子系统：配置、任务执行、恢复、回退、provider、交互等组合测试通过 149 项；决策/环境恢复专项通过 45 项；最后补充用例数量不能伪造进展的边界后，决策/回退及更新的恢复夹具组合通过 42 项。新增 `tests/test_decisions.py` 共 31 项，覆盖固定义务的历史最好结果、无进展停止、缺失证据补采边界、额度上限、人工回复竞争、事务回滚、状态漂移、已落盘响应恢复、原型审批排除、事实答案批处理和暂停保留。
+
+隔离项目中使用真实 pytest/JUnit 验证了两个任务循环：六个固定用例逐轮通过，任务在第 6 轮完成；检查已通过而审查只改变措辞时，第 3 次观察后进入等待，不启动下一轮实现或诊断。模型响应由测试代理/协议夹具提供，没有收费模型调用。没有读写或重启正在运行的 demo 项目。
+
+首次全量运行发现依赖解析故障的旧断言仍期待消耗 3 轮，新规则在连续两次缺少有效证据时停止；更新断言并验证停止后没有诊断/决策调用。同时补充升级前已回答问题的兼容测试。随后全量为 943 通过、2 失败：一个旧夹具仍替换旧授权入口，另一个仍断言诊断使用 review。已改为实际人机问答入口注入源码漂移，并更新独立诊断阶段断言；两项分别复测通过，原有现场保留及人工审批断言保留。
+
+最终全量 **946 项通过，0 失败、0 错误、0 跳过**，JUnit 记录耗时 **628.249 秒**。[完整 JUnit](evidence/decision-recovery-suite.xml) 与 [最终源码摘要](evidence/decision-recovery-source-manifest.json) 独立归档，完整套件对应最终生产源码及测试，没有以分批计数替代全量通过。
+
+Ruff、`git diff --check`、项目 Conda 环境 `pip check`、CLI 启动和 wheel 构建通过；wheel 中全部 61 个 Python 源文件与当前源码逐字节一致。数据库仍为 v6，检查器仍为 v10；普通阶段保持旧提示/调用身份兼容，新角色有独立阶段身份。OCR 历史报告及 R1–R5 验证证据保持原样，本轮没有新增 OCR 扫描。
+
+```bash
+.conda-env/bin/python -m pytest -q --junitxml=/tmp/aa2-decision-recovery-acceptance.xml
+.conda-env/bin/python -m ruff check src tests
+git diff --check
+.conda-env/bin/python -m pip check
+.conda-env/bin/python -m hatchling build -t wheel -d /tmp/aa2-decision-recovery-wheel
+```
+
 ## 第五轮 OCR 修复验收（2026-10-16）
 
 基于 `072de83` 核对 37 条评论，实施 35 项对应修复；原生 Windows 范围项和历史 XML 重名项保留反证说明。逐条结论、明确复现的 R4 回归、扫描范围变化及循环修复效果分析见 [第五轮核对与实施](quality-first-implementation.md#第五轮-ocr-核对与实施2026-10-16)。秘密文件保护继续只依据路径，日志独立脱敏。
