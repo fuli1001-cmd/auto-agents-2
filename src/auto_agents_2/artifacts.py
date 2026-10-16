@@ -50,12 +50,17 @@ class ArtifactStore:
         with source.open("rb") as stream:
             return self.put_stream(stream, kind)
 
-    def put_stream(self, incoming, kind="binary") -> dict:
+    def put_stream(self, incoming, kind="binary", *, max_bytes=None) -> dict:
         """Archive the already opened source without reopening an untrusted path."""
         from .workspace import file_digest
         self.root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryFile(dir=self.root) as captured:
-            shutil.copyfileobj(incoming, captured, 1024 * 1024)
+            size = 0
+            while chunk := incoming.read(min(1024 * 1024, max_bytes - size + 1) if max_bytes is not None else 1024 * 1024):
+                size += len(chunk)
+                if max_bytes is not None and size > max_bytes:
+                    raise ValueError("Artifact exceeds capture budget")
+                captured.write(chunk)
             captured.seek(0)
             import hashlib
             sha = hashlib.file_digest(captured, "sha256").hexdigest()

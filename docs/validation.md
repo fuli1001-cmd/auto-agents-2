@@ -1,5 +1,30 @@
 # 验证记录
 
+## 第五轮 OCR 修复验收（2026-10-16）
+
+基于 `072de83` 核对 37 条评论，实施 35 项对应修复；原生 Windows 范围项和历史 XML 重名项保留反证说明。逐条结论、明确复现的 R4 回归、扫描范围变化及循环修复效果分析见 [第五轮核对与实施](quality-first-implementation.md#第五轮-ocr-核对与实施2026-10-16)。秘密文件保护继续只依据路径，日志独立脱敏。
+
+最终源码完整回归 **915 项通过，0 失败、0 错误、0 跳过**，JUnit 耗时 **742.555 秒**。相较基线新增 **80 项**永久行为与故障注入用例，集中于四个 `test_ocr5_*` 模块。[完整 JUnit](evidence/ocr5-fixes-suite.xml) 独立归档；先验证受影响子系统，再对最终全部源码和测试执行完整套件。
+
+新测试覆盖正常执行、取消、清理失败、提交后失败及重启，使用真实 Git、受管子进程、bubblewrap、Chromium、本地 TCP 和 SQLite。8 GiB 附件用稀疏文件测试读取前拒绝，没有实际复制 8 GiB；另外验证读取期间变长、总量/数量限制、元数据保护、辅助进程超时及事件循环可响应。UTF-16/32 BOM、FIFO/链接拒绝、原始 deflate 头冲突、目录链接镜像、畸形和旧版进程记录、字面 SQL/Git 前缀都有针对性检查。
+
+恢复证据包含集成工作区快照提交后的中断、verification_only 修订/恢复时重新核验覆盖、模型结果落盘后的 OSError/ValueError 不重复调用，以及附件超限进入 WAITING_USER、同配置不重复执行、调高限制后成功并释放旧现场。测试中的 provider 是实际协议子进程夹具，不是收费模型调用。用途明确的普通附件在没有消费者后释放，打开的问题、核心证据、未知用途旧附件和混合用途对象继续保留。
+
+真实远端 Conda/npm 安装后的 Python、React/Vite、Next.js 三种交付全部通过。两个前端均在工作区被 GC 回收后，从主目录启动生产预览，通过桌面/移动端点击和文本断言；移走 dist/.next 的反向检查均拒绝通过。[交付记录与截图索引](evidence/ocr5-delivery.json) 独立归档。Next.js 首次运行曾被其新增 route-cache 的写入误判为产物变化；[前后摘要](evidence/ocr5-next-runtime-cache.json) 保留了失败依据，识别明确的运行缓存后重跑三种交付通过，没有忽略服务代码变化。临时项目和旧失败报告仍保留，脚本只清理自建运行依赖。
+
+最初全量为 850 通过、6 失败：旧锁重放测试断言了旧文件路径；归档移入辅助进程后，本地大小错误文案和链接附件分类需保留；deflate 错误需区分超限与截断。修正后又一轮检出了截断文案的两处断言差异，随后完善了明确的错误分类。最终全量覆盖之后补充的资源归属和构建缓存用例，不以分批计数代替完整通过。旧 R1–R4 XML 未改写；历史 repeat-6 XML 仍有 67 行、66 个原始名字，当前解析器验证为 67 个不同 ID。
+
+Ruff、`git diff --check`、项目 Conda 环境的 `pip check` 和 wheel 构建通过；wheel 中全部 **59 个 Python 源文件**与最终源码逐字节一致。本轮未进行新的 OCR 扫描或收费模型调用，未声称扫描已零问题。用户模型、推理配置和权限不变；数据库仍为 v6，检查器为 v10，提示版本为 `2026-10-16.2`。
+
+```bash
+.conda-env/bin/python -m pytest -q --junitxml=/tmp/ocr5-delivery-acceptance.xml
+.conda-env/bin/python -m ruff check src tests
+git diff --check
+.conda-env/bin/python -m pip check
+.conda-env/bin/python -m hatchling build -t wheel -d /tmp/ocr5-wheel-output
+.conda-env/bin/python tests/manual_delivery.py
+```
+
 ## 第四轮 OCR 修复验收（2026-10-16）
 
 基于 `86a3b6f` 实施，核对 R4 全部 43 条评论：38 条成立、2 条部分成立、1 条误报、2 条不纳入。处理 40 条对应项，其中 25、26 按用户要求替换为秘密路径保护。四轮扫描范围、逐条关系、反证和五处有旧／新执行依据的回归见 [四轮 OCR 对照](quality-first-implementation.md#第四轮-ocr-核对与四轮对照2026-10-16)。

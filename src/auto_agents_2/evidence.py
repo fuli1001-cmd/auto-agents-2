@@ -11,7 +11,7 @@ from .errors import AA2Error
 from .util import contained, digest
 from .workspace import input_entry, tree_hash
 
-CHECKER_VERSION = "verification-v9"
+CHECKER_VERSION = "verification-v10"
 NODE_RUNTIME_CACHES = {".cache", ".vite", ".vite-temp", ".tmp"}
 RUNTIME_CACHES = {"__pycache__", ".pytest_cache", *NODE_RUNTIME_CACHES}
 
@@ -66,7 +66,7 @@ class EvidenceAssessment:
 def assess_observation(command, result, workspace, environment, artifacts):
     """A trustworthy failing observation may close individual passing obligations."""
     invalid = {"execution_inputs_changed", "source_changed", "incomplete_log_capture",
-               "test_report_missing", "test_report_invalid", "test_attachments_invalid", "unsupported_test_runner"}
+               "test_report_missing", "test_report_invalid", "test_attachments_invalid", "evidence_collection_failed", "unsupported_test_runner"}
     try:
         return _assess_observation(command, result, workspace, environment, artifacts, invalid)
     except (OSError, ValueError, KeyError, TypeError, ET.ParseError, AA2Error):
@@ -84,6 +84,10 @@ def _assess_observation(command, result, workspace, environment, artifacts, inva
             or result.process_exit_code is None or result.timed_out
             or invalid.intersection(result.failure_reasons)):
         return EvidenceAssessment(False, False, "execution identity or complete evidence unavailable")
+    from .collection import policy_identity
+    if ((result.capture_policy_hash or result.test_runner == "playwright")
+            and result.capture_policy_hash != policy_identity(artifacts.store.root)):
+        return EvidenceAssessment(False, False, "attachment capture policy changed")
     report_failed = False
     for ref in result.logs:
         if not ref.get("capture_complete", True):
@@ -100,7 +104,8 @@ def _assess_observation(command, result, workspace, environment, artifacts, inva
                 or cases.passed_count != result.tests or cases.skipped != result.skipped):
             return EvidenceAssessment(False, False, "machine report differs from observation")
     for attachment in result.attachments:
-        artifacts.bytes(attachment["artifact"])
+        if not artifacts.released(attachment["artifact"]):
+            artifacts.bytes(attachment["artifact"])
     success = (not report_failed and not result.exit_code and not result.process_exit_code and not result.failure_reasons
                and result.tests >= max(command.expected_tests, int(bool(result.test_runner))))
     if success and result.generated_outputs != output_hashes(command, workspace):

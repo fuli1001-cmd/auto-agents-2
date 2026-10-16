@@ -104,14 +104,18 @@ async def finish_supervisor(process, record):
 async def spawn_managed(command, cwd, env, state_root, paths):
     record = state_root / "processes" / (identifier("process") + ".json")
     write_json(record, {"version": 3, "status": "starting", "paths": [str(p) for p in paths], "cwd": str(cwd)})
-    parent, child = socket.socketpair()
-    process = None
-    managed = None
-    creation = asyncio.create_task(asyncio.create_subprocess_exec(
-        sys.executable, "-I", str(Path(__file__).with_name("process_supervisor.py")), str(child.fileno()), str(record), *command,
-        cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE, start_new_session=True, pass_fds=(child.fileno(),), limit=8 * 1024 * 1024))
+    parent = child = process = managed = creation = None
     try:
+        parent, child = socket.socketpair()
+        coroutine = asyncio.create_subprocess_exec(
+            sys.executable, "-I", str(Path(__file__).with_name("process_supervisor.py")), str(child.fileno()), str(record), *command,
+            cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, start_new_session=True, pass_fds=(child.fileno(),), limit=8 * 1024 * 1024)
+        try:
+            creation = asyncio.create_task(coroutine)
+        except BaseException:
+            coroutine.close()
+            raise
         process = await asyncio.shield(creation)
         child.close()
         reader, writer = await asyncio.open_connection(sock=parent)
@@ -119,12 +123,15 @@ async def spawn_managed(command, cwd, env, state_root, paths):
         await asyncio.shield(managed.started)
         return managed
     except BaseException as original:
+        if creation is None:
+            record.unlink(missing_ok=True)  # No subprocess creation was attempted.
+            raise
         async def cleanup():
             nonlocal process
             try:
                 process = process or await creation
             except BaseException:
-                record.unlink(missing_ok=True)  # No subprocess was created.
+                record.unlink(missing_ok=True)
                 return
             finally:
                 child.close()
@@ -146,6 +153,7 @@ async def spawn_managed(command, cwd, env, state_root, paths):
             original.add_note("Startup cleanup failed; retain process records: " + type(exc).__name__)
         raise
     finally:
-        child.close()
-        if process is None:
+        if child is not None:
+            child.close()
+        if parent is not None and (process is None or managed is None):
             parent.close()

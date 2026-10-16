@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from .diagnostics import LOG_KINDS
+from .diagnostics import LOG_KINDS, references
 from .util import digest, file_lock, now
 
 
@@ -28,7 +28,7 @@ def collect_artifacts(store):
             live = {row[0] for row in db.execute("SELECT hash FROM diagnostic_holds")}
             visited, known_logs = set(), {sha for sha, labels in kinds.items() if labels & LOG_KINDS}
 
-            def mark(value, keep_logs):
+            def mark(value, keep_logs, keep_attachments=False):
                 if isinstance(value, dict):
                     sha = value.get("hash")
                     if isinstance(sha, str) and len(sha) == 64 and all(c in "0123456789abcdef" for c in sha):
@@ -39,35 +39,39 @@ def collect_artifacts(store):
                             if kind in LOG_KINDS:
                                 db.execute("INSERT OR IGNORE INTO artifact_kinds VALUES(?,?)", (sha, kind))
                                 kinds.setdefault(sha, set()).add(kind)
-                            if keep_logs:
-                                mark_object(sha, True)
+                            if keep_logs and (keep_attachments or kind != "test_diagnostic"
+                                    and not (kind is None and kinds.get(sha) == {"test_diagnostic"})):
+                                mark_object(sha, True, keep_attachments)
                         else:
-                            mark_object(sha, keep_logs)
+                            mark_object(sha, keep_logs, keep_attachments)
                     for child in value.values():
-                        mark(child, keep_logs)
+                        mark(child, keep_logs, keep_attachments)
                 elif isinstance(value, list):
                     for child in value:
-                        mark(child, keep_logs)
+                        mark(child, keep_logs, keep_attachments)
 
-            def mark_object(sha, keep_logs):
+            def mark_object(sha, keep_logs, keep_attachments=False):
                 live.add(sha)
-                if (sha, keep_logs) in visited:
+                if (sha, keep_logs, keep_attachments) in visited:
                     return
-                visited.add((sha, keep_logs))
+                visited.add((sha, keep_logs, keep_attachments))
                 path = root / sha[:2] / sha
                 try:
                     with path.open("rb") as stream:
                         prefix = stream.read(4096)
                         data = prefix + stream.read() if prefix.lstrip().startswith((b"{", b"[")) else None
                     if data is not None and digest(data) == sha:
-                        mark(json.loads(data), keep_logs)
-                        if not keep_logs:
-                            return
+                        document = json.loads(data)
+                        mark(document, keep_logs, keep_attachments)
+                        represented = {ref["hash"] for ref in references(document)}
+                        for child in set(edges.get(sha, [])) - represented:
+                            mark_object(child, True, True)
+                        return
                 except (OSError, ValueError, UnicodeError):
                     pass
                 # Opaque/legacy dependency edges cannot prove a diagnostic is optional.
                 for child in edges.get(sha, []):
-                    mark_object(child, True)
+                    mark_object(child, True, True)
 
             # A hold protects its complete dependency closure, regardless of the
             # root's diagnostic/non-diagnostic role or owner run status.
@@ -89,7 +93,7 @@ def collect_artifacts(store):
                 elif root.is_relative_to(path):
                     held.update(owners)
             for sha in held:
-                mark_object(sha, True)
+                mark_object(sha, True, True)
             for row in rows:
                 try:
                     value = json.loads(row["data"])
@@ -100,9 +104,10 @@ def collect_artifacts(store):
                 active = row["status"] not in {"SUCCEEDED", "CANCELLED"}
                 if row["key"] == "issues":
                     for issue in value.values():
-                        mark(issue, issue.get("status") in {"open", "stale"})
+                        mark(issue, issue.get("status") in {"open", "stale"}, True)
                 else:
-                    mark(value, active or row["key"].startswith("recovery/required/"))
+                    mark(value, active or row["key"].startswith("recovery/required/"),
+                         row["key"].startswith(("recovery/required/", "candidate/", "recovery/active")))
             candidates = []
             for sha, runs in owners.items():
                 if sha in live or len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):

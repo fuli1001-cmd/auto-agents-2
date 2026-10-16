@@ -13,7 +13,7 @@ from .artifacts import ArtifactStore
 from .errors import AA2Error, PolicyViolation
 from .http_body import ACQUISITION_TIMEOUT, read_body
 from .models import IntakeResult
-from .util import contained, digest, now
+from .util import contained
 
 MAX_REQUIREMENTS_BYTES = 4 * 1024 * 1024
 BLOCK_TAGS = {"p", "div", "br", "li", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "tr", "table",
@@ -100,23 +100,17 @@ async def capture(source: str, artifacts: ArtifactStore) -> dict:
                 response.raise_for_status()
                 raw = await read_body(response)
                 kind = response.headers.get("content-type", "")
-        text, _ = extract_document(raw, kind)
+        import base64
+        request = {"action": "requirements", "source": source, "raw": base64.b64encode(raw).decode(), "mime": kind}
+        paths = []
     else:
-        file = Path(source).expanduser().resolve()
+        file = Path(source).expanduser().absolute()
         if file.suffix.lower() not in {".md", ".txt", ".markdown"}:
             raise AA2Error("首期需求文件支持 Markdown、TXT 和文本网页")
-        if file.stat().st_size > MAX_REQUIREMENTS_BYTES:
-            raise AA2Error("Requirements document exceeds 4 MiB")
-        with file.open("rb") as stream:
-            raw = stream.read(MAX_REQUIREMENTS_BYTES + 1)
-        if len(raw) > MAX_REQUIREMENTS_BYTES:
-            raise AA2Error("Requirements document exceeds 4 MiB")
-        text = raw.decode("utf-8-sig")
-        source = str(file)
-    if not text.strip():
-        raise AA2Error("需求文档为空")
-    return {"source": source, "captured_at": now(), "hash": digest(text),
-            "artifact": artifacts.put(text, "raw_requirements")}
+        request = {"action": "local_requirements", "source": str(file)}
+        paths = [file]
+    from .collection import run_collection
+    return await run_collection(artifacts.store.root, request, timeout=ACQUISITION_TIMEOUT, paths=paths)
 
 
 def validate_coverage(result: IntakeResult, workspace: Path) -> tuple[bool, list[str]]:

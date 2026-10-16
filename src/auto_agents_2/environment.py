@@ -221,6 +221,9 @@ class EnvironmentManager:
     async def _prepare(self, prefix, ready, fingerprint, profile, conda_file, pip_file, workspace, dependencies, local, inputs=None):
         with DiagnosticOperation(self.store, self.resources, "prepare/" + str(prefix)):
             cfg = self.config.load().environment
+            from .resolution import load_resolution, save_resolution
+            records = self.root / "environment-records" / fingerprint
+            resolution_record = load_resolution(records) if not local else None
             if prefix.exists():
                 shutil.rmtree(prefix)
             prefix.mkdir(parents=True)
@@ -237,9 +240,13 @@ class EnvironmentManager:
                 env = environment.variables(scratch)
                 env.pop("CONDA_PREFIX", None)
                 env.update(CONDA_PKGS_DIRS=str(cache), PIP_CACHE_DIR=str(scratch / "pip"), CONDA_ALWAYS_COPY="true")
-                replay_lock = (records / "conda.lock").is_file() and not local
+                replay_lock = resolution_record is not None
+                saved_pip, saved_conda = scratch / "saved-pip.lock", scratch / "saved-conda.lock"
                 if replay_lock:
-                    argv = [conda, "create", "-y", "--copy", "-p", str(prefix), "--file", str(records / "conda.lock")]
+                    atomic_write(saved_pip, resolution_record["pip"])
+                    atomic_write(saved_conda, resolution_record["conda"])
+                if replay_lock:
+                    argv = [conda, "create", "-y", "--copy", "-p", str(prefix), "--file", str(saved_conda)]
                 elif conda_file:
                     argv = [conda, "env", "create", "-p", str(prefix), "-f", str(conda_file)]
                 else:
@@ -262,10 +269,9 @@ class EnvironmentManager:
                     pip_file = scratch / "dependencies.txt"
                     atomic_write(pip_file, "\n".join(dependencies) + "\n")
                 if pip_file:
-                    saved_pip = records / "pip.lock"
                     if replay_lock and not saved_pip.is_file():
                         raise AA2Error("Recorded pip resolution is missing; preserving the previous environment identity")
-                    constraints = ["-c", str(saved_pip)] if saved_pip.is_file() and not local else []
+                    constraints = ["-c", str(saved_pip)] if replay_lock else []
                     await self._command([str(prefix / "bin/python"), "-m", "pip", "install", "-r", str(pip_file), *constraints],
                                         install_workspace, env, [prefix, scratch], [prefix, pip_file.parent, *reads])
                 await self._command([str(prefix / "bin/python"), "-m", "pip", "check"],
@@ -277,18 +283,17 @@ class EnvironmentManager:
                 frozen = await self._command([str(prefix / "bin/python"), "-m", "pip", "freeze"], workspace, env, [scratch], [prefix], timeout=30, machine=True)
                 explicit = await self._command([conda, "list", "--explicit", "-p", str(prefix)], workspace, env,
                                                [scratch], [prefix, *reads], timeout=30, machine=True)
-                if not local and (records / "pip.lock").is_file():
+                if replay_lock:
                     def resolution(text):
                         return sorted(line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#"))
-                    if resolution(frozen) != resolution((records / "pip.lock").read_text()):
+                    if resolution(frozen) != resolution(resolution_record["pip"]):
                         raise AA2Error("Reconstructed pip resolution differs from the saved lock; previous records retained")
+                if replay_lock and resolution(explicit) != resolution(resolution_record["conda"]):
+                    raise AA2Error("Reconstructed Conda resolution differs from the saved generation")
                 atomic_write(prefix / "aa2-pip.lock", frozen)
                 atomic_write(prefix / "aa2-conda.lock", explicit)
-                if not local:
-                    if not (records / "pip.lock").exists():
-                        atomic_write(records / "pip.lock", frozen)
-                    if not (records / "conda.lock").exists():
-                        atomic_write(records / "conda.lock", explicit)
+                if not local and not replay_lock:
+                    save_resolution(records, frozen, explicit)
                 write_json(ready, {"fingerprint": fingerprint, "private": local,
                                    "pip_hash": digest(frozen), "conda_hash": digest(explicit),
                                    "integrity": self.integrity(prefix)})
@@ -307,6 +312,7 @@ class EnvironmentManager:
             if not Path(npm).exists():
                 raise AA2Error("Node runtime is missing from the selected project environment")
             dependency_inputs = node_dependency_inputs(workspace)
+            from .node_inputs import lock_inputs
             lock = workspace / "package-lock.json"
             with self.resources.temporary("node") as scratch:
                 variables = environment.variables(scratch)
@@ -319,7 +325,10 @@ class EnvironmentManager:
                     copy_execution_source(workspace, staging)
                     await self._command([npm, "install", "--package-lock-only", "--ignore-scripts"], staging,
                                         variables, [scratch, package_cache], [environment.prefix], timeout=900)
+                    lock_inputs(workspace, staging / "package-lock.json")
                     atomic_write(lock, (staging / "package-lock.json").read_bytes(), 0o644)
+                dependency_inputs += lock_inputs(workspace, lock)
+                locked_inputs = digest([dependency_inputs, lock.read_bytes().hex()])
                 modules = workspace / "node_modules"
                 marker = self.root / "node-records" / (digest(str(workspace)) + ".json")
                 identity = digest(["node-install-v3", environment.fingerprint, dependency_inputs,
@@ -337,6 +346,8 @@ class EnvironmentManager:
                         await self.prepare_generated_types(workspace, environment)
                     return
                 await self._command([npm, "ci"], workspace, variables, [modules, scratch, package_cache], [environment.prefix], timeout=900)
+                if digest([node_dependency_inputs(workspace) + lock_inputs(workspace, lock), lock.read_bytes().hex()]) != locked_inputs:
+                    raise AA2Error("Npm installation inputs changed; installed files retained for reconciliation")
                 await self.prepare_node_browsers(workspace, environment)
                 write_json(marker, {"fingerprint": identity, "integrity": digest(input_entry(modules, modules, excluded=RUNTIME_CACHES))})
                 if not frozen:

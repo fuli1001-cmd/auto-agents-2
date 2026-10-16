@@ -5,17 +5,20 @@ the copy. Approvals, budgets, source, refs, proposals and check outcomes are pre
 Use the normal aa2 CLI on the printed project to perform the real recovery run.
 """
 import argparse
+import fcntl
 import fnmatch
 import hashlib
 import json
 import os
 import sqlite3
+import stat
 import subprocess
 import tempfile
-from contextlib import ExitStack, closing
+from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 
-from auto_agents_2.util import digest, file_lock
+from auto_agents_2.safe_files import directory_fd, regular_exists
+from auto_agents_2.util import digest
 from auto_agents_2.workspace import git, input_entry, isolated_git, tree_hash
 
 # These are mutable controller addresses, never proposal text or signed evidence.
@@ -23,6 +26,8 @@ CHECKPOINT_PATHS = {
     "invocation/*": ["cleanup_record"],
     "develop/task/*": ["workspace", "previous_evidence.workspace"],
     "recovery/task-baselines/*": ["workspace", "repair_workspace", "previous_task.workspace"],
+    "recovery/patch-snapshots/*": ["*.workspace"],
+    "evidence/capture/*": ["scratch"],
     "plan_revision/journal/*": ["snapshots.*.workspace"],
     "delivery/journal": ["work", "environment.prefix"],
     "delivery/environment-recovery": ["work", "environment.prefix"],
@@ -96,13 +101,60 @@ def safe_write(path, root, text):
         output.write(text)
 
 
+@contextmanager
+def snapshot_lock(parent, name):
+    fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("Snapshot lock must be a local regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(fd)
+
+
+def copy_manifest(root, inputs):
+    """All copied bytes, modes and raw link targets; never follow a copied link."""
+    result = {}
+    def visit(path):
+        info = path.lstat()
+        name = path.relative_to(root).as_posix()
+        mode = stat.S_IMODE(info.st_mode)
+        if stat.S_ISLNK(info.st_mode):
+            result[name] = ["link", mode, os.readlink(path)]
+        elif stat.S_ISDIR(info.st_mode):
+            result[name] = ["directory", mode]
+            with os.scandir(path) as children:
+                for child in children:
+                    visit(Path(child.path))
+        elif stat.S_ISREG(info.st_mode):
+            with path.open("rb") as stream:
+                result[name] = ["file", mode, hashlib.file_digest(stream, "sha256").hexdigest()]
+        else:
+            raise ValueError("Snapshot contains an unsupported file type")
+    for relative in inputs:
+        path = root / relative
+        if path.exists() or path.is_symlink():
+            visit(path)
+        else:
+            result[relative] = ["missing"]
+    return result
+
+
 def snapshot(source, destination):
-    # Use the same lock order as the controller. The baseline precedes every copy;
-    # external writers are still detected by the closing consistency checks.
-    with ExitStack() as locks, isolated_git():
-        for name in ("controller.lock", "gc.lock", "artifact-gc.lock"):
-            locks.enter_context(file_lock(source.resolve() / ".aa2" / name, blocking=False))
-        return _snapshot(source, destination)
+    source = source.absolute()
+    if source != source.resolve():
+        raise ValueError("Snapshot source must not traverse symlinks")
+    # Validate everything before creating even a lock file in the source.
+    with isolated_git(), directory_fd(source / ".aa2") as parent:
+        names = ("controller.lock", "gc.lock", "artifact-gc.lock")
+        for name in names:
+            regular_exists(parent, name)
+        validate_copy(source)
+        with ExitStack() as locks:
+            for name in names:
+                locks.enter_context(snapshot_lock(parent, name))
+            return _snapshot(source, destination)
 
 
 def _snapshot(source, destination):
@@ -147,6 +199,19 @@ def _snapshot(source, destination):
         mutable = [source / ".aa2" / name for name in ("recovery", "environment-records", "node-records", "config.json")]
         mutable.extend(path for path in held if path.exists())
         mutable = list(dict.fromkeys(mutable))
+        copy_roots = [p.name for p in source.iterdir() if p.name != ".aa2"]
+        copy_roots += [".aa2/" + name for name in ("artifacts", "worktrees", "cache", "environment-records",
+                      "node-records", "visuals", "recovery", "config.json")]
+        for path in held:
+            if path.absolute() != path.resolve() or not path.is_relative_to(source / ".aa2"):
+                raise ValueError("Unsupported held recovery path")
+            copy_roots.append(path.relative_to(source).as_posix())
+        copy_roots = sorted(set(copy_roots))
+        before_copy = copy_manifest(source, copy_roots)
+        rewrites = {}
+        def rewrite(path, root, text):
+            safe_write(path, root, text)
+            rewrites.update(copy_manifest(destination, [path.relative_to(destination).as_posix()]))
         mutable_before = {path: digest(input_entry(path, source, excluded=set())) for path in mutable}
         for record in (source / ".aa2/processes").glob("*.json"):
             if json.loads(record.read_text()).get("status") != "cleaned":
@@ -226,6 +291,8 @@ def _snapshot(source, destination):
                 copied = destination / path.relative_to(source)
                 if digest(input_entry(copied, destination, excluded=set())) != expected:
                     raise RuntimeError("Mutable recovery files changed while copying; snapshot is not certified")
+            if copy_manifest(destination, copy_roots) != before_copy:
+                raise RuntimeError("Copied inputs differ from source manifest; snapshot is not certified")
             for table in ("resources", "delivery_pins", "resource_holds"):
                 if table not in tables:
                     continue
@@ -248,17 +315,17 @@ def _snapshot(source, destination):
         for path in (state / "recovery").glob("build_*/journal.json"):
             value = json.loads(path.read_text())
             field(value, "workspace")
-            safe_write(path, destination, json.dumps(value, ensure_ascii=True))
+            rewrite(path, destination, json.dumps(value, ensure_ascii=True))
         for path in (state / "environment-records").glob("*/instance.json"):
             value = json.loads(path.read_text())
             field(value, "prefix")
-            safe_write(path, destination, json.dumps(value, ensure_ascii=False))
+            rewrite(path, destination, json.dumps(value, ensure_ascii=False))
         configuration = state / "config.json"
         settings = json.loads(configuration.read_text())
         for pattern in ("providers.*.binary", "providers.*.environment.CODEX_HOME", "providers.*.environment.GEMINI_CLI_HOME",
                         "providers.*.profile_map.*.file", "environment.conda"):
             field(settings, pattern, external=True)
-        safe_write(configuration, destination, json.dumps(settings, ensure_ascii=False))
+        rewrite(configuration, destination, json.dumps(settings, ensure_ascii=False))
         pointers = list((destination / ".git/worktrees").glob("*/gitdir"))
         pointers += list((state / "worktrees").glob("*/*/.git"))
         pointers += list((destination / ".git/worktrees").glob("*/commondir"))
@@ -269,7 +336,7 @@ def _snapshot(source, destination):
             relocated = relocate(target, relative_base=source / path.parent.relative_to(destination))
             if not (path.parent / relocated).resolve().is_relative_to(destination):
                 raise ValueError("Git pointer references an external repository")
-            safe_write(path, destination, prefix + relocated + "\n")
+            rewrite(path, destination, prefix + relocated + "\n")
         for path in (state / "worktrees").glob("*/*"):
             if not (path / ".git").is_file():
                 continue
@@ -280,12 +347,18 @@ def _snapshot(source, destination):
             raise RuntimeError("Source changed during snapshot; copied project is not certified for recovery")
         if any(digest(input_entry(path, source, excluded=set())) != expected for path, expected in mutable_before.items()):
             raise RuntimeError("Mutable recovery files changed during snapshot; copy is not certified")
+        if copy_manifest(source, copy_roots) != before_copy:
+            raise RuntimeError("Snapshot inputs changed during copy; snapshot is not certified")
+        expected = {**before_copy, **rewrites}
+        if copy_manifest(destination, copy_roots) != expected:
+            raise RuntimeError("Copied inputs changed outside authorized locator rewrites")
         validate_copy(destination)
         if tree_hash(source) != source_hash or tree_hash(destination) != source_hash:
             raise RuntimeError("Project source changed during snapshot; retain the copy for investigation")
         result = {"source": str(source), "project": str(destination), "run_id": rid,
                   "original_database": str(original), "database_hash": hashlib.sha256(raw).hexdigest(),
-                  "source_hash": source_hash, "live_writes": 0}
+                  "source_hash": source_hash, "live_writes": 0, "copy_manifest_hash": digest(before_copy),
+                  "copy_manifest": before_copy, "locator_rewrites": sorted(rewrites)}
         handles[1][1].write(json.dumps(result, indent=2).encode())
         handles[1][1].flush()
         os.fsync(handles[1][1].fileno())

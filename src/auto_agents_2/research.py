@@ -11,8 +11,7 @@ from .errors import AA2Error
 from .http_body import ACQUISITION_TIMEOUT, read_body
 from .models import SourceEvidence
 from .network import PublicHTTPTransport, public_address
-from .requirements import extract_document
-from .util import SECRET, now
+from .util import SECRET
 
 
 def public_url(value: str):
@@ -55,13 +54,11 @@ class ResearchService:
                     break
             else:
                 raise AA2Error("Research redirect limit exceeded")
-        raw = self.artifacts.put(bytes(data), "research_response")
-        text, encoding = extract_document(bytes(data), mime)
-        extracted = self.artifacts.put(text, "research_extracted")
-        metadata = {"source": url, "final_url": final, "mime_type": mime, "encoding": encoding,
-                    "captured_at": now(), "extractor_version": "structured-text-v3",
-                    "raw": raw, "artifact": extracted, "hash": extracted["hash"]}
-        return {**metadata, "manifest": self.artifacts.put(metadata, "research_manifest")}
+        import base64
+
+        from .collection import run_collection
+        return await run_collection(self.artifacts.store.root, {"action": "research", "source": url,
+            "final_url": final, "mime": mime, "raw": base64.b64encode(data).decode()}, timeout=ACQUISITION_TIMEOUT)
 
     async def verify(self, sources: list[SourceEvidence]) -> list[dict]:
         semaphore = asyncio.Semaphore(4)
@@ -88,8 +85,8 @@ class ResearchService:
         for source in sources:
             evidence = documents[urldefrag(source.url)[0]].result()
             results.append({**source.model_dump(), "claimed_version": source.version,
-                            "supported_version": None, "retrieval": evidence,
-                            "excerpt": self.artifacts.read(evidence["artifact"]),
+                            "supported_version": None, "retrieval": {k: v for k, v in evidence.items() if k != "excerpt"},
+                            "excerpt": evidence["excerpt"],
                             "verification_level": "document_retrieved; claim/version/first-party provenance require review; live behaviour requires tests"})
         return results
 

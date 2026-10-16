@@ -1,0 +1,1051 @@
+{
+  "source": "tests/manual_delivery.py",
+  "source_manifest": "ocr5-source-manifest.json",
+  "frameworks": {
+    "python": {
+      "receipt": {
+        "version": 1,
+        "run_id": "run_7f90cb6ae9654706",
+        "target": "main",
+        "candidate": "ee5b08557eb8f8ff5314d1233374fd0209f6ddb2",
+        "tree": "f04995cc564af54337b0eeee64f8f1c49fd5c1dc",
+        "source_hash": "3caec350cb590ff37317685bac254d70885b811eabfc3e6dca08efdb4295584e",
+        "validation": "3caec350cb590ff37317685bac254d70885b811eabfc3e6dca08efdb4295584e",
+        "outcome": "DELIVERED",
+        "reintegrations": 0,
+        "runtime_budget_used": 1,
+        "runtime": {
+          "prefix": "/tmp/aa2-delivery-smoke-2gwkk3q7/python/.aa2/environments/378c8c2caaeea96966970804bee803e88969bba4f41904a9a6d157fd54c8f22d",
+          "fingerprint": "c362580330ceea571d926068a7712863a32973d48107cfa201744ccf66bb6f58",
+          "resources": [
+            "/tmp/aa2-delivery-smoke-2gwkk3q7/python/.aa2/environments/378c8c2caaeea96966970804bee803e88969bba4f41904a9a6d157fd54c8f22d"
+          ],
+          "evidence": {
+            "checks": [
+              {
+                "argv": [
+                  "python",
+                  "-c",
+                  "from app import add; assert add(2,3)==5"
+                ],
+                "cwd": ".",
+                "exit_code": 0,
+                "process_exit_code": 0,
+                "failure_reasons": [],
+                "test_runner": "",
+                "report_status": "not_required",
+                "attachments": [],
+                "capture_policy_hash": "0e7bff428c1d7c4c59be38b34944ed047761637ffa6a3b3926897eee675f26c1",
+                "attachment_capture": {
+                  "status": "not_required",
+                  "limits": {
+                    "max_file_bytes": 67108864,
+                    "max_total_bytes": 268435456,
+                    "max_files": 256,
+                    "timeout_seconds": 120.0
+                  }
+                },
+                "output": "",
+                "duration": 1.058044150006026,
+                "source_hash": "3caec350cb590ff37317685bac254d70885b811eabfc3e6dca08efdb4295584e",
+                "environment_hash": "c362580330ceea571d926068a7712863a32973d48107cfa201744ccf66bb6f58",
+                "command_hash": "a862fbd9c9c770febc8f29609338f244130ccd0a855d98246ec06787d7b12ae7",
+                "effective_argv": [
+                  "/tmp/aa2-delivery-smoke-2gwkk3q7/python/.aa2/environments/378c8c2caaeea96966970804bee803e88969bba4f41904a9a6d157fd54c8f22d/bin/python",
+                  "-c",
+                  "from app import add; assert add(2,3)==5"
+                ],
+                "checker_version": "verification-v10",
+                "input_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "runtime_config_hash": "0c99a87ff9847600fe830bf85e6446fdb31e8c462e7dcc0e0a977ce41edcad43",
+                "generated_outputs": {},
+                "logs": [
+                  {
+                    "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "kind": "check_log",
+                    "bytes": 0,
+                    "lease_id": "diagnostic_16cf4b8c79a44948",
+                    "capture_complete": true
+                  },
+                  {
+                    "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "kind": "check_log",
+                    "bytes": 0,
+                    "lease_id": "diagnostic_a541f3b8ae984907",
+                    "capture_complete": true
+                  }
+                ],
+                "tests": 0,
+                "skipped": 0,
+                "timed_out": false,
+                "test_ids": [],
+                "passed_test_ids": [],
+                "report": {}
+              }
+            ]
+          }
+        },
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "total_tokens": 0,
+          "complete": true
+        },
+        "evidence": {
+          "verify/checks": [
+            {
+              "argv": [
+                "python",
+                "-m",
+                "pytest",
+                "-q"
+              ],
+              "cwd": ".",
+              "exit_code": 0,
+              "process_exit_code": 0,
+              "failure_reasons": [],
+              "test_runner": "pytest",
+              "report_status": "valid",
+              "attachments": [],
+              "capture_policy_hash": "0e7bff428c1d7c4c59be38b34944ed047761637ffa6a3b3926897eee675f26c1",
+              "attachment_capture": {
+                "status": "not_required",
+                "limits": {
+                  "max_file_bytes": 67108864,
+                  "max_total_bytes": 268435456,
+                  "max_files": 256,
+                  "timeout_seconds": 120.0
+                }
+              },
+              "output": ".                                                                        [100%]\n1 passed in 0.01s\n",
+              "duration": 0.49339065101230517,
+              "source_hash": "3caec350cb590ff37317685bac254d70885b811eabfc3e6dca08efdb4295584e",
+              "environment_hash": "c362580330ceea571d926068a7712863a32973d48107cfa201744ccf66bb6f58",
+              "command_hash": "443e710ebf0db0d70a52fee3b20e768f238cf5e7cc854df92faa7d2ff90c2719",
+              "effective_argv": [
+                "/tmp/aa2-delivery-smoke-2gwkk3q7/python/.aa2/environments/378c8c2caaeea96966970804bee803e88969bba4f41904a9a6d157fd54c8f22d/bin/python",
+                "-m",
+                "pytest",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                "--junitxml=/tmp/aa2-delivery-smoke-2gwkk3q7/python/.aa2/tmp/check_9bd13b4696904f10/junit.xml"
+              ],
+              "checker_version": "verification-v10",
+              "input_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "runtime_config_hash": "f07e7535b5be1c21947e895b6d955e3e6f5448f03313ae1177c8611f8cbee907",
+              "generated_outputs": {},
+              "logs": [
+                {
+                  "hash": "4bcefcc9f6c645923b9993ccf73ad92e6b400ca25458ea14e095857fc2131342",
+                  "kind": "check_log",
+                  "bytes": 98,
+                  "lease_id": "diagnostic_447a3f8c29494a83",
+                  "capture_complete": true
+                },
+                {
+                  "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                  "kind": "check_log",
+                  "bytes": 0,
+                  "lease_id": "diagnostic_b8fdc36258e24efd",
+                  "capture_complete": true
+                }
+              ],
+              "tests": 1,
+              "skipped": 0,
+              "timed_out": false,
+              "test_ids": [
+                "test_app::test_add"
+              ],
+              "passed_test_ids": [
+                "test_app::test_add"
+              ],
+              "report": {
+                "hash": "badd11ebe3f58bc82983a64b182ca06cfca251bf70f1818f8d07f992d75d6002",
+                "kind": "junit",
+                "bytes": 313
+              }
+            }
+          ],
+          "verify/identity": "3caec350cb590ff37317685bac254d70885b811eabfc3e6dca08efdb4295584e",
+          "approvals": []
+        },
+        "owned_refs": {
+          "refs/aa2/run_7f90cb6ae9654706/baseline": "a0c12a94ad028c3382c17e7a85ef5b226d5c5604",
+          "refs/aa2/run_7f90cb6ae9654706/candidate": "ee5b08557eb8f8ff5314d1233374fd0209f6ddb2"
+        },
+        "digest": "5e73c17a4b2cdac891b1631ec3bf439aebceec627340a92bd10f475f6a079369"
+      },
+      "after_gc": [
+        {
+          "argv": [
+            "python",
+            "-c",
+            "from app import add; assert add(2,3)==5"
+          ],
+          "cwd": ".",
+          "exit_code": 0,
+          "process_exit_code": 0,
+          "failure_reasons": [],
+          "test_runner": "",
+          "report_status": "not_required",
+          "attachments": [],
+          "capture_policy_hash": "0e7bff428c1d7c4c59be38b34944ed047761637ffa6a3b3926897eee675f26c1",
+          "attachment_capture": {
+            "status": "not_required",
+            "limits": {
+              "max_file_bytes": 67108864,
+              "max_total_bytes": 268435456,
+              "max_files": 256,
+              "timeout_seconds": 120.0
+            }
+          },
+          "output": "",
+          "duration": 0.5356708449544385,
+          "source_hash": "3caec350cb590ff37317685bac254d70885b811eabfc3e6dca08efdb4295584e",
+          "environment_hash": "c362580330ceea571d926068a7712863a32973d48107cfa201744ccf66bb6f58",
+          "command_hash": "a862fbd9c9c770febc8f29609338f244130ccd0a855d98246ec06787d7b12ae7",
+          "effective_argv": [
+            "/tmp/aa2-delivery-smoke-2gwkk3q7/python/.aa2/environments/378c8c2caaeea96966970804bee803e88969bba4f41904a9a6d157fd54c8f22d/bin/python",
+            "-c",
+            "from app import add; assert add(2,3)==5"
+          ],
+          "checker_version": "verification-v10",
+          "input_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "runtime_config_hash": "0c99a87ff9847600fe830bf85e6446fdb31e8c462e7dcc0e0a977ce41edcad43",
+          "generated_outputs": {},
+          "logs": [
+            {
+              "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "kind": "check_log",
+              "bytes": 0,
+              "lease_id": "diagnostic_dabf9f4ae9e84757",
+              "capture_complete": true
+            },
+            {
+              "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "kind": "check_log",
+              "bytes": 0,
+              "lease_id": "diagnostic_9cd8ffbcf3e94425",
+              "capture_complete": true
+            }
+          ],
+          "tests": 0,
+          "skipped": 0,
+          "timed_out": false,
+          "test_ids": [],
+          "passed_test_ids": [],
+          "report": {}
+        }
+      ],
+      "browser_after_gc": [],
+      "missing_build_rejected": null
+    },
+    "react": {
+      "receipt": {
+        "version": 1,
+        "run_id": "run_f803c6d49e964076",
+        "target": "main",
+        "candidate": "b91feacbf70dc35f0a8a108c9362c54f01898d09",
+        "tree": "a3371252d49dc19b0c997043ee77629c11f3ae87",
+        "source_hash": "8392f34cae94072f8744ad84d3416b170be0fd56ae97160ac33a48d4f1ca7b80",
+        "validation": "8392f34cae94072f8744ad84d3416b170be0fd56ae97160ac33a48d4f1ca7b80",
+        "outcome": "DELIVERED",
+        "reintegrations": 0,
+        "runtime_budget_used": 1,
+        "runtime": {
+          "prefix": "/tmp/aa2-delivery-smoke-2gwkk3q7/react/.aa2/environments/a5097784bad613e1f2cc353447e9dc6f081518f50119b57de4eb6504f698b3fe",
+          "fingerprint": "797e1959bb261dd927282ef72c3f8e5b5c85b07e2aac408db3a5a892a73d7864",
+          "resources": [
+            "/tmp/aa2-delivery-smoke-2gwkk3q7/react/.aa2/environments/a5097784bad613e1f2cc353447e9dc6f081518f50119b57de4eb6504f698b3fe"
+          ],
+          "evidence": {
+            "checks": [
+              {
+                "argv": [
+                  "npm",
+                  "run",
+                  "build"
+                ],
+                "cwd": ".",
+                "exit_code": 0,
+                "process_exit_code": 0,
+                "failure_reasons": [],
+                "test_runner": "",
+                "report_status": "not_required",
+                "attachments": [],
+                "capture_policy_hash": "0e7bff428c1d7c4c59be38b34944ed047761637ffa6a3b3926897eee675f26c1",
+                "attachment_capture": {
+                  "status": "not_required",
+                  "limits": {
+                    "max_file_bytes": 67108864,
+                    "max_total_bytes": 268435456,
+                    "max_files": 256,
+                    "timeout_seconds": 120.0
+                  }
+                },
+                "output": "\n> aa2-react-fixture@0.0.0 build\n> tsc --noEmit && vite build\n\nvite v8.3.4 building client environment for production...\ntransforming...\n\u2713 15 modules transformed.\nrendering chunks...\ncomputing gzip size...\ndist/index.html                  0.22 kB \u2502 gzip:  0.18 kB\ndist/assets/index-xTyYDRux.js  220.22 kB \u2502 gzip: 68.92 kB\n\n\u2713 built in 220ms\n",
+                "duration": 3.7078092269948684,
+                "source_hash": "8392f34cae94072f8744ad84d3416b170be0fd56ae97160ac33a48d4f1ca7b80",
+                "environment_hash": "797e1959bb261dd927282ef72c3f8e5b5c85b07e2aac408db3a5a892a73d7864",
+                "command_hash": "982cdb5713cbec8244b8676e1150c4d926cae35a657b9fb5a6020fd34729ff09",
+                "effective_argv": [
+                  "/tmp/aa2-delivery-smoke-2gwkk3q7/react/.aa2/environments/a5097784bad613e1f2cc353447e9dc6f081518f50119b57de4eb6504f698b3fe/bin/npm",
+                  "run",
+                  "build"
+                ],
+                "checker_version": "verification-v10",
+                "input_hash": "2a5af67d1f1fbaa689b3649d45a3c86fa718fdedb2202a1a648671b7b6cd7818",
+                "runtime_config_hash": "9bce32c2571e7e0845a4b7ca95a54192c22ed83525efbae6dd8404e839829ccb",
+                "generated_outputs": {
+                  "dist": "33a21878a1331ddb467f7f3632234713b49ddf8eefbfcddf7408b1065b2d785b"
+                },
+                "logs": [
+                  {
+                    "hash": "cb110c55442e9f6e0b7a9a630f55186ba0b23813a1a9ab68a5a72f4e7e075ba6",
+                    "kind": "check_log",
+                    "bytes": 348,
+                    "lease_id": "diagnostic_3bb7d75504fc4572",
+                    "capture_complete": true
+                  },
+                  {
+                    "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "kind": "check_log",
+                    "bytes": 0,
+                    "lease_id": "diagnostic_da2a969185ef44c4",
+                    "capture_complete": true
+                  }
+                ],
+                "tests": 0,
+                "skipped": 0,
+                "timed_out": false,
+                "test_ids": [],
+                "passed_test_ids": [],
+                "report": {}
+              },
+              {
+                "argv": [
+                  "node",
+                  "-e",
+                  "require('react'); console.log('runtime ready')"
+                ],
+                "cwd": ".",
+                "exit_code": 0,
+                "process_exit_code": 0,
+                "failure_reasons": [],
+                "test_runner": "",
+                "report_status": "not_required",
+                "attachments": [],
+                "capture_policy_hash": "0e7bff428c1d7c4c59be38b34944ed047761637ffa6a3b3926897eee675f26c1",
+                "attachment_capture": {
+                  "status": "not_required",
+                  "limits": {
+                    "max_file_bytes": 67108864,
+                    "max_total_bytes": 268435456,
+                    "max_files": 256,
+                    "timeout_seconds": 120.0
+                  }
+                },
+                "output": "runtime ready\n",
+                "duration": 1.3968153099995106,
+                "source_hash": "8392f34cae94072f8744ad84d3416b170be0fd56ae97160ac33a48d4f1ca7b80",
+                "environment_hash": "797e1959bb261dd927282ef72c3f8e5b5c85b07e2aac408db3a5a892a73d7864",
+                "command_hash": "362293d1ed2b68f165a62119b874c966a39afe685cdc6506ba85edab6f344bfd",
+                "effective_argv": [
+                  "/tmp/aa2-delivery-smoke-2gwkk3q7/react/.aa2/environments/a5097784bad613e1f2cc353447e9dc6f081518f50119b57de4eb6504f698b3fe/bin/node",
+                  "-e",
+                  "require('react'); console.log('runtime ready')"
+                ],
+                "checker_version": "verification-v10",
+                "input_hash": "2a5af67d1f1fbaa689b3649d45a3c86fa718fdedb2202a1a648671b7b6cd7818",
+                "runtime_config_hash": "9bce32c2571e7e0845a4b7ca95a54192c22ed83525efbae6dd8404e839829ccb",
+                "generated_outputs": {},
+                "logs": [
+                  {
+                    "hash": "5c34cf3e79fd94effcbf7195d262bbac1d8017b073af0b9042e55d7a1b218cf6",
+                    "kind": "check_log",
+                    "bytes": 14,
+                    "lease_id": "diagnostic_aa91a87816124319",
+                    "capture_complete": true
+                  },
+                  {
+                    "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "kind": "check_log",
+                    "bytes": 0,
+                    "lease_id": "diagnostic_016e281427414a4e",
+                    "capture_complete": true
+                  }
+                ],
+                "tests": 0,
+                "skipped": 0,
+                "timed_out": false,
+                "test_ids": [],
+                "passed_test_ids": [],
+                "report": {}
+              }
+            ],
+            "visuals": [
+              {
+                "route": "/",
+                "viewport": 1440,
+                "errors": [],
+                "status": 200,
+                "actions": [
+                  {
+                    "route": "/",
+                    "action": "click",
+                    "selector": "#increment",
+                    "value": ""
+                  },
+                  {
+                    "route": "/",
+                    "action": "expect_text",
+                    "selector": "#count",
+                    "value": "1"
+                  }
+                ],
+                "screenshot": "/tmp/aa2-delivery-smoke-2gwkk3q7/react/.aa2/artifacts/94/944ea556b1da568f5ad77b8474afb8e8ee18f8b7f58d66ed0074f90bb0d09790",
+                "image_artifact": {
+                  "hash": "944ea556b1da568f5ad77b8474afb8e8ee18f8b7f58d66ed0074f90bb0d09790",
+                  "kind": "screenshot",
+                  "bytes": 9788
+                }
+              },
+              {
+                "route": "/",
+                "viewport": 390,
+                "errors": [],
+                "status": 200,
+                "actions": [
+                  {
+                    "route": "/",
+                    "action": "click",
+                    "selector": "#increment",
+                    "value": ""
+                  },
+                  {
+                    "route": "/",
+                    "action": "expect_text",
+                    "selector": "#count",
+                    "value": "1"
+                  }
+                ],
+                "screenshot": "/tmp/aa2-delivery-smoke-2gwkk3q7/react/.aa2/artifacts/0c/0cf437f8dfa6b3390bed46139592ad7885341f3003d39f6567e6e9ad2e2bd64f",
+                "image_artifact": {
+                  "hash": "0cf437f8dfa6b3390bed46139592ad7885341f3003d39f6567e6e9ad2e2bd64f",
+                  "kind": "screenshot",
+                  "bytes": 6369
+                }
+              }
+            ]
+          }
+        },
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "total_tokens": 0,
+          "complete": true
+        },
+        "evidence": {
+          "verify/checks": [
+            {
+              "argv": [
+                "npm",
+                "run",
+                "build"
+              ],
+              "cwd": ".",
+              "exit_code": 0,
+              "process_exit_code": 0,
+              "failure_reasons": [],
+              "test_runner": "",
+              "report_status": "not_required",
+              "attachments": [],
+              "capture_policy_hash": "0e7bff428c1d7c4c59be38b34944ed047761637ffa6a3b3926897eee675f26c1",
+              "attachment_capture": {
+                "status": "not_required",
+                "limits": {
+                  "max_file_bytes": 67108864,
+                  "max_total_bytes": 268435456,
+                  "max_files": 256,
+                  "timeout_seconds": 120.0
+                }
+              },
+              "output": "\n> aa2-react-fixture@0.0.0 build\n> tsc --noEmit && vite build\n\nvite v8.3.4 building client environment for production...\ntransforming...\n\u2713 15 modules transformed.\nrendering chunks...\ncomputing gzip size...\ndist/index.html                  0.22 kB \u2502 gzip:  0.18 kB\ndist/assets/index-xTyYDRux.js  220.22 kB \u2502 gzip: 68.92 kB\n\n\u2713 built in 189ms\n",
+              "duration": 2.9637916529900394,
+              "source_hash": "8392f34cae94072f8744ad84d3416b170be0fd56ae97160ac33a48d4f1ca7b80",
+              "environment_hash": "797e1959bb261dd927282ef72c3f8e5b5c85b07e2aac408db3a5a892a73d7864",
+              "command_hash": "982cdb5713cbec8244b8676e1150c4d926cae35a657b9fb5a6020fd34729ff09",
+              "effective_argv": [
+                "/tmp/aa2-delivery-smoke-2gwkk3q7/react/.aa2/environments/a5097784bad613e1f2cc353447e9dc6f081518f50119b57de4eb6504f698b3fe/bin/npm",
+                "run",
+                "build"
+              ],
+              "checker_version": "verification-v10",
+              "input_hash": "2a5af67d1f1fbaa689b3649d45a3c86fa718fdedb2202a1a648671b7b6cd7818",
+              "runtime_config_hash": "44d124d436e77de340cc808bdd56c23d31d519ca9831052fcb4ab6e91704ade3",
+              "generated_outputs": {
+                "dist": "33a21878a1331ddb467f7f3632234713b49ddf8eefbfcddf7408b1065b2d785b"
+              },
+              "logs": [
+                {
+                  "hash": "f5ce3626f1863d110f381d30b0a2831d2ed1aed55d27ffd237db89108265c9c9",
+                  "kind": "check_log",
+                  "bytes": 348,
+                  "lease_id": "diagnostic_10e1819a72ec41d5",
+                  "capture_complete": true
+                },
+                {
+                  "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                  "kind": "check_log",
+                  "bytes": 0,
+                  "lease_id": "diagnostic_1908b67280c942a8",
+                  "capture_complete": true
+                }
+              ],
+              "tests": 0,
+              "skipped": 0,
+              "timed_out": false,
+              "test_ids": [],
+              "passed_test_ids": [],
+              "report": {}
+            }
+          ],
+          "verify/identity": "8392f34cae94072f8744ad84d3416b170be0fd56ae97160ac33a48d4f1ca7b80",
+          "approvals": []
+        },
+        "owned_refs": {
+          "refs/aa2/run_f803c6d49e964076/baseline": "533f52854e5288963d569660440c5c4ce1832da7",
+          "refs/aa2/run_f803c6d49e964076/candidate": "b91feacbf70dc35f0a8a108c9362c54f01898d09"
+        },
+        "digest": "cea8d63da520be9d4553ba69e096911c219e644d9c31bed78c941984ea87741c"
+      },
+      "after_gc": [
+        {
+          "argv": [
+            "node",
+            "-e",
+            "require('react'); console.log('runtime ready')"
+          ],
+          "cwd": ".",
+          "exit_code": 0,
+          "process_exit_code": 0,
+          "failure_reasons": [],
+          "test_runner": "",
+          "report_status": "not_required",
+          "attachments": [],
+          "capture_policy_hash": "0e7bff428c1d7c4c59be38b34944ed047761637ffa6a3b3926897eee675f26c1",
+          "attachment_capture": {
+            "status": "not_required",
+            "limits": {
+              "max_file_bytes": 67108864,
+              "max_total_bytes": 268435456,
+              "max_files": 256,
+              "timeout_seconds": 120.0
+            }
+          },
+          "output": "runtime ready\n",
+          "duration": 0.9676564800320193,
+          "source_hash": "8392f34cae94072f8744ad84d3416b170be0fd56ae97160ac33a48d4f1ca7b80",
+          "environment_hash": "797e1959bb261dd927282ef72c3f8e5b5c85b07e2aac408db3a5a892a73d7864",
+          "command_hash": "362293d1ed2b68f165a62119b874c966a39afe685cdc6506ba85edab6f344bfd",
+          "effective_argv": [
+            "/tmp/aa2-delivery-smoke-2gwkk3q7/react/.aa2/environments/a5097784bad613e1f2cc353447e9dc6f081518f50119b57de4eb6504f698b3fe/bin/node",
+            "-e",
+            "require('react'); console.log('runtime ready')"
+          ],
+          "checker_version": "verification-v10",
+          "input_hash": "2a5af67d1f1fbaa689b3649d45a3c86fa718fdedb2202a1a648671b7b6cd7818",
+          "runtime_config_hash": "9bce32c2571e7e0845a4b7ca95a54192c22ed83525efbae6dd8404e839829ccb",
+          "generated_outputs": {},
+          "logs": [
+            {
+              "hash": "5c34cf3e79fd94effcbf7195d262bbac1d8017b073af0b9042e55d7a1b218cf6",
+              "kind": "check_log",
+              "bytes": 14,
+              "lease_id": "diagnostic_e220fdd0ea0e45a2",
+              "capture_complete": true
+            },
+            {
+              "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "kind": "check_log",
+              "bytes": 0,
+              "lease_id": "diagnostic_7e2b950a009b49d9",
+              "capture_complete": true
+            }
+          ],
+          "tests": 0,
+          "skipped": 0,
+          "timed_out": false,
+          "test_ids": [],
+          "passed_test_ids": [],
+          "report": {}
+        }
+      ],
+      "browser_after_gc": [
+        {
+          "route": "/",
+          "viewport": 1440,
+          "errors": [],
+          "status": 200,
+          "actions": [
+            {
+              "route": "/",
+              "action": "click",
+              "selector": "#increment",
+              "value": ""
+            },
+            {
+              "route": "/",
+              "action": "expect_text",
+              "selector": "#count",
+              "value": "1"
+            }
+          ],
+          "screenshot": "/tmp/aa2-delivery-smoke-2gwkk3q7/react/.aa2/visuals/after-gc/route-0-1440.png"
+        },
+        {
+          "route": "/",
+          "viewport": 390,
+          "errors": [],
+          "status": 200,
+          "actions": [
+            {
+              "route": "/",
+              "action": "click",
+              "selector": "#increment",
+              "value": ""
+            },
+            {
+              "route": "/",
+              "action": "expect_text",
+              "selector": "#count",
+              "value": "1"
+            }
+          ],
+          "screenshot": "/tmp/aa2-delivery-smoke-2gwkk3q7/react/.aa2/visuals/after-gc/route-0-390.png"
+        }
+      ],
+      "missing_build_rejected": true
+    },
+    "next": {
+      "receipt": {
+        "version": 1,
+        "run_id": "run_826ebbbe4e324d7b",
+        "target": "main",
+        "candidate": "705ab0d35824657e50737da44321748661baa39c",
+        "tree": "8d9693457897335bd63aa879fc1731b598a14eeb",
+        "source_hash": "ea2a6ecd9a31be975647623e94410ea6a69408c38f3dff7a05684cc780573bb1",
+        "validation": "ea2a6ecd9a31be975647623e94410ea6a69408c38f3dff7a05684cc780573bb1",
+        "outcome": "DELIVERED",
+        "reintegrations": 0,
+        "runtime_budget_used": 1,
+        "runtime": {
+          "prefix": "/tmp/aa2-delivery-smoke-2gwkk3q7/next/.aa2/environments/25961f77056ad323a490c314f89b2b18c44cfc869f7cab54aef216e028d94362",
+          "fingerprint": "ebf7722a3b83460db13b07308baa67c776315820f2f689e1ced0fafff8128e12",
+          "resources": [
+            "/tmp/aa2-delivery-smoke-2gwkk3q7/next/.aa2/environments/25961f77056ad323a490c314f89b2b18c44cfc869f7cab54aef216e028d94362"
+          ],
+          "evidence": {
+            "checks": [
+              {
+                "argv": [
+                  "npm",
+                  "run",
+                  "build"
+                ],
+                "cwd": ".",
+                "exit_code": 0,
+                "process_exit_code": 0,
+                "failure_reasons": [],
+                "test_runner": "",
+                "report_status": "not_required",
+                "attachments": [],
+                "capture_policy_hash": "0e7bff428c1d7c4c59be38b34944ed047761637ffa6a3b3926897eee675f26c1",
+                "attachment_capture": {
+                  "status": "not_required",
+                  "limits": {
+                    "max_file_bytes": 67108864,
+                    "max_total_bytes": 268435456,
+                    "max_files": 256,
+                    "timeout_seconds": 120.0
+                  }
+                },
+                "output": "\n> aa2-next-fixture@0.0.0 build\n> next build --webpack\n\n\u25b2 Next.js 16.4.0 (webpack)\n\u2713 Running next.config.mjs took 23ms\n- Experiments (use with caution):\n  \u00b7 cpus: 2\n\n  Creating an optimized production build ...\n\u2713 Compiled successfully in 5.1s\n  Running TypeScript ...\n  Finished TypeScript in 2.1s ...\n  Collecting page data using 2 workers ...\n  Generating static pages using 2 workers (0/3) ...\n\u2713 Generating static pages using 2 workers (3/3) in 299ms\n  Finalizing page optimization ...\n  Collecting build traces ...\n\nRoute (app)\n\u250c \u25cb /\n\u2514 \u25cb /_not-found\n\n\n\u25cb  (Static)  prerendered as static content\n\n",
+                "duration": 29.702990631980356,
+                "source_hash": "ea2a6ecd9a31be975647623e94410ea6a69408c38f3dff7a05684cc780573bb1",
+                "environment_hash": "ebf7722a3b83460db13b07308baa67c776315820f2f689e1ced0fafff8128e12",
+                "command_hash": "bf9f91f57d7c5476477fde8059c3dda8673ca653b14e5948b550e347754681fc",
+                "effective_argv": [
+                  "/tmp/aa2-delivery-smoke-2gwkk3q7/next/.aa2/environments/25961f77056ad323a490c314f89b2b18c44cfc869f7cab54aef216e028d94362/bin/npm",
+                  "run",
+                  "build"
+                ],
+                "checker_version": "verification-v10",
+                "input_hash": "7db04ff687481473a894cd48ff243e2226c776e1ca4073fe25bc1a658e256c05",
+                "runtime_config_hash": "0fa3affb7b3b0e9d6c57cefc6ce78042be7f7c724c2ec40f676c126360f61b4b",
+                "generated_outputs": {
+                  ".next": "a4a8d047e72b934e78aecacd6ea14c3711f213f96a2a64a158172ffd4767c5f7"
+                },
+                "logs": [
+                  {
+                    "hash": "640aea11d2c35fc221d96502bb50e906a7e03dd8ea4c8b63759a2390dcffb6b1",
+                    "kind": "check_log",
+                    "bytes": 619,
+                    "lease_id": "diagnostic_767aac4bdf824542",
+                    "capture_complete": true
+                  },
+                  {
+                    "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "kind": "check_log",
+                    "bytes": 0,
+                    "lease_id": "diagnostic_af84f1f3af8a4b4b",
+                    "capture_complete": true
+                  }
+                ],
+                "tests": 0,
+                "skipped": 0,
+                "timed_out": false,
+                "test_ids": [],
+                "passed_test_ids": [],
+                "report": {}
+              },
+              {
+                "argv": [
+                  "node",
+                  "-e",
+                  "require('react'); console.log('runtime ready')"
+                ],
+                "cwd": ".",
+                "exit_code": 0,
+                "process_exit_code": 0,
+                "failure_reasons": [],
+                "test_runner": "",
+                "report_status": "not_required",
+                "attachments": [],
+                "capture_policy_hash": "0e7bff428c1d7c4c59be38b34944ed047761637ffa6a3b3926897eee675f26c1",
+                "attachment_capture": {
+                  "status": "not_required",
+                  "limits": {
+                    "max_file_bytes": 67108864,
+                    "max_total_bytes": 268435456,
+                    "max_files": 256,
+                    "timeout_seconds": 120.0
+                  }
+                },
+                "output": "runtime ready\n",
+                "duration": 2.5293357250047848,
+                "source_hash": "ea2a6ecd9a31be975647623e94410ea6a69408c38f3dff7a05684cc780573bb1",
+                "environment_hash": "ebf7722a3b83460db13b07308baa67c776315820f2f689e1ced0fafff8128e12",
+                "command_hash": "362293d1ed2b68f165a62119b874c966a39afe685cdc6506ba85edab6f344bfd",
+                "effective_argv": [
+                  "/tmp/aa2-delivery-smoke-2gwkk3q7/next/.aa2/environments/25961f77056ad323a490c314f89b2b18c44cfc869f7cab54aef216e028d94362/bin/node",
+                  "-e",
+                  "require('react'); console.log('runtime ready')"
+                ],
+                "checker_version": "verification-v10",
+                "input_hash": "7db04ff687481473a894cd48ff243e2226c776e1ca4073fe25bc1a658e256c05",
+                "runtime_config_hash": "0fa3affb7b3b0e9d6c57cefc6ce78042be7f7c724c2ec40f676c126360f61b4b",
+                "generated_outputs": {},
+                "logs": [
+                  {
+                    "hash": "5c34cf3e79fd94effcbf7195d262bbac1d8017b073af0b9042e55d7a1b218cf6",
+                    "kind": "check_log",
+                    "bytes": 14,
+                    "lease_id": "diagnostic_fa678a9722184f0c",
+                    "capture_complete": true
+                  },
+                  {
+                    "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "kind": "check_log",
+                    "bytes": 0,
+                    "lease_id": "diagnostic_fbf3dfaf7d514ab6",
+                    "capture_complete": true
+                  }
+                ],
+                "tests": 0,
+                "skipped": 0,
+                "timed_out": false,
+                "test_ids": [],
+                "passed_test_ids": [],
+                "report": {}
+              }
+            ],
+            "visuals": [
+              {
+                "route": "/",
+                "viewport": 1440,
+                "errors": [],
+                "status": 200,
+                "actions": [
+                  {
+                    "route": "/",
+                    "action": "click",
+                    "selector": "#increment",
+                    "value": ""
+                  },
+                  {
+                    "route": "/",
+                    "action": "expect_text",
+                    "selector": "#count",
+                    "value": "1"
+                  }
+                ],
+                "screenshot": "/tmp/aa2-delivery-smoke-2gwkk3q7/next/.aa2/artifacts/94/944ea556b1da568f5ad77b8474afb8e8ee18f8b7f58d66ed0074f90bb0d09790",
+                "image_artifact": {
+                  "hash": "944ea556b1da568f5ad77b8474afb8e8ee18f8b7f58d66ed0074f90bb0d09790",
+                  "kind": "screenshot",
+                  "bytes": 9788
+                }
+              },
+              {
+                "route": "/",
+                "viewport": 390,
+                "errors": [],
+                "status": 200,
+                "actions": [
+                  {
+                    "route": "/",
+                    "action": "click",
+                    "selector": "#increment",
+                    "value": ""
+                  },
+                  {
+                    "route": "/",
+                    "action": "expect_text",
+                    "selector": "#count",
+                    "value": "1"
+                  }
+                ],
+                "screenshot": "/tmp/aa2-delivery-smoke-2gwkk3q7/next/.aa2/artifacts/0c/0cf437f8dfa6b3390bed46139592ad7885341f3003d39f6567e6e9ad2e2bd64f",
+                "image_artifact": {
+                  "hash": "0cf437f8dfa6b3390bed46139592ad7885341f3003d39f6567e6e9ad2e2bd64f",
+                  "kind": "screenshot",
+                  "bytes": 6369
+                }
+              }
+            ]
+          }
+        },
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cached_tokens": 0,
+          "reasoning_tokens": 0,
+          "total_tokens": 0,
+          "complete": true
+        },
+        "evidence": {
+          "verify/checks": [
+            {
+              "argv": [
+                "npm",
+                "run",
+                "build"
+              ],
+              "cwd": ".",
+              "exit_code": 0,
+              "process_exit_code": 0,
+              "failure_reasons": [],
+              "test_runner": "",
+              "report_status": "not_required",
+              "attachments": [],
+              "capture_policy_hash": "0e7bff428c1d7c4c59be38b34944ed047761637ffa6a3b3926897eee675f26c1",
+              "attachment_capture": {
+                "status": "not_required",
+                "limits": {
+                  "max_file_bytes": 67108864,
+                  "max_total_bytes": 268435456,
+                  "max_files": 256,
+                  "timeout_seconds": 120.0
+                }
+              },
+              "output": "\n> aa2-next-fixture@0.0.0 build\n> next build --webpack\n\n\u25b2 Next.js 16.4.0 (webpack)\n\u2713 Running next.config.mjs took 19ms\n- Experiments (use with caution):\n  \u00b7 cpus: 2\n\n  Creating an optimized production build ...\n\u2713 Compiled successfully in 5.2s\n  Running TypeScript ...\n  Finished TypeScript in 2.1s ...\n  Collecting page data using 2 workers ...\n  Generating static pages using 2 workers (0/3) ...\n\u2713 Generating static pages using 2 workers (3/3) in 335ms\n  Finalizing page optimization ...\n  Collecting build traces ...\n\nRoute (app)\n\u250c \u25cb /\n\u2514 \u25cb /_not-found\n\n\n\u25cb  (Static)  prerendered as static content\n\n",
+              "duration": 27.439286025997717,
+              "source_hash": "ea2a6ecd9a31be975647623e94410ea6a69408c38f3dff7a05684cc780573bb1",
+              "environment_hash": "ebf7722a3b83460db13b07308baa67c776315820f2f689e1ced0fafff8128e12",
+              "command_hash": "bf9f91f57d7c5476477fde8059c3dda8673ca653b14e5948b550e347754681fc",
+              "effective_argv": [
+                "/tmp/aa2-delivery-smoke-2gwkk3q7/next/.aa2/environments/25961f77056ad323a490c314f89b2b18c44cfc869f7cab54aef216e028d94362/bin/npm",
+                "run",
+                "build"
+              ],
+              "checker_version": "verification-v10",
+              "input_hash": "7db04ff687481473a894cd48ff243e2226c776e1ca4073fe25bc1a658e256c05",
+              "runtime_config_hash": "1a9d90266d069613e2b3b8d968de80ddb2fff6035a05bfb7d50b6683c533a03a",
+              "generated_outputs": {
+                ".next": "5b78deccdb55766115ee98db6e8274b5ccc9228b2ad699e121b2548f0f5a5fe3"
+              },
+              "logs": [
+                {
+                  "hash": "77a760a81eed35ebb233f76acab706114b26aaabe0075eece4852a02d1244b50",
+                  "kind": "check_log",
+                  "bytes": 619,
+                  "lease_id": "diagnostic_0e938d38f087428a",
+                  "capture_complete": true
+                },
+                {
+                  "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                  "kind": "check_log",
+                  "bytes": 0,
+                  "lease_id": "diagnostic_9e65be67cdd2477e",
+                  "capture_complete": true
+                }
+              ],
+              "tests": 0,
+              "skipped": 0,
+              "timed_out": false,
+              "test_ids": [],
+              "passed_test_ids": [],
+              "report": {}
+            }
+          ],
+          "verify/identity": "ea2a6ecd9a31be975647623e94410ea6a69408c38f3dff7a05684cc780573bb1",
+          "approvals": []
+        },
+        "owned_refs": {
+          "refs/aa2/run_826ebbbe4e324d7b/baseline": "f939677d476c5600755c5c0ae2e42ab07451290b",
+          "refs/aa2/run_826ebbbe4e324d7b/candidate": "705ab0d35824657e50737da44321748661baa39c"
+        },
+        "digest": "b2c7bdd6eeda987815e21dc34482482d15b9e4c70cf7a21d5c3c07cd66e8880b"
+      },
+      "after_gc": [
+        {
+          "argv": [
+            "node",
+            "-e",
+            "require('react'); console.log('runtime ready')"
+          ],
+          "cwd": ".",
+          "exit_code": 0,
+          "process_exit_code": 0,
+          "failure_reasons": [],
+          "test_runner": "",
+          "report_status": "not_required",
+          "attachments": [],
+          "capture_policy_hash": "0e7bff428c1d7c4c59be38b34944ed047761637ffa6a3b3926897eee675f26c1",
+          "attachment_capture": {
+            "status": "not_required",
+            "limits": {
+              "max_file_bytes": 67108864,
+              "max_total_bytes": 268435456,
+              "max_files": 256,
+              "timeout_seconds": 120.0
+            }
+          },
+          "output": "runtime ready\n",
+          "duration": 1.9082740989979357,
+          "source_hash": "ea2a6ecd9a31be975647623e94410ea6a69408c38f3dff7a05684cc780573bb1",
+          "environment_hash": "ebf7722a3b83460db13b07308baa67c776315820f2f689e1ced0fafff8128e12",
+          "command_hash": "362293d1ed2b68f165a62119b874c966a39afe685cdc6506ba85edab6f344bfd",
+          "effective_argv": [
+            "/tmp/aa2-delivery-smoke-2gwkk3q7/next/.aa2/environments/25961f77056ad323a490c314f89b2b18c44cfc869f7cab54aef216e028d94362/bin/node",
+            "-e",
+            "require('react'); console.log('runtime ready')"
+          ],
+          "checker_version": "verification-v10",
+          "input_hash": "7db04ff687481473a894cd48ff243e2226c776e1ca4073fe25bc1a658e256c05",
+          "runtime_config_hash": "0fa3affb7b3b0e9d6c57cefc6ce78042be7f7c724c2ec40f676c126360f61b4b",
+          "generated_outputs": {},
+          "logs": [
+            {
+              "hash": "5c34cf3e79fd94effcbf7195d262bbac1d8017b073af0b9042e55d7a1b218cf6",
+              "kind": "check_log",
+              "bytes": 14,
+              "lease_id": "diagnostic_e73379cdde424af7",
+              "capture_complete": true
+            },
+            {
+              "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "kind": "check_log",
+              "bytes": 0,
+              "lease_id": "diagnostic_c88be26859e54200",
+              "capture_complete": true
+            }
+          ],
+          "tests": 0,
+          "skipped": 0,
+          "timed_out": false,
+          "test_ids": [],
+          "passed_test_ids": [],
+          "report": {}
+        }
+      ],
+      "browser_after_gc": [
+        {
+          "route": "/",
+          "viewport": 1440,
+          "errors": [],
+          "status": 200,
+          "actions": [
+            {
+              "route": "/",
+              "action": "click",
+              "selector": "#increment",
+              "value": ""
+            },
+            {
+              "route": "/",
+              "action": "expect_text",
+              "selector": "#count",
+              "value": "1"
+            }
+          ],
+          "screenshot": "/tmp/aa2-delivery-smoke-2gwkk3q7/next/.aa2/visuals/after-gc/route-0-1440.png"
+        },
+        {
+          "route": "/",
+          "viewport": 390,
+          "errors": [],
+          "status": 200,
+          "actions": [
+            {
+              "route": "/",
+              "action": "click",
+              "selector": "#increment",
+              "value": ""
+            },
+            {
+              "route": "/",
+              "action": "expect_text",
+              "selector": "#count",
+              "value": "1"
+            }
+          ],
+          "screenshot": "/tmp/aa2-delivery-smoke-2gwkk3q7/next/.aa2/visuals/after-gc/route-0-390.png"
+        }
+      ],
+      "missing_build_rejected": true
+    }
+  },
+  "screenshots": [
+    {
+      "framework": "react",
+      "viewport": 1440,
+      "file": "ocr5-delivery-react-1440.png",
+      "sha256": "944ea556b1da568f5ad77b8474afb8e8ee18f8b7f58d66ed0074f90bb0d09790"
+    },
+    {
+      "framework": "react",
+      "viewport": 390,
+      "file": "ocr5-delivery-react-390.png",
+      "sha256": "0cf437f8dfa6b3390bed46139592ad7885341f3003d39f6567e6e9ad2e2bd64f"
+    },
+    {
+      "framework": "next",
+      "viewport": 1440,
+      "file": "ocr5-delivery-next-1440.png",
+      "sha256": "944ea556b1da568f5ad77b8474afb8e8ee18f8b7f58d66ed0074f90bb0d09790"
+    },
+    {
+      "framework": "next",
+      "viewport": 390,
+      "file": "ocr5-delivery-next-390.png",
+      "sha256": "0cf437f8dfa6b3390bed46139592ad7885341f3003d39f6567e6e9ad2e2bd64f"
+    }
+  ]
+}

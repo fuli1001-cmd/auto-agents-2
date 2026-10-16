@@ -12,7 +12,7 @@ from .util import digest
 
 Action = Literal["diagnose", "recheck", "repair", "plan_patch", "clarify", "provider_research", "prototype", "design", "blocked"]
 COLLECTION_FAILURES = {"test_report_missing", "test_report_invalid", "incomplete_log_capture",
-                       "source_changed", "execution_inputs_changed", "test_attachments_invalid", "unsupported_test_runner"}
+                       "source_changed", "execution_inputs_changed", "test_attachments_invalid", "evidence_collection_failed", "unsupported_test_runner"}
 
 
 class ExecutionContract(Record):
@@ -102,7 +102,7 @@ def observation_identity(checks, review=None, environment_error=None):
     """Distinguish current failures without timestamps, log prose or new budget IDs."""
     return digest({"checks": [{k: row.get(k) for k in (
         "cwd", "argv", "source_hash", "environment_hash", "command_hash", "input_hash", "checker_version",
-        "process_exit_code", "failure_reasons", "test_ids", "passed_test_ids")} for row in checks],
+        "process_exit_code", "failure_reasons", "test_ids", "passed_test_ids", "capture_policy_hash")} for row in checks],
         "review": review, "environment_error": environment_error})
 
 
@@ -158,6 +158,9 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None)
     collection_failure = any(COLLECTION_FAILURES.intersection(row["failure_reasons"]) for row in rows)
     if (failure.kind in {"evidence", "build"} or collection_failure) and attempts == 0:
         action, reason = "recheck", "重新准备声明的构建产物并采集原始检查证据"
+    if any("evidence_collection_failed" in row["failure_reasons"] for row in rows):
+        return RecoveryDecision(failure_id=failure.id, action="blocked", task_ids=tasks, evidence_refs=refs,
+            reason="附件证据采集失败；调整采集上限或测试录制配置后复验，保留候选代码和原始现场", budget_owner=failure.origin_id)
     if diagnosis:
         if len({target.task_id for target in diagnosis.repair_targets}) != len(diagnosis.repair_targets):
             raise AA2Error("Duplicate repair-target task IDs")

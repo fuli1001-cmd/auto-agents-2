@@ -4,7 +4,7 @@ import json
 
 from .research import request_documents
 
-PROMPT_VERSION = "2026-10-16.1"
+PROMPT_VERSION = "2026-10-16.2"
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
     "gemini": "https://ai.google.dev/gemini-api/docs/prompting-strategies#gemini-3",
@@ -74,7 +74,12 @@ CheckResult.process_exit_code is the actual process status; exit_code is the con
 acceptance status and failure_reasons explains rejection. Missing/invalid reports are not
 proof of a product defect. The controller collects JUnit for pytest (including Python flags),
 Vitest and Playwright, directly or through simple npm scripts. Keep nonzero expected_tests
-for test suites. An unsupported wrapper requires a supported direct runner command, never
+for test suites. Keep optional video off by default in new tests; collect screenshots
+and traces only when needed for diagnosis. Preserve required visual evidence and viewport
+resolution. Changes to existing recording settings require the normal review path.
+Attachment capture has configurable file/total/count limits; collection failure is not
+proof of a business-code defect. Never truncate required evidence to claim success.
+An unsupported wrapper requires a supported direct runner command, never
 weaker assertions or a reduced expected_tests. Rechecking old evidence still requires review.
 Existing run/reporter options are composed by the controller; do not rewrite a valid task
 check just to compensate for duplicated controller flags. The original argv, effective_argv

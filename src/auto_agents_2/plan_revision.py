@@ -75,7 +75,7 @@ def _retain_checks(old, new):
             raise AA2Error("Plan patch removes a check obligation or reduces expected_tests")
 
 
-def apply_patch(plan: PlanResult, patch: PlanPatch, revision: int, failures: set[str], origins: dict):
+def apply_patch(plan: PlanResult, patch: PlanPatch, revision: int, failures: set[str], origins: dict, *, coverage_verified=False):
     if patch.base_revision != revision:
         raise AA2Error("Stale plan patch base_revision")
     if not set(patch.failure_ids) <= failures:
@@ -105,7 +105,7 @@ def apply_patch(plan: PlanResult, patch: PlanPatch, revision: int, failures: set
     _retain_checks(plan.final_checks, candidate.final_checks)
     _retain_checks(plan.runtime_prepare, candidate.runtime_prepare)
     _retain_checks(plan.runtime_probes, candidate.runtime_probes)
-    validate_plan(candidate, {r for t in plan.tasks for r in t.requirement_ids})
+    validate_plan(candidate, {r for t in plan.tasks for r in t.requirement_ids}, coverage_verified=coverage_verified)
     changed = {k for k, v in updates.items() if k not in old or v != old[k]} | set(patch.remove_tasks)
     affected = descendants(candidate, changed) | descendants(plan, changed)
     if changes:

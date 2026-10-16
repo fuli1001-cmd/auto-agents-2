@@ -75,6 +75,13 @@ class DeliveryConfig(Record):
     max_runtime_retries: int = Field(default=3, ge=0)
 
 
+class AttachmentCapture(Record):
+    max_file_bytes: int = Field(default=64 * 1024**2, ge=1)
+    max_total_bytes: int = Field(default=256 * 1024**2, ge=1)
+    max_files: int = Field(default=256, ge=1)
+    timeout_seconds: float = Field(default=120, gt=0)
+
+
 class Config(Record):
     schema_version: Literal[1] = 1
     config_revision: int = 0
@@ -83,6 +90,7 @@ class Config(Record):
     efforts: dict[str, str] = DEFAULT_EFFORTS
     execution: Execution = Execution()
     cleanup: Cleanup = Cleanup()
+    attachment_capture: AttachmentCapture = AttachmentCapture()
     environment: EnvironmentConfig = EnvironmentConfig()
     delivery: DeliveryConfig = DeliveryConfig()
     project_profile: Literal["auto", "python", "node", "python-node", "react", "next", "python-react", "python-next"] = "auto"
@@ -275,7 +283,7 @@ def validate_extra_args(args: list[str]) -> None:
         key = arg.split("=", 1)[0]
         if key in permitted_values:
             value = arg.partition("=")[2] if "=" in arg else args[i + 1] if i + 1 < len(args) else ""
-            if not value.strip():
+            if not value.strip() or "=" not in arg and value.startswith("-"):
                 raise ConfigurationError("Unsupported provider argument or setting (value omitted)")
             i += 1 if "=" in arg else 2
             if i > len(args):

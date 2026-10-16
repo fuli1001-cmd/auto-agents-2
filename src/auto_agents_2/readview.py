@@ -18,7 +18,9 @@ SENSITIVE_FILES = {".netrc", ".npmrc", ".pypirc", ".git-credentials"}
 
 
 def sensitive(path: Path, extra=()) -> bool:
-    return (any(fnmatch.fnmatchcase(path.as_posix(), p) or path.as_posix().startswith(p.rstrip("/") + "/") for p in extra)
+    # A protected directory protects its complete subtree, including glob matches.
+    paths = (path, *path.parents[:-1])
+    return (any(fnmatch.fnmatchcase(candidate.as_posix(), pattern.rstrip("/")) for candidate in paths for pattern in extra)
             or bool(set(path.parts) & SENSITIVE_DIRS) or path.name in SENSITIVE_FILES or path.name == ".env"
             or path.name.startswith(".env.") and path.name != ".env.example")
 
@@ -64,6 +66,8 @@ def sensitive_values(workspace: Path, extra=()) -> list[str]:
     def strings(value, protected=False):
         if isinstance(value, str) and protected and value:
             values.add(value)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool) and protected:
+            values.update((str(value), json.dumps(value)))
         elif isinstance(value, dict):
             for key, child in value.items():
                 strings(child, protected or bool(SECRET.search(key)))

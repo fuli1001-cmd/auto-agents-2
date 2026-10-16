@@ -168,7 +168,14 @@ async def execute(project, requirements=None, provider=None, run_id=None):
         if display.done() and not display.cancelled() and display.exception() is not None:
             display.exception()  # Already propagated by supervised_start.
         else:
-            await display
+            original = sys.exception()
+            try:
+                await display
+            except BaseException as exc:
+                if original is not None:
+                    original.add_note("Progress display shutdown failed: " + type(exc).__name__)
+                else:
+                    raise AA2Error("Progress display failed during shutdown") from exc
     if result:
         summary = store.usage_summary(result["id"])
         stamp = time.strftime("%H:%M:%S")

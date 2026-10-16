@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .builds import verification_commands
+from .collection import policy_identity
 from .design import PROTOTYPE_BROWSER_VERSION
 from .errors import AA2Error
 from .evidence import assess_observation
@@ -43,8 +44,27 @@ class RecoveryController:
         self.store.event(rid, "recovery.requested", {"failure": failure.id, "owner": failure.origin_id,
                                                      "component": failure.component, "kind": failure.kind})
 
+    async def _capture_retry(self, rid, checks, work):
+        failed = [row for row in checks if "evidence_collection_failed" in row.get("failure_reasons", [])]
+        if not failed:
+            return False
+        identity = digest(failed)
+        key = "evidence/capture-wait/" + identity
+        while (all(row.get("capture_policy_hash") == policy_identity(self.store.root) for row in failed)
+               and all(row.get("source_hash") == tree_hash(work) for row in failed)):
+            count = self.store.get(rid, key, 0)
+            await self.engine._ask(rid, f"evidence-capture/{identity}/{count}",
+                "测试附件未能完整归档，验收暂未通过。候选代码、JUnit 和原始附件已保留。"
+                "请调整 attachment_capture 上限或测试录制配置后继续；相同配置不会重复执行测试，也不会自动修改业务代码。",
+                identity)
+            self.store.checkpoint(rid, key, count + 1)
+        return True
+
     async def delivery_decision(self, rid, work, feedback, scopes, *, observation=None):
         """Same fact policy, with delivery journal authority and its existing scope/budget."""
+        capture_rows = feedback.get("checks", feedback.get("runtime_failure", {}).get("checks", [])
+            if isinstance(feedback.get("runtime_failure"), dict) else [])
+        capture_retry = await self._capture_retry(rid, capture_rows, work)
         original_observation = observation
         observation = digest([observation or tree_hash(work), feedback])
         key = "recovery/delivery/" + observation
@@ -73,7 +93,8 @@ class RecoveryController:
                               if isinstance(feedback.get("runtime_failure"), dict) else [])
         recheck_identity = digest([tree_hash(work), sorted(scopes),
             [{k: row.get(k) for k in ("argv", "cwd", "command_hash", "environment_hash", "input_hash",
-                                      "runtime_config_hash", "checker_version")} for row in checks]])
+                                      "runtime_config_hash", "checker_version", "capture_policy_hash")} for row in checks],
+            policy_identity(self.store.root)])
         recheck_key = "recovery/delivery-rechecks/" + recheck_identity
         already_rechecked = bool(self.store.get(rid, recheck_key))
         failure = FailureRecord.create(kind=kind, component="delivery", origin_id="delivery", step="delivery",
@@ -81,6 +102,8 @@ class RecoveryController:
         count_key = "recovery/budgets/diagnosis/delivery"
         count = self.store.get(rid, count_key, self.store.get(rid, "recovery/diagnosis/" + failure.id, {"round": 0}))
         decision = adjudicate(failure, attempts=max(count["round"], int(bool(saved)), int(already_rechecked)))
+        if capture_retry:
+            decision = decision.model_copy(update={"action": "recheck", "reason": "Attachment capture configuration changed"})
         if feedback.get("conflicts"):
             decision = decision.model_copy(update={"action": "repair", "reason": "Repair recorded merge conflicts within controller scope"})
         if decision.action == "diagnose":
@@ -172,6 +195,9 @@ class RecoveryController:
             work = integration
         if not work.is_dir():
             raise AA2Error("Recovery workspace missing; restore the recorded worktree before continuing")
+        capture_retry = await self._capture_retry(rid, failure.evidence.get("checks", []), work)
+        if capture_retry:
+            active.pop("decision", None)
         if failure.component == "legacy_adapter" and failure.task_id and not active.get("evidence_reconciled"):
             task = next(t for t in plan.tasks if t.id == failure.task_id)
             commands = verification_commands(task.checks, work, plan.runtime_prepare)
@@ -213,6 +239,8 @@ class RecoveryController:
             decision = RecoveryDecision.model_validate(active["decision"])
         else:
             decision = adjudicate(failure, attempts=active["attempt"] - 1)
+            if capture_retry:
+                decision = decision.model_copy(update={"action": "recheck", "reason": "Attachment capture configuration changed"})
             if decision.action == "diagnose":
                 project = engine.contexts.build(work)
                 failure = failure.model_copy(update={"evidence_refs": evidence_references(failure, project)})
@@ -256,8 +284,9 @@ class RecoveryController:
                     return
             if decision.action == "recheck":
                 identity = digest([failure.origin_id, tree_hash(work), failure.evidence.get("commands"),
-                    [{k: c.get(k) for k in ("cwd", "argv", "environment_hash", "input_hash", "runtime_config_hash", "checker_version")}
-                     for c in failure.evidence.get("checks", [])]])
+                    [{k: c.get(k) for k in ("cwd", "argv", "environment_hash", "input_hash", "runtime_config_hash", "checker_version", "capture_policy_hash")}
+                     for c in failure.evidence.get("checks", [])],
+                    policy_identity(self.store.root)])
                 recheck_key = "recovery/rechecks/" + identity
                 reservation = {"failure": failure.id, "attempt": active["attempt"]}
                 previous = self.store.get(rid, recheck_key)
@@ -375,6 +404,17 @@ class RecoveryController:
         if baseline is None:
             baseline = {"source_hash": tree_hash(work), "base_commit": git(work, "rev-parse", "HEAD")}
             self.store.checkpoint(rid, baseline_key, baseline)
+        # Intent precedes every controller-owned Git mutation. Reconcile it before
+        # comparing the baseline, including interruption immediately after commit.
+        snapshot_key = "recovery/patch-snapshots/" + identity
+        saved_snapshots = self.store.get(rid, snapshot_key, {})
+        for snapshot in saved_snapshots.values():
+            path = Path(snapshot["workspace"])
+            if not snapshot.get("commit"):
+                snapshot["commit"] = engine.workspaces.finish_checkpoint(path, snapshot["intent"])
+            if path.resolve() == work.resolve():
+                baseline["base_commit"] = snapshot["commit"]
+        self.store.checkpoints(rid, {snapshot_key: saved_snapshots, baseline_key: baseline})
         await engine._grant_replan(rid, pending)
         revision = self.store.get(rid, "plan_revision/current", {}).get("revision", 1)
         def unchanged(proposal):
@@ -388,7 +428,21 @@ class RecoveryController:
             PlanPatch, work, rid, "recovery/patch/" + identity, fresh=True)
         unchanged({"patch": patch.model_dump()})
         try:
-            candidate, affected, reopen = apply_patch(plan, patch, revision, {failure.id}, self.store.get(rid, "task_origins", {}))
+            coverage_verified = False
+            if plan.mode == "verification_only":
+                from .models import IntakeResult
+                from .requirements import validate_coverage
+                from .verification import passed
+                assessment = IntakeResult.model_validate(self.store.get(rid, "clarify"))
+                checks = assessment.verification or engine.config.load().verification
+                environment = await engine._environment(work, rid, plan)
+                evidence = await engine.verifier.run(checks, work, environment) if checks else []
+                engine._replan_checks(rid, "coverage", checks, evidence, work, environment)
+                satisfied, _ = validate_coverage(assessment, work)
+                coverage_verified = satisfied and bool(evidence) and passed(evidence)
+                self.store.checkpoint(rid, "coverage_checks", [r.model_dump() for r in evidence])
+            candidate, affected, reopen = apply_patch(plan, patch, revision, {failure.id},
+                self.store.get(rid, "task_origins", {}), coverage_verified=coverage_verified)
             for task in candidate.tasks:
                 verification_commands(task.checks, work, candidate.runtime_prepare)
             verification_commands([*candidate.final_checks, *candidate.runtime_probes], work, candidate.runtime_prepare, prepare_all=True)
@@ -403,10 +457,18 @@ class RecoveryController:
                 if saved.get("source_hash") and tree_hash(path) != saved["source_hash"]:
                     raise AA2Error("Task source changed before plan amendment; preserve user changes and reconcile first")
                 ref = f"refs/aa2/{rid}/plan-patches/{revision}/{task_id}"
-                snapshots[task_id] = {"workspace": str(path), "ref": ref, "source_hash": tree_hash(path),
-                    "commit": engine.workspaces.checkpoint(path, ref, "aa2: preserve candidate before plan amendment")}
+                snapshot = saved_snapshots.get(task_id)
+                if snapshot is None:
+                    snapshot = {"workspace": str(path), "ref": ref, "source_hash": tree_hash(path),
+                                "intent": engine.workspaces.checkpoint_intent(path, ref)}
+                    saved_snapshots[task_id] = snapshot
+                    self.store.checkpoint(rid, snapshot_key, saved_snapshots)
+                if not snapshot.get("commit"):
+                    snapshot["commit"] = engine.workspaces.finish_checkpoint(path, snapshot["intent"])
+                snapshots[task_id] = snapshot
                 if path.resolve() == work.resolve():
-                    baseline["base_commit"] = snapshots[task_id]["commit"]
+                    baseline["base_commit"] = snapshot["commit"]
+                self.store.checkpoints(rid, {snapshot_key: saved_snapshots, baseline_key: baseline})
                 candidates[task_id] = {"state": saved, "project": engine.contexts.build(path)}
         review = await engine._invoke("review", {"review_kind": "plan_patch", "previous_plan": plan.model_dump(),
             "patch": patch.model_dump(), "plan": candidate.model_dump(), "failure": failure.model_dump(),

@@ -7,7 +7,7 @@ from contextvars import ContextVar
 
 from .util import digest
 
-LOG_KINDS = frozenset({"check_log", "dependency_log"})
+LOG_KINDS = frozenset({"check_log", "dependency_log", "test_diagnostic"})
 current_diagnostics = ContextVar("aa2_diagnostic_operation", default=None)
 
 

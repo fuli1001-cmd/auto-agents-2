@@ -80,11 +80,16 @@ def main():
                 os.killpg(os.getpid(), signal.SIGTERM)
         except OSError:
             pass
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline and child is not None and child.returncode is None:
-            reap()
-            time.sleep(0.02)
         children_file = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                reap()
+                if not children_file.read_text().split():
+                    break
+            except OSError:
+                pass
+            time.sleep(0.02)
         # No fixed pass limit: an inspection/permission failure keeps the anchor
         # and durable record alive. Other children must still be cleaned up.
         while True:

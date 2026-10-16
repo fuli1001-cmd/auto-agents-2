@@ -55,11 +55,18 @@ def normalized(command: Command, workspace: Path) -> Command:
 def generated_entry(path: Path, workspace: Path):
     # Next's runtime cache and tracing are mutable; server code and build manifests
     # remain part of the immutable output identity.
-    omitted = {path / "cache", path / "trace"} if path.name == ".next" else set()
+    omitted = {path / "cache", path / "trace", path / "server/route-cache"} if path.name == ".next" else set()
     return input_entry(path, workspace, excluded=set(), omitted=omitted)
 
 
 def output_hashes(command: Command, workspace: Path) -> dict[str, str]:
+    try:
+        return _output_hashes(command, workspace)
+    except OSError as exc:
+        raise VerificationPreparationError("Build outputs cannot be inspected or hashed") from exc
+
+
+def _output_hashes(command: Command, workspace: Path) -> dict[str, str]:
     result = {}
     for output in command.outputs:
         path = contained(workspace, output)

@@ -8,19 +8,55 @@ from pathlib import Path
 
 
 @contextmanager
-def directory_fd(path: Path):
+def directory_fd(path: Path, *, create=False):
     path = path.absolute()
     fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         for part in path.parts[1:]:
             if part == "..":
                 raise ValueError("Parent traversal is not a safe directory")
+            if create:
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=fd)
+                    os.fsync(fd)
+                except FileExistsError:
+                    pass
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = child
         yield fd
     finally:
         os.close(fd)
+
+
+def regular_exists(parent, name):
+    try:
+        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("Expected an owned regular file")
+    return True
+
+
+def write_regular(parent, name, value):
+    """Atomically replace a leaf through an already validated parent descriptor."""
+    from .util import identifier
+    regular_exists(parent, name)
+    temporary = identifier(".write")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
+        os.fsync(parent)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=parent)
+        except FileNotFoundError:
+            pass
 
 
 def regular_file(parent, name):

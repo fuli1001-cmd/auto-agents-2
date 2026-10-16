@@ -63,14 +63,18 @@ class ResourceManager:
         return []
 
     def process_paths(self):
+        from .process_records import read_record, valid_path
         paths = []
         for record in (self.store.root / "processes").glob("*.json"):
             try:
-                data = json.loads(record.read_text())
-                if data.get("status") != "cleaned":
-                    paths.extend(Path(value) for value in data.get("paths", [data.get("cwd", str(self.store.root))]))
-            except (OSError, ValueError, TypeError):
-                paths.append(self.store.root)  # Unreadable ownership is not absence.
+                data = read_record(record)
+                if data.get("version") == 3:
+                    if data["status"] != "cleaned":
+                        paths.extend(Path(value) for value in data["paths"])
+                else:
+                    paths.append(Path(data["cwd"]) if valid_path(data.get("cwd")) else self.store.root)
+            except PolicyViolation:
+                paths.append(self.store.root)
         return paths
 
     def protect_pending_deliveries(self):

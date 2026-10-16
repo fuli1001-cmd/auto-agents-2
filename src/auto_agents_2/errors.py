@@ -64,3 +64,17 @@ class BusyProject(AA2Error):
 
 class Waiting(AA2Error):
     code = "WAITING_USER"
+
+
+class PostCommitError(AA2Error):
+    """A durable provider result exists; only reconciliation is permitted."""
+
+    code = "PROVIDER_RESULT_COMMITTED"
+
+
+class CollectionError(AA2Error):
+    code = "EVIDENCE_COLLECTION_FAILED"
+
+    def __init__(self, message, details=None):
+        super().__init__(message)
+        self.details = details or {}

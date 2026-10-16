@@ -9,11 +9,13 @@ import tempfile
 from pathlib import Path
 
 from manual_frontend import fixture
+from manual_support import finalize
 
 from auto_agents_2.config import ConfigStore
+from auto_agents_2.design import inspect_application
 from auto_agents_2.engine import WorkflowEngine
+from auto_agents_2.errors import PrototypeBrowserError
 from auto_agents_2.models import Command, PlanResult, TaskSpec
-from auto_agents_2.resources import ResourceManager
 from auto_agents_2.util import write_json
 from auto_agents_2.verification import passed
 from auto_agents_2.workspace import git, tree_hash
@@ -79,25 +81,57 @@ async def smoke(root, framework):
         after_gc = await workflow.verifier.run([probe], project, environment)
         if not (passed(after_gc)):
             raise RuntimeError('Manual verification failed')
+        visuals = []
+        if preview is not None:
+            visuals = await inspect_application(preview, project, workflow.store.root / "visuals/after-gc",
+                environment, workflow.sandbox, workflow.store.root)
+            if not visuals or any(row.get("errors") for row in visuals):
+                raise RuntimeError("Production preview failed after GC")
+        missing_build_rejected = None
+        if preview is not None:
+            import shutil
+            build = project / (".next" if framework == "next" else "dist")
+            retained = root / (framework + "-hidden-build")
+            build.rename(retained)
+            try:
+                try:
+                    await inspect_application(preview, project, workflow.store.root / "visuals/missing-build",
+                        environment, workflow.sandbox, workflow.store.root)
+                except PrototypeBrowserError:
+                    missing_build_rejected = True
+                else:
+                    raise RuntimeError("Preview incorrectly accepted a missing production build")
+            finally:
+                if build.exists():
+                    shutil.rmtree(build)
+                retained.rename(build)
         receipt = workflow.store.get(rid, "delivery/receipt")
-        write_json(root / f"{framework}-result.json", {"receipt": receipt, "after_gc": [c.model_dump() for c in after_gc]})
+        write_json(root / f"{framework}-result.json", {"receipt": receipt, "after_gc": [c.model_dump() for c in after_gc], "browser_after_gc": visuals, "missing_build_rejected": missing_build_rejected})
         print(f"Passed {framework}: primary source, frozen dependencies, runtime probes, GC pins", flush=True)
     except BaseException as exc:
-        if workflow.store.run(rid)["status"] != "SUCCEEDED":
-            workflow.store.update(rid, status="CANCELLED", outcome="SMOKE_FAILED")
-        else:
-            workflow.store.checkpoint(rid, "smoke/result", {"passed": False, "error_type": type(exc).__name__})
+        try:
+            if workflow.store.run(rid)["status"] != "SUCCEEDED":
+                workflow.store.update(rid, status="CANCELLED", outcome="SMOKE_FAILED")
+            else:
+                workflow.store.checkpoint(rid, "smoke/result", {"passed": False, "error_type": type(exc).__name__})
+        except Exception as secondary:
+            exc.add_note("Failure status could not be saved: " + type(secondary).__name__)
         raise
     finally:
         # Explicit teardown of this script's disposable fixture, not production GC behaviour.
-        with workflow.store.connect() as db:
-            db.execute("DELETE FROM delivery_pins")
-        resources = ResourceManager(workflow.store, cfg.load().cleanup)
-        resources.release_run(rid)
-        resources.collect()
-        import shutil
-        for name in ("node_modules", ".next", "dist"):
-            shutil.rmtree(project / name, ignore_errors=True)
+        def unpin():
+            with workflow.store.connect() as db:
+                db.execute("DELETE FROM delivery_pins")
+        def remove(path):
+            import shutil
+            resources = workflow.resources
+            if any(path == held or path.is_relative_to(held) or held.is_relative_to(path)
+                   for held in resources.process_paths()):
+                raise RuntimeError("Live cleanup record pins fixture outputs")
+            if path.exists():
+                shutil.rmtree(path)
+        finalize(unpin, lambda: workflow.resources.release_run(rid), lambda: workflow.resources.collect(),
+                 *(lambda name=name: remove(project / name) for name in ("node_modules", ".next", "dist")))
 
 
 async def main():

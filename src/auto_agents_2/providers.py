@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from typing import Protocol
@@ -13,7 +14,7 @@ from .artifacts import ArtifactStore
 from .capabilities import ReadChallengeResult, challenge_files, confirm_read
 from .config import ConfigStore
 from .diagnostics import references
-from .errors import ConfigurationError, ProviderError
+from .errors import ConfigurationError, PostCommitError, ProviderError
 from .evidence import invocation_identity
 from .materials import bundle
 from .models import Usage, strict_schema
@@ -85,7 +86,7 @@ class EventDecoder:
                     message = item.get("text", "")
                     if not isinstance(message, str):
                         raise ProviderError("Malformed provider message")
-                    self.messages.append(message)
+                    self.messages[:] = [message]
             if typ == "turn.completed":
                 u = mapping(event.get("usage", {}))
                 incoming, outgoing = int(u.get("input_tokens", 0)), int(u.get("output_tokens", 0))
@@ -104,7 +105,7 @@ class EventDecoder:
                 result = mapping(event.get("result", event))
                 self.session = string(result.get("conversation_id", self.session))
                 response = result.get("structured_output", result.get("response", ""))
-                self.messages.append(json.dumps(response) if isinstance(response, dict) else str(response))
+                self.messages[:] = [json.dumps(response) if isinstance(response, dict) else str(response)]
                 u = mapping(result.get("usage", {}))
                 # Result counters are cumulative within this invocation's stream.
                 self.usage = Usage(input_tokens=int(u.get("input_tokens", 0)),
@@ -157,6 +158,16 @@ class ProviderRouter:
         return digest(identities)
 
     async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
+        previous = self.store.get(run_id, f"provider-result/{operation}")
+        try:
+            return await self._invoke_candidates(stage, context, schema, workspace, run_id, operation, fresh)
+        except Exception as exc:
+            completed = self.store.get(run_id, f"provider-result/{operation}")
+            if completed and completed != previous and not isinstance(exc, PostCommitError):
+                raise PostCommitError("Provider result saved; resume reconciles completion without redispatch") from exc
+            raise
+
+    async def _invoke_candidates(self, stage, context, schema, workspace, run_id, operation, fresh=False):
         cfg = self.config.load()
         candidates = [cfg.active_provider] + [n for n in cfg.providers if n != cfg.active_provider]
         errors = []
@@ -171,6 +182,7 @@ class ProviderRouter:
                 if state["failures"] >= cfg.execution.infra_retries + 1 + state["grant"]:
                     errors.append(f"{candidate}: persisted retry budget exhausted")
                     break
+                previous = self.store.get(run_id, f"provider-result/{operation}")
                 try:
                     effective = self.effective(stage, candidate)
                     state["pending"] = True
@@ -188,11 +200,17 @@ class ProviderRouter:
                             safe_event(self.store, run_id, "provider.preference_pending", {"provider": candidate})
                     return result
                 except ConfigurationError as exc:
+                    completed = self.store.get(run_id, f"provider-result/{operation}")
+                    if completed and completed != previous:
+                        raise PostCommitError("Provider result saved; reconcile completion without failover") from exc
                     state["pending"] = False
                     self.store.checkpoint(run_id, key, state)
                     errors.append(f"{candidate}: {exc}")
                     break
                 except ProviderError as exc:
+                    completed = self.store.get(run_id, f"provider-result/{operation}")
+                    if completed and completed != previous:
+                        raise PostCommitError("Provider result saved; reconcile completion without failover") from exc
                     state.update(pending=False, failures=state["failures"] + 1)
                     self.store.checkpoint(run_id, key, state)
                     errors.append(f"{candidate}: {exc}")
@@ -204,11 +222,22 @@ class ProviderRouter:
         raise ProviderError("; ".join(errors)[-3000:])
 
     async def _call(self, eff, stage, context, schema, workspace, run_id, operation, fresh):
+        previous = self.store.get(run_id, f"provider-result/{operation}")
         try:
             with ArtifactStore(self.store.root).reading(context, run_id):
                 return await self._call_with_materials(eff, stage, context, schema, workspace, run_id, operation, fresh)
-        except (OSError, ValueError) as exc:
-            raise ProviderError("Required evidence material is unavailable or invalid") from exc
+        except BaseException as exc:
+            # Re-read the transaction receipt: a commit may succeed before its caller
+            # observes an I/O error. Such a result must never enter provider failover.
+            completed = self.store.get(run_id, f"provider-result/{operation}")
+            if completed and completed != previous:
+                if isinstance(exc, asyncio.CancelledError):
+                    exc.add_note("Provider result committed; resume reconciles cleanup without redispatch")
+                    raise
+                raise PostCommitError("Provider result saved; resume must reconcile cleanup without redispatch") from exc
+            if isinstance(exc, (OSError, ValueError)):
+                raise ProviderError("Required evidence material is unavailable or invalid") from exc
+            raise
 
     async def _call_with_materials(self, eff, stage, context, schema, workspace, run_id, operation, fresh):
         if eff["kind"] not in self.transports:
@@ -433,7 +462,7 @@ class ProviderRouter:
                 artifact = ArtifactStore(self.store.root).put(result.model_dump(mode="json"), stage)
                 self.store.checkpoints(run_id, {
                     f"provider-result/{operation}": {"attempt": aid, "artifact": artifact, "usage": decoder.usage.model_dump()},
-                    f"invocation/{operation}": {"identity": input_identity, "result": result.model_dump(mode="json"), "artifact": artifact,
+                    f"invocation/{operation}": {"attempt": aid, "identity": input_identity, "result": result.model_dump(mode="json"), "artifact": artifact,
                                                 "cleanup_record": str(process.record)},
                 }, usage=(eff["provider"], aid, decoder.usage.model_dump()))
                 outcome = "success"
@@ -445,26 +474,20 @@ class ProviderRouter:
                 outcome = "error"
                 raise
             finally:
-                cleanup_error = None
-                if process:
-                    try:
-                        await self.sandbox.stop(process)
-                    except BaseException as exc:
-                        cleanup_error = exc
-                self.store.add_usage(run_id, eff["provider"], aid, "invocation", decoder.usage.model_dump())
-                self.store.event(run_id, "agent.finished", {"attempt": aid, "complete": decoder.finished,
-                                                           "outcome": outcome, "last_output": last_output,
-                                                           "diagnostic": diagnostic_summary(decoder.error or "".join(errors))
-                                                           if outcome == "error" else ""})
-                if cleanup_error is not None:
-                    raise cleanup_error
+                from .cleanup import finalize_async
+                await finalize_async(
+                    *([lambda: self.sandbox.stop(process)] if process else []),
+                    lambda: self.store.add_usage(run_id, eff["provider"], aid, "invocation", decoder.usage.model_dump()),
+                    lambda: self.store.event(run_id, "agent.finished", {"attempt": aid, "complete": decoder.finished,
+                        "outcome": outcome, "last_output": last_output,
+                        "diagnostic": diagnostic_summary(decoder.error or "".join(errors)) if outcome == "error" else ""}))
                 # Candidate responses have been consumed; persistent sessions and usage survive.
         except OSError as exc:
             raise ProviderError("Provider material preparation failed") from exc
         finally:
             if resource_id is not None:
-                resource_manager.release(resource_id)
-                resource_manager.collect()
+                from .cleanup import finalize_async
+                await finalize_async(lambda: resource_manager.release(resource_id), resource_manager.collect)
 
     @staticmethod
     def _has_images(value):
@@ -503,7 +526,9 @@ class ProviderRouter:
         transport = self.transports[eff["kind"]]
         native = transport.native_home(env)
         mirror = self.store.root / "sessions" / run_id / digest(eff["provider"])[:16] / digest(operation)[:20]
-        mirror.mkdir(parents=True, exist_ok=True)
+        from .safe_files import directory_fd, regular_exists, write_regular
+        with directory_fd(mirror, create=True):
+            pass
         ResourceManager(self.store, self.config.load().cleanup).register(mirror, "session", run_id)
         # Remember the native source digest independently of provider-written
         # mirror refreshes. A changed native source replaces an old credential.
@@ -518,12 +543,20 @@ class ProviderRouter:
                     relative = file.relative_to(native).as_posix()
                     raw = file.read_bytes()
                     source_hash = digest(raw)
-                    if not dest.exists() or relative in sources and sources[relative] != source_hash:
-                        atomic_write(dest, raw)
-                    elif relative not in sources and file.name != "auth.json":
-                        atomic_write(dest, raw)
+                    with directory_fd(dest.parent, create=True) as parent:
+                        exists = regular_exists(parent, dest.name)
+                        if (not exists or relative in sources and sources[relative] != source_hash
+                                or relative not in sources and file.name != "auth.json"):
+                            write_regular(parent, dest.name, raw)
                     updated[relative] = source_hash
         for relative in sources.keys() - updated.keys():
-            (mirror / relative).unlink(missing_ok=True)
+            dest = mirror / relative
+            try:
+                with directory_fd(dest.parent) as parent:
+                    if regular_exists(parent, dest.name):
+                        os.unlink(dest.name, dir_fd=parent)
+                        os.fsync(parent)
+            except FileNotFoundError:
+                pass
         self.store.checkpoint(run_id, source_key, updated)
         return [(mirror, native)] if native.exists() else []

@@ -15,6 +15,7 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 import httpx
 
+from .cleanup import finalize_async
 from .errors import AA2Error, PrototypeBrowserError
 from .evidence import NODE_RUNTIME_CACHES
 from .network import OWNERSHIP_FAILURE, PreviewProxy, preview_owner
@@ -285,34 +286,36 @@ async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[d
                         results.append(row)
                         context, page = None, None
                         try:
-                            context = await preview_context(browser, server.url, errors, width, height)
-                            page = await context.new_page()
-                            page.on("pageerror", lambda error: errors.append(scrub_text(str(error))))
-                            response = await page.goto(server.url.rstrip("/") + resolved, wait_until="networkidle")
-                            row["status"] = response.status if response else 0
-                            await exercise(page, actions, route, completed)
-                        except Exception as exc:
-                            errors.append(scrub_text(str(exc)))
-                            sequence = [a for a in actions if a.route == route]
-                            if row["status"] and len(completed) < len(sequence):
-                                row["failed_action"] = sequence[len(completed)].model_dump()
-                        image = output / f"route-{digest(route)[:16]}-{width}.png"
-                        try:
-                            if page is not None:
-                                await page.screenshot(path=str(image), full_page=True)
-                            else:
-                                raise AA2Error("Prototype page creation failed")
-                            row["screenshot"] = str(image)
-                        except Exception as exc:
-                            errors.append(scrub_text(str(exc)))
-                        if activity:
-                            activity.output()
-                            activity.progress(len(results), len(routes) * 2)
-                        if context is not None:
                             try:
-                                await context.close()
+                                context = await preview_context(browser, server.url, errors, width, height)
+                                page = await context.new_page()
+                                page.on("pageerror", lambda error: errors.append(scrub_text(str(error))))
+                                response = await page.goto(server.url.rstrip("/") + resolved, wait_until="networkidle")
+                                row["status"] = response.status if response else 0
+                                await exercise(page, actions, route, completed)
                             except Exception as exc:
-                                errors.append("Browser context cleanup failed: " + scrub_text(str(exc)))
+                                errors.append(scrub_text(str(exc)))
+                                sequence = [a for a in actions if a.route == route]
+                                if row["status"] and len(completed) < len(sequence):
+                                    row["failed_action"] = sequence[len(completed)].model_dump()
+                            image = output / f"route-{digest(route)[:16]}-{width}.png"
+                            try:
+                                if page is not None:
+                                    await page.screenshot(path=str(image), full_page=True)
+                                else:
+                                    raise AA2Error("Prototype page creation failed")
+                                row["screenshot"] = str(image)
+                            except Exception as exc:
+                                errors.append(scrub_text(str(exc)))
+                            if activity:
+                                activity.output()
+                                activity.progress(len(results), len(routes) * 2)
+                        finally:
+                            if context is not None:
+                                try:
+                                    await finalize_async(context.close, original=sys.exception())
+                                except Exception as exc:
+                                    errors.append("Browser context cleanup failed: " + scrub_text(str(exc)))
                         if errors or not 200 <= row["status"] < 400:
                             raise PrototypeBrowserError("Prototype browser checks failed: " + json.dumps(row), results)
             except PrototypeBrowserError:

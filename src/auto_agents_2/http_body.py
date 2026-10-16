@@ -1,4 +1,4 @@
-"""Bound both wire bytes and decoder output before allocating document bodies."""
+"""Bound wire input and decoded output, including ambiguous HTTP deflate streams."""
 import zlib
 
 from .errors import AA2Error
@@ -11,45 +11,40 @@ async def read_body(response, limit=MAX_BODY):
     encoding = response.headers.get("content-encoding", "identity").strip().lower()
     if encoding not in {"identity", "gzip", "deflate"}:
         raise AA2Error("Unsupported document content encoding")
-    data = bytearray()
-    wire_size = 0
-    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS) if encoding == "gzip" else None
-    prefix = b""
-
-    def decode(chunk):
-        nonlocal decoder, prefix
-        if encoding == "identity":
-            output = chunk
-        else:
-            if decoder is None:
-                prefix += chunk
-                if len(prefix) < 2:
-                    return
-                wrapped = prefix[0] & 15 == 8 and int.from_bytes(prefix[:2], "big") % 31 == 0
-                decoder = zlib.decompressobj(zlib.MAX_WBITS if wrapped else -zlib.MAX_WBITS)
-                chunk, prefix = prefix, b""
-            try:
-                output = decoder.decompress(chunk, limit - len(data) + 1)
-            except zlib.error as exc:
-                raise AA2Error("Invalid compressed document") from exc
-            if decoder.unconsumed_tail or decoder.unused_data:
-                raise AA2Error("Compressed document exceeds size limit or contains trailing data")
-        if len(output) > limit - len(data):
-            raise AA2Error("Document exceeds 4 MiB acquisition limit")
-        data.extend(output)
-
-    # A preloaded identity response is useful for in-process transports. Encoded
-    # responses must retain their raw stream, otherwise the allocation already happened.
+    wire = bytearray()
     if response.is_stream_consumed:
         if encoding != "identity":
             raise AA2Error("Encoded document requires a raw streaming response")
-        decode(response.content)
+        if len(response.content) > limit:
+            raise AA2Error("Document exceeds acquisition limit")
+        wire.extend(response.content)
     else:
         async for chunk in response.aiter_raw(chunk_size=65536):
-            wire_size += len(chunk)
-            if wire_size > limit:
-                raise AA2Error("Encoded document exceeds 4 MiB acquisition limit")
-            decode(chunk)
-    if encoding != "identity" and (decoder is None or not decoder.eof):
+            if len(chunk) > limit - len(wire):
+                raise AA2Error("Encoded document exceeds acquisition limit")
+            wire.extend(chunk)
+    if encoding == "identity":
+        return bytes(wire)
+    # Deflate has two deployed formats whose first bytes can coincide. Buffer only
+    # bounded raw input; never publish any output from a failed decoding attempt.
+    formats = (16 + zlib.MAX_WBITS,) if encoding == "gzip" else (zlib.MAX_WBITS, -zlib.MAX_WBITS)
+    failures = set()
+    for bits in formats:
+        decoder = zlib.decompressobj(bits)
+        try:
+            output = decoder.decompress(wire, limit + 1)
+        except zlib.error:
+            continue
+        if len(output) > limit or decoder.unconsumed_tail:
+            failures.add("limit")
+        elif decoder.unused_data:
+            failures.add("trailing")
+        elif not decoder.eof:
+            failures.add("truncated")
+        else:
+            return output
+    if "limit" in failures:
+        raise AA2Error("Decoded document exceeds acquisition limit")
+    if "truncated" in failures:
         raise AA2Error("Truncated compressed document")
-    return bytes(data)
+    raise AA2Error("Invalid compressed document or trailing data")

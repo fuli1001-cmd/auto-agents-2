@@ -1032,14 +1032,16 @@ class WorkflowEngine:
             raise Replan("clarify", "Resolve unknown coverage using additional user evidence")
         context["specification"] = assessment
         verification_only = False
-        if all_satisfied and not self.store.get(rid, "recovery/implementation_pending"):
+        retained_verification = self.store.get(rid, "plan", {}).get("mode") == "verification_only"
+        if all_satisfied and (retained_verification or not self.store.get(rid, "recovery/implementation_pending")):
             checks = result.verification or self.config.load().verification
             if not checks:
                 await self._ask(rid, "coverage-evidence", "已有实现缺少可执行核验证据。请在 verification 配置中补充检查命令后回复 continue。", source_hash)
                 checks = self.config.load().verification
                 if not checks:
                     raise AA2Error("不能仅凭语义判断宣称需求已经实现")
-            environment = await self._environment(work, rid)
+            environment = await self._environment(work, rid,
+                PlanResult.model_validate(self.store.get(rid, "plan")) if retained_verification else None)
             evidence = await self.verifier.run(checks, work, environment)
             self._replan_checks(rid, "coverage", checks, evidence, work, environment)
             self.store.checkpoint(rid, "coverage_checks", [r.model_dump() for r in evidence])
@@ -1047,7 +1049,7 @@ class WorkflowEngine:
                 previous_contract = next((r["id"] for r in self.store.successful()
                     if r["data"].get("verified_source_hash") == source_hash and self.store.get(r["id"], "prototype")
                     and self.store.get(r["id"], "plan", {}).get("preview")), None)
-                if not result.frontend or previous_contract:
+                if not retained_verification and (not result.frontend or previous_contract):
                     return await self._finish_no_changes(rid, work, previous_contract or "current-baseline")
                 verification_only = True
                 context["planning_mode"] = "verification_only"

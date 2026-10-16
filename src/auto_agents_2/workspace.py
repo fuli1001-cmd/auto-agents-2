@@ -27,10 +27,21 @@ PROTECTED_NAMES = {"AGENTS.md", "CLAUDE.md", "GEMINI.md", "conftest.py", "pytest
 _git_environment = ContextVar("git_environment", default=None)
 
 
+def git_environment(env=None):
+    base = env if env is not None else _git_environment.get() or os.environ
+    variables = {key: value for key, value in base.items() if not key.startswith("GIT_")}
+    variables.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0")
+    if env is not None:
+        # Only explicit controller settings may override isolation.
+        for key in ("GIT_INDEX_FILE", "GIT_AUTHOR_DATE", "GIT_COMMITTER_DATE"):
+            if key in env:
+                variables[key] = env[key]
+    return variables
+
+
 @contextmanager
 def isolated_git():
-    variables = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    variables.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    variables = git_environment()
     token = _git_environment.set(variables)
     try:
         yield variables
@@ -39,11 +50,11 @@ def isolated_git():
 
 
 def git(root: Path, *args: str, input: str | None = None, env: dict | None = None) -> str:
-    result = subprocess.run(["git", "-C", str(root), *args], input=os.fsencode(input) if input is not None else None,
-                            capture_output=True, env=env if env is not None else _git_environment.get(), timeout=120)
+    result = subprocess.run(["git", "--literal-pathspecs", "-C", str(root), *args],
+                            input=os.fsencode(input) if input is not None else None,
+                            capture_output=True, env=git_environment(env), timeout=120)
     if result.returncode:
         raise AA2Error(os.fsdecode(result.stderr).strip() or "Git operation failed")
-    # NUL-delimited names and leading/trailing pathname whitespace are data.
     output = os.fsdecode(result.stdout)
     return output if "-z" in args else output.removesuffix("\n")
 
@@ -312,7 +323,7 @@ class WorkspaceManager:
 
     def _checkpoint_tree(self, path, index, flags=""):
         with tempfile.TemporaryDirectory(prefix="aa2-index-") as scratch:
-            env = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "index")}
+            env = {**git_environment(), "GIT_INDEX_FILE": str(Path(scratch) / "index")}
             git(path, "read-tree", "--empty", env=env)
             git(path, "update-index", "-z", "--index-info", input=index, env=env)
             for row in flags.split("\0"):
@@ -517,7 +528,7 @@ class WorkspaceManager:
             if entry:
                 conversion = ["blob", entry["oid"]] if entry["mode"] == "120000" else ["--filters", f"{new}:{name}"]
                 content = subprocess.run(["git", "-C", str(view), "cat-file", *conversion],
-                                         capture_output=True, check=True).stdout
+                                         capture_output=True, check=True, env=git_environment(), timeout=120).stdout
             actual = self.publication_entry(name, structure)
             before_bytes = self.raw_file_hash(self.project / name) if actual and actual != {"directory": True} else None
             after_bytes = digest(content) if content is not None else None
@@ -545,7 +556,7 @@ class WorkspaceManager:
         else:
             return None
         proc = subprocess.run(["git", "-C", str(self.project), "hash-object", "--stdin",
-                               *([] if mode == "120000" else ["--path", name])], input=content, capture_output=True, check=True)
+                               *([] if mode == "120000" else ["--path", name])], input=content, capture_output=True, check=True, env=git_environment(), timeout=120)
         return {"mode": mode, "oid": proc.stdout.decode().strip()}
 
     def check_publication_paths(self, manifest: dict):
@@ -611,7 +622,7 @@ class WorkspaceManager:
                 continue
             path, _ = write_path(work, name)
             content = subprocess.run(["git", "-C", str(work), "cat-file", "--filters", f"{commit}:{name}"],
-                                     capture_output=True, check=True).stdout
+                                     capture_output=True, check=True, env=git_environment(), timeout=120).stdout
             if path.read_bytes() != content:
                 atomic_write(path, content, stat.S_IMODE(path.stat().st_mode))
         return policy
@@ -690,7 +701,7 @@ class WorkspaceManager:
                     path.rmdir()
                 conversion = ["blob", after["oid"]] if after["mode"] == "120000" else ["--filters", f"{new}:{name}"]
                 content = subprocess.run(["git", "-C", str(self.project), "cat-file", *conversion],
-                                         capture_output=True, check=True).stdout
+                                         capture_output=True, check=True, env=git_environment(), timeout=120).stdout
                 if "after_bytes" in images and digest(content) != images["after_bytes"]:
                     raise AA2Error("Checkout bytes changed during recovery")
                 if after["mode"] == "120000":

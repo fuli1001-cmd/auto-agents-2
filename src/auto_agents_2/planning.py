@@ -25,21 +25,23 @@ def validate_plan(plan: PlanResult, requirement_ids: set[str], *, coverage_verif
         covered.update(task.requirement_ids)
     if not requirement_ids <= covered:
         raise AA2Error("Plan omits requirements")
-    visited, active = set(), set()
-
-    def visit(task_id):
-        if task_id in active:
-            raise AA2Error("Task graph contains a cycle")
-        if task_id in visited:
-            return
-        active.add(task_id)
-        for dependency in tasks[task_id].depends_on:
-            visit(dependency)
-        active.remove(task_id)
-        visited.add(task_id)
-
-    for key in tasks:
-        visit(key)
+    # Kahn's algorithm is independent of input order and Python recursion depth.
+    counts = {key: len(set(task.depends_on)) for key, task in tasks.items()}
+    dependents = {key: [] for key in tasks}
+    for key, task in tasks.items():
+        for dependency in set(task.depends_on):
+            dependents[dependency].append(key)
+    pending = [key for key, count in counts.items() if not count]
+    visited = 0
+    while pending:
+        key = pending.pop()
+        visited += 1
+        for child in dependents[key]:
+            counts[child] -= 1
+            if not counts[child]:
+                pending.append(child)
+    if visited != len(tasks):
+        raise AA2Error("Task graph contains a cycle")
 
 
 def conflict(a: TaskSpec, b: TaskSpec) -> bool:

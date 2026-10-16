@@ -187,14 +187,20 @@ class PreviewProxy:
                     destination.write_eof()
                     await destination.drain()
             pumps = [asyncio.create_task(relay(reader, upstream)), asyncio.create_task(relay(incoming, writer))]
-            if upgrade:
-                _, pending = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
-                async with asyncio.timeout(10):
+            async def finish_relays():
+                completed, _ = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+                for task in completed:
+                    task.result()  # Observe either direction's error immediately.
+                if upgrade:
                     await asyncio.gather(*pumps)
+                elif pumps[1] not in completed:
+                    # A successful request half-close still permits the full reply.
+                    await pumps[1]
+            if upgrade:
+                async with asyncio.timeout(10):
+                    await finish_relays()
             else:
-                # A normal response closes the exchange even if the browser keeps
-                # its request socket open. Client half-close still permits a reply.
-                await pumps[1]
+                await finish_relays()
         except PreviewOwnershipError:
             self.ownership_failed = True
             self.errors.append(OWNERSHIP_FAILURE)

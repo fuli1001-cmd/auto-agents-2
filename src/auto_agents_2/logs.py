@@ -5,6 +5,7 @@ import codecs
 import os
 from pathlib import Path
 
+from .cleanup import finalize_async
 from .errors import AA2Error
 from .util import scrub_text
 
@@ -90,11 +91,11 @@ async def capture_diagnostics(process, resources, artifacts, secrets=()):
                     process.control.write_eof()
                 except (AttributeError, OSError, RuntimeError):
                     pass
-            for reader in readers:
-                reader.cancel()
-            await asyncio.gather(*readers, return_exceptions=True)
-            for log in logs:
-                await log.close()
+            async def stop_readers():
+                for reader in readers:
+                    reader.cancel()
+                await asyncio.gather(*readers, return_exceptions=True)
+            await finalize_async(stop_readers, *(log.close for log in logs), original=sys.exception())
 
 
 class AsyncLog:
@@ -141,9 +142,11 @@ class AsyncLog:
         from .managed_process import joined
         async def finish():
             await asyncio.gather(*self.pending, return_exceptions=True)
-            if self.log:
-                await self.call(self.log.close)
-            self.worker.shutdown(wait=False)
+            try:
+                if self.log:
+                    await self.call(self.log.close)
+            finally:
+                self.worker.shutdown(wait=False)
         await joined(asyncio.create_task(finish()))
 
 

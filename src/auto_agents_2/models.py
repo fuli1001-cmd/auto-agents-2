@@ -177,6 +177,8 @@ class CheckResult(Record):
     test_runner: str = ""
     report_status: str = ""
     attachments: list[dict] = []
+    capture_policy_hash: str = ""
+    attachment_capture: dict = {}
     output: str
     duration: float
     source_hash: str

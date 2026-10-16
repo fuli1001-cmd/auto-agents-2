@@ -46,6 +46,7 @@ async def test_conda_failure_classification_uses_manifest_and_actual_error(tmp_p
 
         async def locked(prefix, ready, fingerprint, *args):
             atomic_write(store.root / "environment-records" / fingerprint / "conda.lock", "@EXPLICIT\n")
+            atomic_write(store.root / "environment-records" / fingerprint / "pip.lock", "")
             return await prepare(prefix, ready, fingerprint, *args)
 
         manager._prepare = locked

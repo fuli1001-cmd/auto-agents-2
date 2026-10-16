@@ -275,7 +275,7 @@ class Store:
                     "feedback": {"controller_recovery": journal["reason"]},
                     "previous_evidence": previous, "revision": state["revision"]})
             for prefix in ("readme", "candidate/readme", "verify"):
-                db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR key LIKE ?)", (rid, prefix, prefix + "/%"))
+                db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR substr(key,1,?)=?)", (rid, prefix, len(prefix) + 1, prefix + "/"))
             self._put(db, rid, key, {**journal, "phase": "activated"})
             self._event(db, rid, "plan.patch_activated", {"revision": revision + 1, "affected": journal["affected"], "journal": key})
 
@@ -356,8 +356,8 @@ class Store:
     def invalidate(self, rid, keys: list[str]):
         with self.connect() as db:
             for key in keys:
-                db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR key LIKE ?)",
-                           (rid, key, key + "/%"))
+                db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR substr(key,1,?)=?)",
+                           (rid, key, len(key) + 1, key + "/"))
             self._event(db, rid, "checkpoints.invalidated", {"keys": keys})
 
     def prepare_replan(self, rid, stage, reason):
@@ -407,10 +407,10 @@ class Store:
                 self._put(db, rid, "plan_revision/current", {"version": 1, "revision": revision + 1})
             for stage in stages:
                 for prefix in ("candidate/", "invocation/", "provider-result/"):
-                    db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR key LIKE ?)",
-                               (rid, prefix + stage, prefix + stage + "/%"))
-                db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR key LIKE ?)",
-                           (rid, stage, stage + "/%"))
+                    db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR substr(key,1,?)=?)",
+                               (rid, prefix + stage, len(prefix + stage) + 1, prefix + stage + "/"))
+                db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR substr(key,1,?)=?)",
+                           (rid, stage, len(stage) + 1, stage + "/"))
             feedback = {"stage": pending["stage"], "reason": pending["reason"], "recovery_refs": recovery_refs}
             if pending.get("verification_recheck"):
                 feedback["verification_recheck"] = pending["verification_recheck"]

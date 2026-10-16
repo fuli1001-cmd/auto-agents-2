@@ -453,7 +453,7 @@ def test_supervisor_retries_inspection_and_individual_kill_failures_until_cleanu
     monkeypatch.setattr(module, 'signal', SimpleNamespace(SIGTERM=15, SIGKILL=9, signal=lambda *a: None))
     monkeypatch.setattr(module, 'subprocess', SimpleNamespace(Popen=lambda *a, **k: SimpleNamespace(pid=42, returncode=0)))
     monkeypatch.setattr(module, 'select', SimpleNamespace(select=lambda *a: ([control], [], [])))
-    monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: 0, sleep=lambda *a: None))
+    monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: len(reads), sleep=lambda *a: None))
     module.main()
     assert len(reads) == 225 and killed.count(43) > 200 and records[-1]['status'] == 'cleaned'
 
@@ -485,13 +485,13 @@ def test_unknown_cleanup_pins_resources_until_durable_confirmation(tmp_path):
     root.mkdir(parents=True)
     resources.register(root, 'temporary', refs=0)
     record = store.root / 'processes/fixture.json'
-    write_json(record, {'version': 3, 'status': 'running', 'paths': [str(root)]})
+    write_json(record, {'version': 3, 'status': 'running', 'paths': [str(root)], 'cwd': str(root), 'pid': 123, 'start': '456'})
     resources.collect()
     assert root.exists()
     runner = SandboxRunner(store.root)
     with pytest.raises(PolicyViolation, match='awaits process cleanup'):
         runner.confirm_record(str(record))
-    write_json(record, {'version': 3, 'status': 'cleaned', 'paths': [str(root)]})
+    write_json(record, {'version': 3, 'status': 'cleaned', 'paths': [str(root)], 'cwd': str(root), 'pid': 123, 'start': '456'})
     runner.confirm_record(str(record))
     resources.collect()
     assert not root.exists()
@@ -572,7 +572,8 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":11,"output_tok
     monkeypatch.setattr(runner, 'spawn', spawn)
     monkeypatch.setattr(runner, 'stop', unknown)
     try:
-        with pytest.raises(PolicyViolation, match='unknown cleanup'):
+        from auto_agents_2.errors import PostCommitError
+        with pytest.raises(PostCommitError, match='result saved'):
             await workflow._invoke('review', {}, ReviewResult, tmp_path, rid, 'paid-result')
         assert store.usage_summary(rid)['total_tokens'] == 14
         saved = store.get(rid, 'invocation/paid-result')

@@ -46,6 +46,8 @@ async def test_reconstruction_constrains_pip_and_preserves_original_resolution(t
     calls = []
     async def command(argv, *args, **kwargs):
         calls.append(argv)
+        if "install" in argv and "-c" in argv:
+            assert Path(argv[argv.index("-c") + 1]).read_text() == "dep==1\n"
         if "create" in argv:
             (prefix / "bin").mkdir()
             (prefix / "bin/python").write_text("fixture")
@@ -65,7 +67,7 @@ async def test_reconstruction_constrains_pip_and_preserves_original_resolution(t
             await manager._prepare(prefix, prefix / "aa2-ready.json", "fingerprint", "python", None, requirements, tmp_path, [], False)
         assert not (prefix / "aa2-ready.json").exists()
     install = next(argv for argv in calls if "install" in argv)
-    assert install[-2:] == ["-c", str(records / "pip.lock")]
+    assert install[-2] == "-c" and Path(install[-1]).is_relative_to(store.root / "tmp")
     assert install[install.index("-r") + 1] == str(requirements)
     assert (records / "pip.lock").read_text() == "dep==1\n"
 

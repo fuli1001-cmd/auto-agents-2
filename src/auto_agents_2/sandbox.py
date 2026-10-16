@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import shutil
 import subprocess
@@ -54,8 +53,9 @@ class SandboxRunner:
                 raise PolicyViolation("Provider runtime mount would expose a protected project root")
         for source, destination in direct:
             cmd += ["--ro-bind", str(source), str(destination)]
-        metadata = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                                  capture_output=True, text=True, timeout=10)
+        from .workspace import git_environment
+        metadata = subprocess.run(["git", "--literal-pathspecs", "-C", str(cwd), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                  capture_output=True, text=True, timeout=10, env=git_environment())
         if metadata.returncode == 0:
             mounts.append(Path(metadata.stdout.strip()))
         for path in mounts:
@@ -115,7 +115,8 @@ class SandboxRunner:
         return await spawn_managed(command, cwd, env, self.root, paths)
 
     async def stop(self, process):
-        if process.stop_task is None:
+        if (process.stop_task is None or process.stop_task.done()
+                and (process.stop_task.cancelled() or process.stop_task.exception() is not None)):
             process.stop_task = asyncio.create_task(self._stop(process))
         task = process.stop_task
         cancelled = None
@@ -137,15 +138,24 @@ class SandboxRunner:
 
     async def _stop(self, process):
         try:
-            process.control.write_eof()
-        except (OSError, RuntimeError):
+            try:
+                process.control.write_eof()
+            except (OSError, RuntimeError):
+                process.control.close()
+            from .managed_process import finish_supervisor
+            await finish_supervisor(process.supervisor, process.record)
+            try:
+                await process.monitor
+            except Exception:
+                # A closed/malformed channel is recoverable once the supervisor's
+                # durable acknowledgement proves every child has been reaped.
+                from .process_records import read_record
+                if read_record(process.record).get("status") != "cleaned":
+                    raise
+            process.cleanup_confirmed = True
+            process.record.unlink(missing_ok=True)
+        finally:
             process.control.close()
-        from .managed_process import finish_supervisor
-        await finish_supervisor(process.supervisor, process.record)
-        await process.monitor
-        process.cleanup_confirmed = True
-        process.control.close()
-        process.record.unlink(missing_ok=True)
 
     def confirm_record(self, value):
         record = Path(value)
@@ -153,7 +163,8 @@ class SandboxRunner:
             raise PolicyViolation("Invalid process cleanup record")
         if not record.exists():
             return
-        data = json.loads(record.read_text())
+        from .process_records import read_record
+        data = read_record(record)
         if data.get("status") != "cleaned":
             raise PolicyViolation("Validated provider result awaits process cleanup; preserve it without redispatch")
         record.unlink(missing_ok=True)
@@ -163,12 +174,12 @@ class SandboxRunner:
         if not directory.exists():
             return
         for file in directory.glob("*.json"):
-            data = json.loads(file.read_text())
+            from .process_records import read_record, require_identity
+            data = read_record(file)
             if data.get("version") == 3 and data.get("status") == "cleaned":
                 file.unlink(missing_ok=True)
                 continue
-            if not data.get("start") or not data.get("pid"):
-                raise PolicyViolation("Recorded process identity is unknown; preserving recovery record")
+            require_identity(data)
             current = process_start(data["pid"])
             if current == data["start"]:
                 raise PolicyViolation("A recorded process is still live; preserve its recovery record until owned cleanup completes")
