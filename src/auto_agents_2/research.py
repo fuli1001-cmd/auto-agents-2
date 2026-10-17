@@ -8,7 +8,7 @@ import httpx
 
 from .artifacts import ArtifactStore
 from .errors import AA2Error
-from .http_body import ACQUISITION_TIMEOUT, read_body
+from .http_body import ACQUISITION_TIMEOUT, acquisition_deadline, read_body
 from .models import SourceEvidence
 from .network import PublicHTTPTransport, public_address
 from .util import SECRET
@@ -38,7 +38,8 @@ class ResearchService:
 
     async def capture(self, url: str) -> dict:
         public_url(url)
-        async with asyncio.timeout(ACQUISITION_TIMEOUT), httpx.AsyncClient(
+        label = f"Research document download for {urlsplit(url).hostname}"
+        async with acquisition_deadline(ACQUISITION_TIMEOUT, label), httpx.AsyncClient(
                 transport=PublicHTTPTransport(), trust_env=False, follow_redirects=False, timeout=30,
                 headers={"Accept-Encoding": "gzip, deflate"}) as client:
             final = url

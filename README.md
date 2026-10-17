@@ -34,6 +34,10 @@ aa2 logs --project ./demo
 
 原始文档可以很粗略。aa2 保存原始快照，对话澄清后保存用于设计与开发的规格。接入评估会对照已有规格、源码和证据；全部已满足时返回 `NO_CHANGES`，部分满足时只规划差异。文字相同本身不构成“已实现”的证据。
 
+外部研究支持控制器进程环境中的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和 `NO_PROXY`，兼容小写变量（小写优先）；代理地址须使用 HTTP(S)，并支持向目标端口建立 CONNECT 隧道。研究资料域名必须解析为真实公网 IP，代理连接固定到已验证的 IP。使用 Clash/Mihomo 的 Fake-IP DNS 时，请改用 `redir-host` 或对资料域名设置 Fake-IP 排除规则。出现 `Research destination must resolve exclusively to public addresses` 时，检查运行 aa2 的环境中的 DNS 结果；仅恢复浏览器上网或反复输入 `y` 不会解除地址限制。
+
+代理变量必须存在于启动 aa2 的终端环境中；其它终端、工具进程或 provider 的环境配置不能替代控制器环境。可使用 `conda env config vars set --prefix ./.conda-env` 将代理变量保存在项目 Conda 环境，随后重新激活环境。修改变量或升级 aa2 后，先输入 `n` 暂停，再用不带 `--requirements` 的 `aa2 run` 续跑。下载超过总时限时，错误包含操作、域名、时限和代理环境检查提示；其它无文字异常至少显示异常类型。
+
 每次迭代以目标分支的已提交版本为基线。验收通过后自动快进合并到目标分支，并更新项目主目录、准备运行依赖。新空仓库使用 `main`；已有仓库优先采用本地存在的远端默认分支，其次唯一的 `main`/`master` 或唯一分支；有歧义时询问一次并保存选择。
 
 无需切换到 run 分支。交付成功后：

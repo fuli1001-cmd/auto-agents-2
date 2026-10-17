@@ -12,6 +12,7 @@ import httpcore
 import httpx
 
 from .errors import AA2Error
+from .network_proxy import ProxySettings, open_proxy_tunnel
 from .process_ownership import PreviewOwnershipError, verify_connection
 
 preview_owner = ContextVar("preview_owner", default=None)
@@ -53,18 +54,23 @@ def public_address(value: str) -> bool:
 
 
 class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
-    def __init__(self):
+    def __init__(self, proxy=None):
         self.backend = httpcore.AnyIOBackend()
+        self.proxy = proxy
 
     async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
         async with asyncio.timeout(timeout):
             addresses = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
             targets = list(dict.fromkeys(row[4][0] for row in addresses))
             if not targets or not all(public_address(ip) for ip in targets):
-                raise AA2Error("Research destination must resolve exclusively to public addresses")
+                raise AA2Error("Research destination must resolve exclusively to public addresses; "
+                               f"check DNS/Fake-IP settings for {host}")
             error = None
             for ip in targets:
                 try:
+                    if self.proxy is not None:
+                        return await open_proxy_tunnel(self.backend, self.proxy, ip, port,
+                                                       timeout, local_address, socket_options)
                     # Only the numeric validated address is dialled. The pool retains
                     # the original hostname for Host, TLS SNI and certificate checks.
                     return await self.backend.connect_tcp(ip, port, timeout, local_address, socket_options)
@@ -76,6 +82,18 @@ class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
 
     async def sleep(self, seconds):
         await asyncio.sleep(seconds)
+
+
+class PublicConnectionPool(httpcore.AsyncConnectionPool):
+    def __init__(self, trust_env=True):
+        super().__init__(network_backend=PublicNetworkBackend())
+        self.proxy_settings = ProxySettings(trust_env)
+
+    def create_connection(self, origin):
+        proxy = self.proxy_settings.for_origin(origin)
+        if proxy is None:
+            return super().create_connection(origin)
+        return httpcore.AsyncHTTPConnection(origin=origin, network_backend=PublicNetworkBackend(proxy))
 
 
 class ResponseStream(httpx.AsyncByteStream):
@@ -93,8 +111,8 @@ class ResponseStream(httpx.AsyncByteStream):
 
 
 class PublicHTTPTransport(httpx.AsyncBaseTransport):
-    def __init__(self):
-        self.pool = httpcore.AsyncConnectionPool(network_backend=PublicNetworkBackend())
+    def __init__(self, *, trust_env=True):
+        self.pool = PublicConnectionPool(trust_env)
 
     async def handle_async_request(self, request):
         incoming = httpcore.Request(method=request.method,

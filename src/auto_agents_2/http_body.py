@@ -1,10 +1,22 @@
 """Bound wire input and decoded output, including ambiguous HTTP deflate streams."""
+import asyncio
 import zlib
+from contextlib import asynccontextmanager
 
 from .errors import AA2Error
 
 MAX_BODY = 4 * 1024 * 1024
 ACQUISITION_TIMEOUT = 30
+
+
+@asynccontextmanager
+async def acquisition_deadline(timeout, label):
+    try:
+        async with asyncio.timeout(timeout):
+            yield
+    except TimeoutError:
+        raise TimeoutError(f"{label} timed out after {timeout:g}s; check network connectivity and "
+                           "HTTP_PROXY/HTTPS_PROXY in the aa2 process environment") from None
 
 
 async def read_body(response, limit=MAX_BODY):

@@ -183,7 +183,8 @@ class WorkflowEngine:
                     except Exception as exc:
                         incidents = self.store.get(rid, "incidents", 0) + 1
                         self.store.checkpoint(rid, "incidents", incidents)
-                        await self._ask(rid, f"incident/{incidents}", f"执行遇到阻塞：{exc}\n修复配置或环境后回复 retry；也可以通过 aa2 cancel 取消本轮。", digest(str(exc)))
+                        detail = str(exc).strip() or type(exc).__name__
+                        await self._ask(rid, f"incident/{incidents}", f"执行遇到阻塞：{detail}\n修复配置或环境后回复 retry；也可以通过 aa2 cancel 取消本轮。", digest(detail))
             except asyncio.CancelledError:
                 if self.store.get(rid, "control/cancel"):
                     journal = self.store.get(rid, "delivery/journal", {})

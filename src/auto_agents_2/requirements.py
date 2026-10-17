@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 import codecs
 import re
 from email.message import Message
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
 from .artifacts import ArtifactStore
 from .errors import AA2Error, PolicyViolation
-from .http_body import ACQUISITION_TIMEOUT, read_body
+from .http_body import ACQUISITION_TIMEOUT, acquisition_deadline, read_body
 from .models import IntakeResult
 from .util import contained
 
@@ -94,7 +94,8 @@ def extract_document(raw: bytes, content_type: str) -> tuple[str, str]:
 
 async def capture(source: str, artifacts: ArtifactStore) -> dict:
     if source.startswith(("https://", "http://")):
-        async with asyncio.timeout(ACQUISITION_TIMEOUT), httpx.AsyncClient(
+        label = f"Requirements document download for {urlsplit(source).hostname}"
+        async with acquisition_deadline(ACQUISITION_TIMEOUT, label), httpx.AsyncClient(
                 follow_redirects=True, timeout=30, headers={"Accept-Encoding": "gzip, deflate"}) as client:
             async with client.stream("GET", source) as response:
                 response.raise_for_status()
