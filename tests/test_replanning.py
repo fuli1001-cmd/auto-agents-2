@@ -147,8 +147,8 @@ async def test_stall_survives_restart_provider_switch_and_single_manual_grant(tm
         raise Replan("prototype" if calls % 2 else "plan", f"different prose {calls}")
 
     async def pause(question):
-        assert question["key"].startswith("replan-stalled/")
-        assert "连续 2 次" in question["prompt"]
+        assert question["key"].startswith("recovery-cycle/")
+        assert workflow.store.get(workflow.store.current()["id"], "replanning/progress")["stalled"] == 2
         return "n"
 
     workflow._execute = execute
@@ -170,7 +170,7 @@ async def test_stall_survives_restart_provider_switch_and_single_manual_grant(tm
             assert calls == 3  # Resume asks before any repeated provider work.
             assert workflow.store.get(rid, "replanning/pending") == pending
             return "y"
-        assert calls == 4 and "连续 3 次" in question["prompt"]
+        assert calls == 4 and workflow.store.get(rid, "replanning/progress")["stalled"] == 3
         return "n"
 
     workflow.question_handler = grant_once

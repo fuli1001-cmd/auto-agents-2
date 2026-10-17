@@ -121,6 +121,11 @@ async def test_resolution_failure_is_repaired_and_verified_after_resume(tmp_path
         return await original_environment(work, *args)
 
     workflow._environment = environment
+    workflow.store.checkpoint(rid, "plan", proposal.model_dump())
+    with pytest.raises(RecoveryNeeded) as caught:
+        await workflow._task(rid, proposal.tasks[0], base, proposal, context)
+    workflow.recovery.submit(rid, caught.value.failure)
+    await workflow.recovery.resume(rid)
     if interrupt:
         with pytest.raises(asyncio.CancelledError):
             await workflow._task(rid, proposal.tasks[0], base, proposal, context)
@@ -166,7 +171,7 @@ async def test_infrastructure_failure_keeps_applied_candidate_for_retry(tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("max_rounds,expected,rounds", [(4, RecoveryNeeded, 2), (2, RecoveryNeeded, 2)])
+@pytest.mark.parametrize("max_rounds,expected,rounds", [(4, RecoveryNeeded, 1), (2, RecoveryNeeded, 1)])
 async def test_dependency_repair_preserves_round_and_stall_budgets(tmp_path, max_rounds, expected, rounds):
     agent = CodingAgent()
     workflow = engine(tmp_path, agent)
@@ -184,15 +189,17 @@ async def test_dependency_repair_preserves_round_and_stall_budgets(tmp_path, max
         raise Waiting("round budget")
 
     workflow._environment = unresolved
+    workflow.store.checkpoint(rid, "plan", proposal.model_dump())
     workflow._ask = wait
     with pytest.raises(expected) as caught:
         await workflow._task(rid, proposal.tasks[0], base, proposal, {"specification": {}})
     assert workflow.store.get(rid, "rounds/T1")["round"] == rounds
     saved = workflow.store.get(rid, "develop/task/T1")
     assert not saved.get("commit") and not saved.get("checks")
-    assert workflow.convergence.state(rid, "T1")["missing"] == 2
+    assert workflow.convergence.state(rid, "T1")["missing"] == 0
+    assert workflow.convergence.state(rid, "T1")["stage_failures"]["environment"] == 1
     before = len(agent.calls)
     workflow.recovery.submit(rid, caught.value.failure)
-    with pytest.raises(Waiting):
-        await workflow.recovery.resume(rid)
-    assert len(agent.calls) == before  # No diagnostic/decision call after the stop.
+    await workflow.recovery.resume(rid)
+    assert len(agent.calls) > before
+    assert workflow.store.get(rid, "recovery/active") is None

@@ -64,7 +64,7 @@ def refresh_task_baseline(engine, rid, task, saved, work, base, revision):
                 "reason": "Reconcile the retained candidate with current dependency code within the existing task scope. Preserve accepted dependency fixes.",
                 "incoming_base": base, "retained_candidate": artifact, "recovery_ref": record["recovery_ref"]}}
             updated = {"phase": "rejected", "workspace": str(fresh), "source_hash": tree_hash(fresh),
-                       "revision": revision, "feedback": feedback}
+                       "revision": revision, "feedback": feedback, "recovery_permit": saved.get("recovery_permit")}
             store.checkpoints(rid, {key: {**record, "phase": "repair", "retained_candidate": artifact,
                                           "repair_workspace": str(fresh)}, task_key: updated})
             store.event(rid, "task.baseline_refreshed", {"task": task.id, "base": base, "action": "repair", "journal": key})
@@ -76,6 +76,7 @@ def refresh_task_baseline(engine, rid, task, saved, work, base, revision):
         raise AA2Error("Dependency merge has unknown changes; preserve the journal and workspace")
     phase = "reverify" if saved.get("phase") in {"applied", "tested", "reverify"} else "rejected"
     updated = {"phase": phase, "workspace": str(work), "revision": revision, "source_hash": tree_hash(work),
+               "recovery_permit": saved.get("recovery_permit"),
                "feedback": {**prior_feedback, "baseline_refresh": {
                    "incoming_base": base, "reason": "Dependencies updated; retained implementation requires fresh verification.",
                    "recovery_ref": record["recovery_ref"]}}}

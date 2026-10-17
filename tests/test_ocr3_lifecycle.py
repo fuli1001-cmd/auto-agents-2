@@ -254,11 +254,14 @@ async def test_diagnosis_grant_source_drift_preserves_active_recovery(tmp_path):
     workflow.store.checkpoints(rid, {"plan": plan().model_dump(),
         "recovery/active": {"failure": record.model_dump(), "attempt": 1},
         "recovery/budgets/diagnosis/T3": {"round": workflow.config.load().execution.max_diagnosis_rounds}})
+    from auto_agents_2.util import digest
+    workflow.store.checkpoint(rid, "recovery/rules/" + digest(
+        [record.origin_id, record.step, sorted(record.obligations), "diagnose"]), {"previous": True})
     async def grant(*args):
         (work / "part3.py").write_text("user edit during grant")
         return "y"
     workflow.question_handler = grant
-    with pytest.raises(AA2Error, match="evidence source changed"):
+    with pytest.raises(AA2Error, match="changed"):
         await workflow.recovery.resume(rid)
     assert workflow.store.get(rid, "recovery/active")
     assert workflow.store.get(rid, "recovery/active")["evidence_source_hash"] != tree_hash(work)
@@ -272,6 +275,7 @@ async def test_delivery_diagnosis_approval_also_rejects_source_drift(tmp_path):
     workflow = engine(tmp_path, CodingAgent())
     (tmp_path / "source.py").write_text("original")
     rid = workflow.store.admit("fixture", {})["id"]
+    workflow.store.checkpoint(rid, "delivery/journal", {"publication_started": True})
     workflow.store.checkpoint(rid, "recovery/budgets/diagnosis/delivery",
         {"round": workflow.config.load().execution.max_diagnosis_rounds})
     async def grant(*args):

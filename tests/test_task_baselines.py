@@ -8,6 +8,7 @@ from test_workflow import CodingAgent, engine
 
 from auto_agents_2.errors import AA2Error
 from auto_agents_2.models import Change, Command, ImplementationResult, PlanResult, TaskSpec
+from auto_agents_2.recovery import RecoveryNeeded
 from auto_agents_2.workspace import apply_prepared, git, prepare_changes, tree_hash
 
 
@@ -108,6 +109,12 @@ async def test_conflict_keeps_old_candidate_and_repairs_on_current_dependency_ba
             return await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
 
     workflow, rid, task, plan, worker, incoming = setup_candidate(tmp_path, Agent(), conflict=True)
+    workflow.store.checkpoint(rid, "plan", plan.model_dump())
+    with pytest.raises(RecoveryNeeded) as caught:
+        await workflow._task(rid, task, incoming, plan, {"specification": {}})
+    assert caught.value.failure.kind == "integration"
+    workflow.recovery.submit(rid, caught.value.failure)
+    await workflow.recovery.resume(rid)
     commit = await workflow._task(rid, task, incoming, plan, {"specification": {}})
     saved = workflow.store.get(rid, "develop/task/CHILD")
     assert Path(saved["workspace"]) != worker

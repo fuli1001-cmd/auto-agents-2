@@ -307,11 +307,18 @@ async def test_build_recovery_failure_keeps_pending_request_and_can_resume(tmp_p
 async def test_replan_prompt_leads_with_current_failures_and_retains_original_request(tmp_path):
     workflow, rid, _, _, _, pending = await blocked_workflow(tmp_path, failing=True)
     assert not await workflow._refresh_legacy_build_checks(rid)
+    from auto_agents_2.util import digest
+    workflow.store.checkpoint(rid, "recovery/rules/" + digest(
+        ["gates", "upstream", ["accepted_requirements"], "plan_patch"]), {"previous": True})
+    from auto_agents_2.decisions import DecisionResult
+    async def decision(*args, **kwargs):
+        return DecisionResult(action="ask_user", reason="Review the current failing checks before continuing")
+    workflow.agent.invoke = decision
 
     async def inspect(question):
         prompt = question["prompt"]
         assert prompt.index("test_app::test_real_build") < prompt.index(pending["reason"])
-        assert "最新控制器复测仍未通过" in prompt and "原回退请求" in prompt
+        assert "当前故障" in prompt and "原恢复请求" in prompt
         raise asyncio.CancelledError()
 
     workflow.question_handler = inspect

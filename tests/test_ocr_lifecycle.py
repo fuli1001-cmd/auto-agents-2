@@ -104,6 +104,7 @@ async def test_completed_repair_replays_only_for_same_observation(tmp_path, monk
 async def test_delivery_recheck_budget_survives_new_observation_ids(tmp_path, monkeypatch):
     workflow = engine(tmp_path, CodingAgent())
     rid = workflow.store.admit("fixture", {})["id"]
+    workflow.store.checkpoint(rid, "delivery/journal", {"publication_started": True})
     row = CheckResult(argv=["check"], cwd=".", exit_code=1, process_exit_code=0, output="missing report",
         duration=1, source_hash="fixture", environment_hash="fixture", failure_reasons=["test_report_missing"])
     diagnoses = []

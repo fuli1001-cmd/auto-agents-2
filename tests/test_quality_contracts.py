@@ -626,14 +626,20 @@ def test_issue_scope_survives_task_renaming(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_delivery_hard_errors_use_bounded_rounds_without_test_review(tmp_path):
+async def test_delivery_hard_errors_require_new_decision_without_test_review(tmp_path):
     from test_workflow import CodingAgent, engine
 
     from auto_agents_2.models import ImplementationResult
     class RepairAgent(CodingAgent):
         proposals = 0
         reviews = 0
+        decisions = 0
         async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
+            if stage == "decision":
+                from auto_agents_2.decisions import DecisionResult
+                self.decisions += 1
+                return DecisionResult(action="approve", selected_action="repair", evidence_refs=["failure"],
+                    reason="Correct the rejected path within the existing scope", expected_result="A valid scoped candidate")
             if context.get("review_kind") == "recovery_diagnosis":
                 return await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
             if stage == "implement":
@@ -649,6 +655,7 @@ async def test_delivery_hard_errors_use_bounded_rounds_without_test_review(tmp_p
     rid = workflow.store.admit("fixture", {})["id"]
     await workflow._delivery_repair(rid, tmp_path, {"failure": "repair"}, ["allowed.py"])
     assert agent.proposals == 2 and agent.reviews == 1
+    assert agent.decisions == 1
     assert workflow.store.get(rid, "rounds/delivery")["round"] == 2
     assert not (tmp_path / "outside.py").exists()
 

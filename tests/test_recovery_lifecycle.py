@@ -97,15 +97,10 @@ async def test_diagnosis_budget_is_shared_across_different_failure_kinds(tmp_pat
     assert len(calls) == 2
     workflow.recovery.submit(rid, failure(kind="environment", step="environment"))
 
-    async def exhausted(question):
-        assert "诊断额度" in question["prompt"]
-        raise asyncio.CancelledError()
-
-    workflow.question_handler = exhausted
-    with pytest.raises(asyncio.CancelledError):
-        await workflow.recovery.resume(rid)
-    assert len(calls) == 2
-    assert workflow.store.get(rid, "recovery/budgets/diagnosis/T3")["round"] == 2
+    await workflow.recovery.resume(rid)
+    assert len(calls) == 3
+    assert workflow.store.get(rid, "recovery/budgets/diagnosis/T3")["round"] == 3
+    assert not workflow.store.pending(rid)
 
 
 def test_v2_migration_preserves_active_recovery_and_is_transactional(tmp_path):
@@ -145,7 +140,7 @@ def test_stale_scope_is_deferred_not_regressed_or_awarded_progress():
     assert not decision["improved"] and state["stalled"] == 1
 
 
-async def test_repeated_recheck_with_identical_inputs_cannot_loop(tmp_path):
+async def test_repeated_recheck_with_identical_inputs_requires_a_new_decision(tmp_path):
     workflow = engine(tmp_path, CodingAgent())
     rid = workflow.store.admit("repeat", {})["id"]
     base = workflow.workspaces.committed_baseline(rid, "main")
@@ -156,10 +151,13 @@ async def test_repeated_recheck_with_identical_inputs_cannot_loop(tmp_path):
     await workflow.recovery.resume(rid)
 
     async def invoke(stage, context, schema, workspace, run_id, operation, fresh=False):
+        if stage == "decision":
+            from auto_agents_2.decisions import DecisionResult
+            return DecisionResult(action="ask_user", reason="Repeated identical inputs need user evidence")
         return Diagnosis(action="recheck", task_ids=["T3"], evidence_refs=record.evidence_refs, reason="try again")
 
     async def blocked(question):
-        assert "同一执行输入已自动复验一次" in question["prompt"]
+        assert "Repeated identical inputs" in question["prompt"]
         raise asyncio.CancelledError()
 
     workflow.agent.invoke = invoke
@@ -167,7 +165,7 @@ async def test_repeated_recheck_with_identical_inputs_cannot_loop(tmp_path):
     workflow.recovery.submit(rid, record)
     with pytest.raises(asyncio.CancelledError):
         await workflow.recovery.resume(rid)
-    assert workflow.store.get(rid, "recovery/active")["decision"]["action"] == "blocked"
+    assert workflow.store.get(rid, "recovery/active").get("decision") is None
     assert workflow.store.get(rid, "rounds/T3") is None
 
 
@@ -195,7 +193,7 @@ async def test_upstream_recovery_preserves_downstream_outstanding_repair(tmp_pat
     assert saved["feedback"]["upstream_recovery"]["task_ids"] == ["T3"]
 
 
-async def test_implementation_limit_diagnoses_current_failure_before_requesting_grant(tmp_path):
+async def test_retained_rejection_is_diagnosed_and_can_continue_past_old_limit(tmp_path):
     from test_verification_recovery import blocked_workflow as report_workflow
     workflow, rid, proposal, base, work, _ = await report_workflow(tmp_path, failing=True)
     config = workflow.config.load().model_dump(mode="json")
@@ -206,22 +204,19 @@ async def test_implementation_limit_diagnoses_current_failure_before_requesting_
     workflow.store.checkpoints(rid, {"develop/task/T1": saved, "rounds/T1": {"round": 4, "stalled": 0}})
     with pytest.raises(RecoveryNeeded) as caught:
         await workflow._task(rid, proposal.tasks[0], base, proposal, {"specification": {}})
-    assert caught.value.failure.component == "task_budget" and not workflow.agent.calls
+    assert caught.value.failure.kind == "checks" and not workflow.agent.calls
 
     async def invoke(stage, context, schema, workspace, run_id, operation, fresh=False):
+        if stage == "implement":
+            raise RuntimeError("authorized implementation reached")
         return Diagnosis(action="repair", task_ids=["T1"], evidence_refs=context["failure"]["evidence_refs"], reason="verified arithmetic defect")
-
-    async def grant(question):
-        assert "独立诊断建议" in question["prompt"] and "verified arithmetic defect" in question["prompt"]
-        raise asyncio.CancelledError()
 
     workflow.agent.invoke = invoke
     workflow.recovery.submit(rid, caught.value.failure)
     await workflow.recovery.resume(rid)
-    workflow.question_handler = grant
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(RuntimeError, match="authorized implementation reached"):
         await workflow._task(rid, proposal.tasks[0], base, proposal, {"specification": {}})
-    assert workflow.store.get(rid, "rounds/T1")["round"] == 4
+    assert workflow.store.get(rid, "rounds/T1")["round"] == 5
 
 
 async def test_final_candidate_refreshes_accepted_task_evidence_without_reopening(tmp_path):

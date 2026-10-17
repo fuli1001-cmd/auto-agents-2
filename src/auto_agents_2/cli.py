@@ -214,10 +214,17 @@ def resume(project: Project = Path("."), run_id: Annotated[str | None, typer.Opt
 @app.command()
 def status(project: Project = Path("."), run_id: Annotated[str | None, typer.Option("--run")] = None):
     try:
-        configuration(project)
+        cfg = configuration(project).load()
         store = Store(project, readonly=True)
         current = store.run(run_id) if run_id else store.current()
         console.print_json(data={"run": current, "questions": store.pending(current["id"]) if current else [],
+                                "automation_policy": {"enabled": cfg.automation.enabled,
+                                    "continuation": "rules_then_decision", "count_limits_enforced": False,
+                                    "scope": "generation_and_prepublication_verification",
+                                    "legacy_count_settings": {"execution": {key: getattr(cfg.execution, key) for key in
+                                        ("max_rounds", "max_diagnosis_rounds", "max_stalled_rounds", "max_stalled_replans")},
+                                        "automation": {key: getattr(cfg.automation, key) for key in
+                                            ("max_implementation_rounds", "max_diagnosis_rounds")}}},
                                 "tokens": store.usage_summary(current["id"]) if current else {},
                                 "replanning": store.get(current["id"], "replanning/pending", {}) if current else {},
                                 "recovery": store.get(current["id"], "recovery/active", {}) if current else {},

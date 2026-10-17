@@ -38,11 +38,13 @@ class FailureRecord(Record):
     evidence_refs: list[str] = []
     evidence: dict = {}
     proposal: dict = {}
+    reason_code: str = ""
 
     @classmethod
     def create(cls, *, kind, component, origin_id, step, obligations, **kwargs):
         # No model prose, current plan revision, task name or fluctuating output.
         identity = digest([origin_id, step, sorted(obligations)])
+        kwargs.setdefault("reason_code", kind + "/" + step)
         return cls(id=identity, kind=kind, component=component, origin_id=origin_id,
                    step=step, obligations=obligations, **kwargs)
 

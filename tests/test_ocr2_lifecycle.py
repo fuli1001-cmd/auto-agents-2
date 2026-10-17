@@ -501,7 +501,7 @@ def test_actual_missing_table_schema_migration_is_atomic(tmp_path, version, fail
     store.migrate()
     store.migrate()
     with store.connect() as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "6"
+        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "7"
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='diagnostic_holds'").fetchone()
     assert store.get("old", "rounds/T") == {"round": 4}
     assert (state / f"state-v{version}.backup.sqlite").is_file()

@@ -16,7 +16,7 @@ from .util import digest, file_lock, identifier, now, redact
 TERMINAL = ("SUCCEEDED", "CANCELLED")
 SCHEMA = """
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            INSERT OR IGNORE INTO meta VALUES('schema_version','6');
+            INSERT OR IGNORE INTO meta VALUES('schema_version','7');
             CREATE TABLE IF NOT EXISTS runs(
                 id TEXT PRIMARY KEY, status TEXT NOT NULL, stage TEXT NOT NULL,
                 created REAL NOT NULL, updated REAL NOT NULL, data TEXT NOT NULL);
@@ -67,7 +67,7 @@ class Store:
                 meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
                 row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() if meta else None
                 version = row[0] if row else "0"
-                if version not in {"0", "1", "2", "3", "4", "5", "6"}:
+                if version not in {"0", "1", "2", "3", "4", "5", "6", "7"}:
                     raise AA2Error("Unsupported state database version")
             return
         if readonly:
@@ -128,7 +128,7 @@ class Store:
             import re
             required = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", SCHEMA))
             columns = {row[1] for row in db.execute("PRAGMA table_info(questions)")}
-            if version == "6" and required <= tables and {"interaction", "superseded"} <= columns:
+            if version == "7" and required <= tables and {"interaction", "superseded"} <= columns:
                 return
             backup = self.root / f"state-v{version if version != '0' else '1'}.backup.sqlite"
             if not backup.exists():
@@ -159,6 +159,13 @@ class Store:
                     "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
                 self._put(db, rid, f"migration/v{version if version != '0' else '1'}",
                           {"version": int(version), "records": records})
+                for task in (records.get("plan") or {}).get("tasks", []):
+                    owner = task.get("origin_id") or task["id"]
+                    key = "automation/engineering/" + owner
+                    if key not in records:
+                        self._put(db, rid, key, {"legacy_baseline": True, "achieved": {}})
+                if "automation/engineering/final" not in records:
+                    self._put(db, rid, "automation/engineering/final", {"legacy_baseline": True, "achieved": {}})
                 if version in {"0", "1"}:
                     if records.get("plan"):
                         self._put(db, rid, "plan_revision/current", {"version": 1, "revision": 1})
@@ -167,7 +174,7 @@ class Store:
                         self._put(db, rid, "task_state/" + task["id"], {
                             "version": 1, "revision": 1, "implementation": "accepted" if task["id"] in done else "pending",
                             "evidence": "stale" if task["id"] in done else "absent"})
-                if version in {"3", "4", "5", "6"}:
+                if version in {"3", "4", "5", "6", "7"}:
                     continue  # v3 data semantics are already current; only its schema needs repair.
                 owners = {}
                 for key, value in records.items():
@@ -188,8 +195,8 @@ class Store:
                     if key.startswith("replanning/evidence/") and key != "replanning/evidence/contracts":
                         self._put(db, rid, key, {**value, "comparable": False,
                                                "comparison_reason": "legacy evidence requires revalidation"})
-            db.execute("UPDATE meta SET value='6' WHERE key='schema_version'")
-            self._event(db, None, "state.migrated", {"version": 6, "backup": str(backup)})
+            db.execute("UPDATE meta SET value='7' WHERE key='schema_version'")
+            self._event(db, None, "state.migrated", {"version": 7, "backup": str(backup)})
 
     def finish_recovery(self, rid, updates, pending, *, replan=None, successor=None):
         """Dispatch and retire the obsolete question together; retain raw history."""
@@ -366,6 +373,13 @@ class Store:
         with self.connect() as db:
             return self._decision_questions(db, rid, keys)
 
+    def decision_question_keys(self, rid, prefix):
+        with self.connect() as db:
+            return [row[0] for row in db.execute(
+                "SELECT key FROM questions WHERE run_id=? AND superseded=0 "
+                "AND (key=? OR substr(key,1,?)=?) ORDER BY key",
+                (rid, prefix, len(prefix) + 1, prefix + "/"))]
+
     def apply_decision(self, rid, receipt, request, result, actor, guards, updates, questions, question_keys,
                        *, result_key=None, answers=None, supersede_keys=None):
         """CAS the state, human answers, grant and audit receipt in one transaction."""
@@ -387,7 +401,7 @@ class Store:
                 self._put(db, rid, key, value)
             self._put(db, rid, receipt, {"actor": actor, "request": request, "result": result,
                 "result_key": result_key, "answers": answers or {}, "applied": True})
-            if actor != "human":
+            if actor != "human" or supersede_keys is not None:
                 for key in question_keys if supersede_keys is None else supersede_keys:
                     db.execute("UPDATE questions SET superseded=1 WHERE run_id=? AND key=? AND answer IS NULL", (rid, key))
             self._event(db, rid, "decision.applied", {"actor": actor, "kind": request["kind"],
@@ -612,7 +626,21 @@ class Store:
             return {row["key"]: json.loads(row["data"]) for row in db.execute(
                 "SELECT key,data FROM checkpoints WHERE run_id=? AND "
                 "(key LIKE 'recovery/budgets/%' OR key LIKE 'rounds/%' OR key LIKE 'budget_grants/%' "
-                "OR key LIKE 'automation/%' OR key LIKE 'decisions/applied/%' OR key LIKE 'recovery/diagnosis_grants/%')", (rid,))}
+                "OR key LIKE 'automation/%' OR key LIKE 'decisions/applied/%' OR key LIKE 'recovery/diagnosis_grants/%' "
+                "OR key LIKE 'recovery/cycles/%' OR key LIKE 'recovery/permits/%')", (rid,))}
+
+    def recovery_history(self, rid, owner):
+        """Bound the decision context without discarding durable attempts or outcomes."""
+        with self.connect() as db:
+            rows = [json.loads(row[0]) for row in db.execute(
+                "SELECT data FROM checkpoints WHERE run_id=? AND key LIKE 'recovery/permits/%' ORDER BY rowid", (rid,))]
+        rows = [row for row in rows if row.get("owner") == owner]
+        counts = {}
+        for row in rows:
+            action = row["action"]["action"]
+            counts[action] = counts.get(action, 0) + 1
+        return {"total_actions": len(rows), "by_action": counts, "recent": rows[-16:],
+                "older_actions": max(0, len(rows) - 16)}
 
     def delivery_evidence(self, rid):
         result = {}

@@ -51,6 +51,10 @@ class PatchRepairBlocked(AA2Error):
     code = "PATCH_REPAIR_BLOCKED"
 
 
+class PatchRepairExhausted(PatchRepairBlocked):
+    """This correction attempt ended; recovery may authorize a new candidate."""
+
+
 class ProtectedChange(PolicyViolation):
     """A valid candidate requiring independent protected-file authorization."""
 

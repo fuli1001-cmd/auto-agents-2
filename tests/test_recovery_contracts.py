@@ -157,7 +157,7 @@ def test_migration_is_explicit_idempotent_and_preserves_raw_unapplied_proposals(
     state = tmp_path / ".aa2"
     state.mkdir()
     with sqlite3.connect(state / "state.sqlite") as db:
-        db.executescript(";".join(s for s in SCHEMA.replace("'schema_version','6'", "'schema_version','1'").split(";")
+        db.executescript(";".join(s for s in SCHEMA.replace("'schema_version','7'", "'schema_version','1'").split(";")
                                  if "resource_holds" not in s))
     store = Store(tmp_path)
     rid = store.admit("requirements", {})["id"]

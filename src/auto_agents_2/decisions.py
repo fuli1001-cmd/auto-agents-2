@@ -22,11 +22,13 @@ class DecisionResult(Record):
     reason: str = Field(min_length=1)
     evidence_refs: list[str] = []
     answers: list[FactAnswer] = []
+    selected_action: str | None = None
+    expected_result: str = ""
 
 
 class DecisionRequest(Record):
     version: Literal[1] = 1
-    kind: Literal["implementation_grant", "diagnosis_grant", "technical_clarification"]
+    kind: Literal["implementation_grant", "diagnosis_grant", "technical_clarification", "recovery_action"]
     owner: str
     allowed_choices: list[str]
     scope: dict
@@ -92,6 +94,9 @@ class DecisionService:
             raise ValueError("Unknown evidence")
         if result.action != "ask_user" and not result.evidence_refs:
             raise ValueError("Evidence required")
+        if request.kind == "recovery_action" and result.action == "approve":
+            if result.selected_action not in request.scope["candidates"] or not result.expected_result.strip():
+                raise ValueError("Recovery requires an allowed action and an expected observable result")
         if request.kind != "technical_clarification":
             if result.answers:
                 raise ValueError("Grant cannot answer questions")
@@ -121,9 +126,8 @@ class DecisionService:
         self.store.checkpoint(rid, key, {"actor": "human", "owner": owner, "action": action, "progress": progress})
 
     async def ensure_progress(self, rid, owner, action):
-        if self.engine.convergence.blocked(rid, owner):
-            await self.human_action(rid, owner, action,
-                "固定验收项连续未超越历史最好结果，或再次缺少有效检查证据。已停止自动实现、诊断和决策。待授权动作：" + action)
+        """Compatibility entrypoint: progress is evidence, never an authorization gate."""
+        return self.engine.convergence.state(rid, owner)
 
     async def grant(self, rid, *, kind, owner, count, limit_key, question_key, reason, work, evidence, extra_guards=(), force_human=False):
         if self.store.get(rid, limit_key, 0) >= count + 1:
@@ -136,7 +140,8 @@ class DecisionService:
         request = DecisionRequest(kind=kind, owner=owner, allowed_choices=["approve", "ask_user"],
             scope={"one_attempt": True, "same_requirements": True,
                    "tasks": [t for t in tasks if owner == "final" or (t.get("origin_id") or t["id"]) == owner]}, evidence=evidence,
-            budget={"consumed": count, "grant": count + 1, "automatic_ceiling": ceiling},
+            budget={"consumed": count, "grant": count + 1, "legacy_automatic_ceiling": ceiling,
+                    "count_limits_enforced": False},
             state_identity=digest([guards, source, policy.model_dump()]))
         receipt = "decisions/applied/" + digest(request.model_dump())
         if self.store.get(rid, receipt):
@@ -144,12 +149,11 @@ class DecisionService:
         # A human response already present takes precedence. Unanswered legacy questions
         # may be reassessed; applying an agent result supersedes them without answering.
         questions = self.store.decision_questions(rid, [question_key])
-        manual = (force_human or not policy.enabled or count >= ceiling or self.engine.convergence.blocked(rid, owner)
+        manual = (force_human or not policy.enabled
                   or any(q["answer"] is not None for q in questions))
         if not manual:
             result_key, result = await self.propose(rid, request, work)
             if (tree_hash(work) == source and self.engine.config.load().automation == policy
-                    and not self.engine.convergence.blocked(rid, owner)
                     and result.action == "approve"
                     and self.store.apply_decision(rid, receipt, request.model_dump(), result.model_dump(), "agent",
                         guards, {limit_key: count + 1}, questions, [question_key], result_key=result_key)):
@@ -158,7 +162,7 @@ class DecisionService:
                 else "授权依据或人工回答已变化，重新核对后由用户决定。"})
         elif policy.enabled:
             self.store.event(rid, "decision.deferred", {"owner": owner, "reason":
-                "自动授权已停止：达到累计上限、进度停止条件或需要人工核对。"})
+                "当前授权需要人工核对。累计次数和停滞记录不构成停止条件。"})
         interaction = choice_spec(["授权这一次操作", "暂停，稍后续跑"], ["continue", "pause"], yes_no=True)
         interaction["pause_on"] = "n"
         answered = [q for q in self.store.decision_questions(rid, [question_key]) if q["answer"] is not None]
@@ -199,13 +203,8 @@ class DecisionService:
         eligible = {str(i): {"prompt": q if isinstance(q, str) else q.prompt,
                              "options": [] if isinstance(q, str) else q.options}
                     for i, q in enumerate(questions) if not is_prototype_approval(q)}
-        if (not eligible or not self.engine.config.load().automation.enabled
-                or self.engine.convergence.blocked(rid, "final")):
+        if not eligible or not self.engine.config.load().automation.enabled:
             return {}
-        # A stalled task must not call a decision agent through a clarification detour.
-        for task in (self.store.get(rid, "plan", {}) or {}).get("tasks", []):
-            if self.engine.convergence.blocked(rid, task.get("origin_id") or task["id"]):
-                return {}
         keys = [f"{key}/{i}" for i in eligible]
         questions_state = self.store.decision_questions(rid, keys)
         answered = {q["key"] for q in questions_state if q["answer"] is not None}

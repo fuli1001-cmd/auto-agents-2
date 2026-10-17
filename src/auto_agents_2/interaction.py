@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from contextlib import nullcontext
 
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.validation import ValidationError, Validator
@@ -80,8 +81,12 @@ async def prompt_answer(session, question: dict) -> str:
         def submit(event):
             event.current_buffer.validate_and_handle()
 
-    return await session.prompt_async(
-        message, multiline=not choice, key_bindings=bindings,
-        validator=AnswerValidator(interaction), validate_while_typing=False,
-        prompt_continuation="  ", enable_history_search=False,
-    )
+    # A dumb-terminal prompt is printed before prompt_toolkit enters raw mode.
+    # Enter it first so an immediate Ctrl+C cannot be swallowed by line discipline.
+    prompt_input = getattr(session, "input", None)
+    with prompt_input.raw_mode() if prompt_input is not None else nullcontext():
+        return await session.prompt_async(
+            message, multiline=not choice, key_bindings=bindings,
+            validator=AnswerValidator(interaction), validate_while_typing=False,
+            prompt_continuation="  ", enable_history_search=False,
+        )

@@ -30,6 +30,7 @@ from .errors import (
     AA2Error,
     DependencyResolutionError,
     InvalidStructuredResponse,
+    PatchRepairExhausted,
     PolicyViolation,
     ProtectedChange,
     PrototypeBrowserError,
@@ -59,10 +60,10 @@ from .recovery import (
     FailureRecord,
     RecoveryNeeded,
     check_failure,
-    observation_identity,
     request_from,
 )
 from .recovery_controller import RecoveryController
+from .recovery_policy import RecoveryPolicy
 from .replanning import browser_criteria, check_criteria
 from .requirements import capture, validate_coverage
 from .research import ResearchService
@@ -118,6 +119,7 @@ class WorkflowEngine:
         self.recovery = RecoveryController(self)
         self.convergence = Convergence(self.store, self.config)
         self.decisions = DecisionService(self)
+        self.recovery_policy = RecoveryPolicy(self)
         browser_environment(self.store.root / "cache/browsers")
 
     async def start(self, source: str | None = None, provider: str | None = None, run_id: str | None = None, *, allow_resume: bool = True):
@@ -149,6 +151,9 @@ class WorkflowEngine:
                 if run["status"] in {"SUCCEEDED", "CANCELLED"}:
                     return run
             rid = run["id"]
+            self.store.event(rid, "automation.policy", {"enabled": self.config.load().automation.enabled,
+                "count_limits_enforced": False,
+                "message": "生成及验收阶段的累计实现、诊断和停滞次数仅供决策参考；旧轮数上限不再触发停止。"})
             if self.store.get(rid, "control/cancel"):
                 self.store.checkpoint(rid, "control/cancel", False)
             self.store.update(rid, status="RUNNING")
@@ -289,25 +294,51 @@ class WorkflowEngine:
                     observed = updates["recovery/observations/" + (task.origin_id or task.id)]
                     updates[key] = {**state, "evidence": "valid" if all(r["passed"] for r in observed) else "failed"}
         self.store.checkpoints(rid, updates)
+        owner = "final" if scope == "final-checks" else scope.removeprefix("task/")
+        summaries = updates["recovery/observations/" + scope.removeprefix("task/")]
+        proof = {"checkpoint": f"replanning/evidence/{scope}", "source_hash": source,
+                 "environment_hash": environment.fingerprint}
+        if commands and summaries and all(row["valid"] for row in summaries):
+            self.convergence.milestone(rid, owner, "checks_valid", proof)
+        producers = [c for c in commands if c.outputs]
+        if producers and all(any(row["cwd"] == c.cwd and row["argv"] == c.argv and row["valid"]
+                and row["passed"] for row in summaries) for c in producers):
+            self.convergence.milestone(rid, owner, "build_ready", proof)
         self.store.event(rid, "recovery.observed", {"scope": scope,
             "checks": updates["recovery/observations/" + scope.removeprefix("task/")]})
 
     async def _grant_replan(self, rid, pending):
-        decision = pending["decision"]
-        if decision["stalled"] >= self.config.load().execution.max_stalled_replans and not pending["granted"]:
-            interaction = choice_spec(["已处理，再尝试一次", "暂停，稍后续跑"], ["continue", "pause"], yes_no=True)
-            interaction["pause_on"] = "n"
-            reason = pending["reason"]
-            if pending.get("verification_recheck"):
-                from .recovery import failure_summary
-                reason = "最新控制器复测仍未通过：\n" + failure_summary(pending["verification_recheck"]["checks"]) + "\n原回退请求：" + reason
-            await self._ask(rid, f"replan-stalled/{pending['evaluation']}",
-                            f"计划/门禁历史连续 {decision['stalled']} 次未证实改进。\n"
-                            f"待授权动作：{pending['stage']} 修订\n原因：{reason}\n"
-                            "确认仅授权本次修订；历史计数不变。也可暂停。",
-                            digest(pending), interaction)
-            pending["granted"] = True
+        # A controller-owned correction or an authorized local patch has already
+        # been adjudicated. Counts do not introduce an extra approval boundary.
+        key = f"replan-stalled/{pending['evaluation']}"
+        answered = [q for q in self.store.decision_questions(rid, [key]) if q["answer"] is not None]
+        if answered and not pending.get("granted"):
+            question = self.store.question(answered[-1]["id"])
+            await self._ask(rid, key, question["prompt"], question["artifact_hash"], question["interaction"])
+            pending = {**pending, "granted": True}
             self.store.checkpoint(rid, "replanning/pending", pending)
+        if pending.get("granted"):
+            return pending
+        active = self.store.get(rid, "recovery/active", {}) or {}
+        if active.get("permit") and active.get("decision", {}).get("action") == "plan_patch":
+            return pending
+        from .recovery import RecoveryDecision
+        stage = "plan_patch" if pending["stage"] == "plan" else pending["stage"]
+        failure = FailureRecord.create(kind="contract", component="controller", origin_id="gates",
+            step="upstream", obligations=["accepted_requirements"], evidence_refs=["replanning/pending"],
+            evidence={"pending": pending, "checks": pending.get("verification_recheck", {}).get("checks", [])})
+        action = RecoveryDecision(failure_id=failure.id, action=stage, budget_owner="gates",
+                                  reason=pending["reason"], evidence_refs=failure.evidence_refs)
+        work = self.store.root / "worktrees" / rid / "integration"
+        if not work.is_dir():
+            work = self.project
+        proposed = {"attempt": pending["evaluation"], "failure": failure.model_dump()}
+        _, permit = await self.recovery_policy.authorize(rid, failure, proposed, work, None, action,
+            operation="controller-replan", established=pending["decision"].get("improved", False),
+            candidates={stage: action}, controller_owned=True)
+        self.recovery_policy.start(rid, permit)
+        pending = {**pending, "granted": True, "permit": permit}
+        self.store.checkpoint(rid, "replanning/pending", pending)
         return pending
 
     async def _resume_replan(self, rid):
@@ -316,6 +347,7 @@ class WorkflowEngine:
         archived = self.archive_workers(rid, pending["generation"])
         self.store.supersede_questions(rid, f"replan-stalled/{pending['evaluation']}")
         self.store.complete_replan(rid, STAGES[STAGES.index(pending["stage"]):], archived)
+        self.recovery_policy.complete(rid, pending.get("permit"), {"status": "gate_reset", "stage": pending["stage"]})
 
     def _legacy_recovery(self, rid):
         pending = self.store.get(rid, "replanning/pending")
@@ -1298,16 +1330,33 @@ class WorkflowEngine:
         key = "infrastructure/environment/" + digest([str(work), tree_hash(work)])
         while True:
             failures = self.store.get(rid, key, 0)
+            permit = None
             if failures > self.config.load().execution.infra_retries:
-                await self.recovery._grant(rid, key + f"/grant/{failures}",
-                                          "环境准备的暂时性故障已达到重试上限。继续只增加一次准备机会。")
+                from .recovery import RecoveryDecision
+                record = FailureRecord.create(kind="environment", component="infrastructure",
+                    origin_id="environment/" + digest(str(work)), step="environment_retry", obligations=[key],
+                    evidence_refs=[key], evidence={"attempts": failures,
+                        "last_failure": self.store.get(rid, f"recovery/infrastructure/{digest(key)}/{failures}", {})})
+                active = {"attempt": failures + 1, "failure": record.model_dump()}
+                suggested = RecoveryDecision(failure_id=record.id, action="recheck", budget_owner=record.origin_id,
+                    reason="环境准备的单次重试已结束，评估是否再次准备同一环境", evidence_refs=[key])
+                _, permit = await self.recovery_policy.authorize(rid, record, active, work, None, suggested,
+                    operation=f"environment/{failures}", force_decision=True, candidates={"recheck": suggested})
+                self.recovery_policy.start(rid, permit)
             try:
-                return await self._environment_once(work, rid, plan)
+                environment = await self._environment_once(work, rid, plan)
+                self.recovery_policy.complete(rid, permit, {"status": "verified", "environment_hash": environment.fingerprint})
+                if permit:
+                    self.recovery_policy.finish_cycle(rid, active, {"status": "verified"})
+                return environment
             except RetryableInfrastructureError as exc:
                 self.store.checkpoints(rid, {key: failures + 1,
                     f"recovery/infrastructure/{digest(key)}/{failures + 1}": {
                         "component": "environment", "workspace": str(work), "error": str(exc)}})
                 self.store.event(rid, "environment.retrying", {"failure": failures + 1, "error": str(exc)})
+                self.recovery_policy.complete(rid, permit, {"status": "failed", "attempt": failures + 1})
+                if permit:
+                    self.recovery_policy.finish_cycle(rid, active, {"status": "failed"})
                 await asyncio.sleep(min(2 ** failures, 8))
 
     async def _environment_once(self, work, rid, plan=None):
@@ -1370,9 +1419,30 @@ class WorkflowEngine:
         counters = self.store.get(rid, "rounds/" + owner, {"round": 0})
         token = saved.get("observation_id", ["implementation", owner, counters["round"]])
         observation = self.store.get(rid, "replanning/evidence/task/" + owner) if checked else None
-        progress = self.convergence.observe(rid, owner, token, observation, approved=approved)
+        phase = "checks" if checked else "environment" if saved.get("environment_error") else (
+            "candidate" if saved.get("candidate_error") else "proposal")
+        progress = self.convergence.observe(rid, owner, token, observation, approved=approved, phase=phase)
         self.store.checkpoint(rid, "rounds/" + owner, {**counters, "stalled": progress.get("stalled", 0)})
         return progress
+
+    def _task_failure(self, rid, task, saved, *, kind=None, step="checks", proposal=None):
+        feedback = saved.get("feedback", {})
+        current = saved if any(k in saved for k in ("checks", "review", "environment_error", "candidate_error")) else feedback
+        evidence = {k: current.get(k) for k in
+                    ("checks", "review", "environment_error", "candidate_error")}
+        evidence["checks"] = evidence["checks"] or []
+        evidence["task"] = task.model_dump()
+        if kind is None:
+            kind = ("integration" if feedback.get("baseline_refresh", {}).get("retained_candidate") else
+                    "environment" if evidence["environment_error"] else "proposal" if evidence["candidate_error"]
+                    else "review" if evidence["review"] and not evidence["review"].get("approved") else "checks")
+        if kind == "integration":
+            evidence["baseline_refresh"] = feedback["baseline_refresh"]
+        self.recovery_policy.task_outcome(rid, saved, task.id, {"status": "failed", "kind": kind,
+            "evidence": "develop/task/" + task.id, "observation": digest(evidence)})
+        return FailureRecord.create(kind=kind, component="implementation", origin_id=task.origin_id or task.id,
+            task_id=task.id, step=step, obligations=task.requirement_ids, evidence_refs=["develop/task/" + task.id],
+            evidence=evidence, proposal=proposal or {})
 
     def _final_progress(self, rid, plan, token, *, frontend=False, visuals=(), approved=False):
         observation = self.store.get(rid, "replanning/evidence/final-checks", {})
@@ -1381,6 +1451,17 @@ class WorkflowEngine:
             observation = {**observation, "criteria": {**observation.get("criteria", {}), **browser},
                 "progress_criteria": {**observation.get("progress_criteria", observation.get("criteria", {})), **browser}}
         self.convergence.observe(rid, "final", ["final", token], observation, approved=approved)
+        permit = self.store.get(rid, "recovery/final-action")
+        if permit:
+            outcome = {"status": "verified" if approved else "unpassed", "observation": ["final", token],
+                       "evidence": "verify/checks"}
+            self.recovery_policy.complete(rid, permit, outcome)
+            record = self.store.get(rid, permit, {})
+            cycle_key = "recovery/cycles/" + record.get("cycle_id", "")
+            cycle = self.store.get(rid, cycle_key)
+            if cycle:
+                self.store.checkpoint(rid, cycle_key, {**cycle, "phase": "completed", "outcomes": outcome})
+            self.store.checkpoint(rid, "recovery/final-action", None)
 
     async def _task(self, rid, task, base, plan, context):
         key = f"develop/task/{task.id}"
@@ -1423,15 +1504,14 @@ class WorkflowEngine:
                 self.store.checkpoint(rid, key, saved)
             if saved.get("phase") not in {"implementing", "applied", "tested"}:
                 counters = self.store.get(rid, counter_key, counters)
-                cfg = self.config.load()
-                threshold = min(cfg.execution.max_rounds, cfg.automation.max_implementation_rounds) if cfg.automation.enabled else cfg.execution.max_rounds
-                limit = max(threshold,
-                            self.store.get(rid, "budget_grants/" + (task.origin_id or task.id), 0))
-                if counters["round"] >= limit:
-                    break
-                await self.decisions.ensure_progress(rid, task.origin_id or task.id, f"implementation/{counters['round'] + 1}")
+                if saved.get("phase") == "rejected":
+                    if saved.get("source_hash") and saved["source_hash"] != tree_hash(work):
+                        raise PolicyViolation("Retained rejected candidate changed; preserve user edits before recovery")
+                    if not self.recovery_policy.task_authorized(rid, saved, task):
+                        raise RecoveryNeeded(self._task_failure(rid, task, saved))
                 counters["round"] += 1
                 saved = {"phase": "implementing", "workspace": str(work), "source_hash": tree_hash(work),
+                    "recovery_permit": saved.get("recovery_permit"),
                     "observation_id": ["implementation", task.origin_id or task.id, counters["round"]], "feedback": {
                     **saved.get("feedback", {}), **{k: v for k, v in saved.items() if k in {
                         "checks", "review", "environment_error", "candidate_error", "controller_recheck", "controller_approval_recheck"}}}}
@@ -1461,9 +1541,7 @@ class WorkflowEngine:
                       await self._invoke("implement", task_context, ImplementationResult, work, rid, key))
             if request_from(change):
                 self._task_progress(rid, task, saved)
-                raise RecoveryNeeded(FailureRecord.create(kind="proposal", component="implementation", origin_id=task.origin_id or task.id,
-                    task_id=task.id, step="task", obligations=task.requirement_ids, evidence_refs=[key, "invocation/" + key],
-                    evidence={"task": task.model_dump(), "feedback": feedback, "execution_contract": task_context["execution_contract"]},
+                raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="proposal", step="task",
                     proposal=change.model_dump()))
             self._task_approval_context(rid, work, context)
             if saved.get("phase") == "implementing":
@@ -1486,21 +1564,24 @@ class WorkflowEngine:
                                                            "purpose": "Authorize proposed protected test/config changes against requirements"},
                                                 ReviewResult, work, rid, key + "/test-change-review", fresh=True)
                     if not review.approved:
+                        saved = {**saved, "review": review.model_dump(), "candidate_error": "Protected candidate rejected",
+                                 "phase": "rejected", "workspace": str(work)}
                         self._task_progress(rid, task, saved)
-                        saved = {"review": review.model_dump(), "phase": "rejected", "workspace": str(work)}
                         self.store.checkpoint(rid, key, saved)
-                        continue
+                        raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="proposal", step="candidate"))
                     prepared = prepare_changes(work, change.changes, task.allowed_paths, protected=False)
-                except PolicyViolation as exc:
+                except (PolicyViolation, PatchRepairExhausted) as exc:
+                    saved = {**saved, "phase": "rejected", "candidate_error": str(exc), "workspace": str(work)}
                     self._task_progress(rid, task, saved)
-                    saved = {"phase": "rejected", "candidate_error": str(exc), "workspace": str(work)}
                     self.store.checkpoint(rid, key, saved)
-                    continue
+                    raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="proposal", step="candidate"))
                 saved["patch"] = prepared
                 self.store.checkpoint(rid, key, saved)
                 apply_prepared(work, prepared)
                 saved.update(phase="applied", source_hash=tree_hash(work))
                 self.store.checkpoint(rid, key, saved)
+                self.convergence.milestone(rid, task.origin_id or task.id, "candidate_applied",
+                    {"source_hash": saved["source_hash"], "checkpoint": key})
             try:
                 environment = await self._environment(work, rid, plan)
             except DependencyResolutionError as exc:
@@ -1513,11 +1594,9 @@ class WorkflowEngine:
                     f"candidate/environment-failures/{task.id}/p{generation}/r{counters['round']}": {
                         **saved, "workspace": str(work)},
                 })
-                if self.convergence.blocked(rid, task.origin_id or task.id):
-                    raise RecoveryNeeded(FailureRecord.create(kind="environment", component="environment", origin_id=task.origin_id or task.id,
-                        task_id=task.id, step="environment", obligations=task.requirement_ids,
-                        evidence_refs=[key], evidence={"environment_error": str(exc)})) from exc
-                continue
+                raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="environment", step="environment")) from exc
+            self.convergence.milestone(rid, task.origin_id or task.id, "environment_ready",
+                {"source_hash": tree_hash(work), "environment_hash": environment.fingerprint})
             prior_checks = [CheckResult.model_validate(c) for c in saved.get("checks", [])]
             commands = self._task_commands(rid, task, work, plan)
             task_context["verification_contract"] = self._verification_contract(commands)
@@ -1532,9 +1611,12 @@ class WorkflowEngine:
             if not passed(checks):
                 failure_record = check_failure(commands, checks, task=task, evidence_ref=key)
                 self.store.checkpoint(rid, state_key, {**state, "evidence": "failed"})
-                if failure_record.kind in {"evidence", "build"}:
-                    self._task_progress(rid, task, saved, checked=True)
-                    raise RecoveryNeeded(failure_record)
+                self._task_progress(rid, task, saved, checked=True)
+                saved["phase"] = "rejected"
+                self.store.checkpoint(rid, key, saved)
+                self.recovery_policy.task_outcome(rid, saved, task.id, {"status": "failed",
+                    "kind": failure_record.kind, "evidence": key, "observation": digest(failure_record.evidence)})
+                raise RecoveryNeeded(failure_record)
             if passed(checks):
                 task_context.update(self._task_approval_context(rid, work, context))
                 review = await self._invoke("review", {**task_context, "implementation": change.model_dump(),
@@ -1551,37 +1633,13 @@ class WorkflowEngine:
                     commit = self.workspaces.checkpoint(work, recovery_ref, f"aa2: {task.title}")
                     self.store.checkpoints(rid, {key: {**saved, "commit": commit, "workspace": str(work), "recovery_ref": recovery_ref},
                         state_key: {**state, "implementation": "accepted", "evidence": "valid"}})
+                    self.recovery_policy.task_outcome(rid, saved, task.id, {"status": "verified", "commit": commit,
+                        "source_hash": saved["source_hash"], "evidence": key})
                     return commit
             self._task_progress(rid, task, saved, checked=True)
             saved["phase"] = "rejected"
             self.store.checkpoint(rid, key, saved)
-        latest = saved.get("checks", saved.get("feedback", {}).get("checks", []))
-        review = saved.get("review", saved.get("feedback", {}).get("review"))
-        error = saved.get("environment_error", saved.get("feedback", {}).get("environment_error"))
-        observation = observation_identity(latest, review, error)
-        authorization = saved.get("feedback", {}).get("failure", {})
-        prior = authorization.get("evidence", {})
-        authorized = (authorization.get("origin_id") == (task.origin_id or task.id)
-            and saved.get("feedback", {}).get("controller_recovery", {}).get("action") == "repair"
-            and observation == observation_identity(prior.get("checks", []), prior.get("review"), prior.get("environment_error")))
-        if not authorized:
-            raise RecoveryNeeded(FailureRecord.create(kind="environment" if error else "checks", component="task_budget",
-                origin_id=task.origin_id or task.id, task_id=task.id, step="task_budget", obligations=task.requirement_ids,
-                evidence_refs=[key], evidence={"checks": latest, "review": review, "environment_error": error,
-                    "task": task.model_dump(), "budget": counters,
-                    "constraint": "Implementation budget is exhausted. Diagnose the current evidence first. "
-                                  "A recheck consumes no implementation round; repair requires a specific additional grant."}))
-        from .recovery import failure_summary
-        await self.decisions.grant(rid, kind="implementation_grant", owner=task.origin_id or task.id,
-            count=counters['round'], limit_key="budget_grants/" + (task.origin_id or task.id), work=work,
-            question_key=f"round-budget/{task.origin_id or task.id}/{counters['round']}/{observation[:16]}",
-            evidence={"failure": authorization, "diagnosis": saved["feedback"]["controller_recovery"],
-                      "progress": self.convergence.state(rid, task.origin_id or task.id)}, extra_guards=[key],
-            reason=f"任务 {task.id} 已达到实现轮数上限。独立诊断建议继续在原范围修复："
-                                  + saved["feedback"]["controller_recovery"]["reason"] + "\n" + failure_summary(latest, review=review, environment_error=error)
-                                  + "\n确认只增加一次实现机会，历史计数保持不变。")
-        return await self._task(rid, task, base, plan, context)
-
+            raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="review", step="review"))
     async def _ensure_browser(self, rid, workspace):
         cache = self.store.root / "cache/browsers"
         cache.mkdir(parents=True, exist_ok=True)
@@ -1887,6 +1945,8 @@ class WorkflowEngine:
             previous["commit"] = self.workspaces.finish_checkpoint(work, previous["commit_intent"])
             previous["result_source"] = tree_hash(work)
             self.store.checkpoint(rid, pending_key, previous)
+            self.recovery.complete_delivery_action(rid, previous.get("recovery_permit"),
+                {"status": "applied", "commit": previous["commit"], "source_hash": previous["result_source"]})
             return
         if resuming:
             source = prepared_before_hash(work, previous["patch"]) if previous.get("patch") else tree_hash(work)
@@ -1901,14 +1961,24 @@ class WorkflowEngine:
             rejection = pending.get("rejection", {})
             if pending.get("identity") != identity or pending.get("phase") == "rejected":
                 count = self.store.get(rid, key, {"round": 0})["round"]
-                if count >= self.config.load().execution.max_rounds:
+                published = bool((self.store.get(rid, "delivery/journal", {}) or {}).get("publication_started"))
+                if published and count >= self.config.load().execution.max_rounds:
                     raise AA2Error("主分支集成修复预算耗尽，请人工核对规划")
+                if pending.get("phase") == "rejected" and not published:
+                    self.recovery.complete_delivery_action(rid, pending.get("recovery_permit"),
+                        {"status": "rejected", "feedback": rejection})
+                    action = await self.recovery.delivery_decision(rid, work,
+                        {"prior_failure": feedback, **rejection}, scopes,
+                        observation=digest([trigger, count, rejection]))
+                    if action == "recheck":
+                        return
                 if pending:
                     self.artifacts.put(pending, "delivery-repair-history")
                 pending = {"identity": identity, "trigger": trigger, "feedback_identity": feedback_identity,
                            "feedback": feedback, "scopes": scopes,
                            "base_source": tree_hash(work), "base_head": git(work, "rev-parse", "HEAD"),
-                           "round": count + 1, "rejection": rejection}
+                           "round": count + 1, "rejection": rejection,
+                           "recovery_permit": self.store.get(rid, "recovery/delivery-action")}
                 self.store.checkpoints(rid, {key: {"round": count + 1}, pending_key: pending})
             if pending.get("commit"):
                 if (pending.get("result_source") != tree_hash(work)
@@ -1949,7 +2019,7 @@ class WorkflowEngine:
                         stage="implement", context=context, operation=f"delivery-repair/{count}", contracts=contracts)
                     proposal = proposal.model_copy(update={"changes": changes})
                     pending["proposal"] = proposal.model_dump()
-            except PolicyViolation as exc:
+            except (PolicyViolation, PatchRepairExhausted) as exc:
                 pending.update(phase="rejected", rejection={"candidate_error": str(exc)})
                 self.store.checkpoint(rid, pending_key, pending)
                 continue
@@ -1971,6 +2041,8 @@ class WorkflowEngine:
             pending["commit"] = self.workspaces.finish_checkpoint(work, pending["commit_intent"])
             pending["result_source"] = tree_hash(work)
             self.store.checkpoint(rid, pending_key, pending)
+            self.recovery.complete_delivery_action(rid, pending.get("recovery_permit"),
+                {"status": "applied", "commit": pending["commit"], "source_hash": pending["result_source"]})
             return
 
     def _candidate_checks(self, plan, work):

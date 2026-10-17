@@ -144,8 +144,16 @@ class ProgressDisplay:
         elif kind == "decision.applied":
             actor = {"human": "用户", "rule": "控制器规则", "agent": "决策代理"}.get(data["actor"], data["actor"])
             budget = data.get("budget", {})
-            detail = f"｜授权至第 {budget['grant']} 次｜自动上限 {budget['automatic_ceiling']}" if budget else ""
+            detail = f"｜本次授权第 {budget['grant']} 次" if "grant" in budget else ""
             self.message(f"决策已应用｜{actor}｜{data['owner']}{detail}\n{data['reason']}")
+        elif kind == "automation.policy":
+            self.message(data["message"])
+        elif kind == "recovery.authorized":
+            actor = {"rule": "控制器规则", "agent": "决策代理", "human": "用户"}[data["actor"]]
+            self.message(f"恢复授权｜{data['owner']}｜{data['action']}｜{actor}\n{data['reason']}")
+        elif kind == "automation.engineering":
+            if data["improved"]:
+                self.message(f"工程进展｜{data['owner']}｜{data['milestone']}｜业务验收仍须独立验证")
         elif kind == "automation.progress":
             self.message(f"进度评估｜{data['owner']}｜连续无新增通过 {data['stalled']} 次"
                          f"｜连续缺少有效证据 {data['missing']} 次")

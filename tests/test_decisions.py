@@ -40,7 +40,9 @@ class ApprovingAgent(CodingAgent):
         if stage == "decision":
             self.calls.append((stage, kwargs.get("fresh", False)))
             return DecisionResult(action="approve", reason="One scoped attempt within the supplied budget",
-                                  evidence_refs=list(context["decision_request"]["evidence"]))
+                evidence_refs=list(context["decision_request"]["evidence"]),
+                selected_action=next(iter(context["decision_request"]["scope"].get("candidates", {})), None),
+                expected_result="Observe the selected action's actual result")
         return await super().invoke(stage, context, schema, *args, **kwargs)
 
 
@@ -120,16 +122,14 @@ async def test_grant_is_one_increment_audited_and_idempotent_across_restart(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind,ceiling", [("implementation_grant", 12), ("diagnosis_grant", 4)])
-async def test_ceiling_stops_before_calling_decision_agent(tmp_path, kind, ceiling):
+async def test_legacy_ceiling_does_not_prevent_a_new_decision(tmp_path, kind, ceiling):
     workflow, rid = setup(tmp_path)
     await grant(workflow, rid, ceiling - 1, kind)
-    async def pause(question):
-        assert workflow.store.run(rid)["status"] == "WAITING_USER"
-        return "n"
-    workflow.question_handler = pause
-    with pytest.raises(asyncio.CancelledError):
-        await grant(workflow, rid, ceiling, kind)
-    assert len(workflow.agent.calls) == 1
+    await grant(workflow, rid, ceiling, kind)
+    assert len(workflow.agent.calls) == 2
+    assert not workflow.store.pending(rid)
+    key = "budget_grants/T1" if kind == "implementation_grant" else "recovery/diagnosis_grants/T1"
+    assert workflow.store.get(rid, key) == ceiling + 1
 
 
 @pytest.mark.asyncio
@@ -314,28 +314,17 @@ def test_progress_requires_historical_gain_and_deduplicates_completed_observatio
 
 
 @pytest.mark.asyncio
-async def test_no_progress_blocks_diagnosis_decision_and_implementation_without_reset(tmp_path):
+async def test_no_progress_is_decision_evidence_without_reset(tmp_path):
     workflow, rid = setup(tmp_path)
     for token in (1, 2, 3):
         workflow.convergence.observe(rid, "T1", token, {"criteria": {"a": False}})
     before = workflow.convergence.state(rid, "T1")
-    async def approve(question):
-        assert "停止自动" in question["prompt"]
-        return "y"
-    workflow.question_handler = approve
-    await workflow.decisions.ensure_progress(rid, "T1", "implementation/4")
-    await workflow.decisions.ensure_progress(rid, "T1", "implementation/4")
-    assert not workflow.agent.calls
+    for action in ("implementation/4", "diagnosis/1", "implementation/5"):
+        await workflow.decisions.ensure_progress(rid, "T1", action)
+    await grant(workflow, rid)
     assert workflow.convergence.state(rid, "T1") == before
-    async def pause(question):
-        return "n"
-    workflow.question_handler = pause
-    for action in ("diagnosis/1", "implementation/5"):
-        with pytest.raises(asyncio.CancelledError):
-            await workflow.decisions.ensure_progress(rid, "T1", action)
-    with pytest.raises(asyncio.CancelledError):
-        await grant(workflow, rid)
-    assert not workflow.agent.calls
+    assert len(workflow.agent.calls) == 1
+    assert not workflow.store.pending(rid)
 
 
 def test_missing_evidence_is_allowed_once_and_old_stall_is_retained(tmp_path):
@@ -447,11 +436,11 @@ async def test_diagnosis_routing_correction_and_budget_use_existing_provider(tmp
     assert workflow.store.get(rid, "recovery/active") is None
     completed = workflow.store.get(rid, f"recovery/completed/{record.id}/1")
     assert "diagnosis_feedback" not in completed
-    assert len([s for s, _ in agent.calls if s == "decision"]) == 2
+    assert len([s for s, _ in agent.calls if s == "decision"]) == 0
 
 
 @pytest.mark.asyncio
-async def test_invalid_diagnosis_schema_gets_one_correction_then_human_without_decision_call(tmp_path):
+async def test_invalid_diagnosis_schema_gets_one_correction_then_a_continuation_decision(tmp_path):
     workflow, rid = setup(tmp_path)
     configure(workflow, execution={"max_diagnosis_rounds": 9})
     base = workflow.workspaces.committed_baseline(rid, "main")
@@ -459,8 +448,10 @@ async def test_invalid_diagnosis_schema_gets_one_correction_then_human_without_d
     workflow.store.checkpoint(rid, "plan", plan().model_dump())
     calls = []
     async def invalid(stage, context, *args, **kwargs):
-        assert stage == "recovery_diagnosis"
         calls.append(stage)
+        if stage == "decision":
+            return DecisionResult(action="ask_user", reason="Repeated invalid diagnosis needs user input")
+        assert stage == "recovery_diagnosis"
         if len(calls) == 2:
             assert "Diagnosis schema" in context["diagnosis_feedback"]["validation_error"]
         raise InvalidStructuredResponse("fixture")
@@ -469,12 +460,12 @@ async def test_invalid_diagnosis_schema_gets_one_correction_then_human_without_d
     await workflow.recovery.resume(rid)
     await workflow.recovery.resume(rid)
     async def pause(question):
-        assert "格式修正后仍未通过" in question["prompt"]
+        assert "Repeated invalid diagnosis" in question["prompt"]
         return "n"
     workflow.question_handler = pause
     with pytest.raises(asyncio.CancelledError):
         await workflow.recovery.resume(rid)
-    assert len(calls) == 2
+    assert calls == ["recovery_diagnosis", "recovery_diagnosis", "decision"]
 
 
 @pytest.mark.asyncio
@@ -499,7 +490,7 @@ async def test_real_task_keeps_progressing_past_four_rounds_and_stops_when_verif
     contract = PlanResult(summary="value", document="value", tasks=[task], final_checks=[command])
     workflow.store.checkpoint(rid, "plan", contract.model_dump())
     workflow.workspaces.allocate(rid, "integration", base)
-    for _ in range(4):
+    for _ in range(8):
         try:
             commit = await workflow._task(rid, task, base, contract, {"specification": {}})
             break
@@ -510,18 +501,20 @@ async def test_real_task_keeps_progressing_past_four_rounds_and_stops_when_verif
         pytest.fail("task never completed")
     assert commit and agent.implementations == 6
     assert workflow.store.get(rid, "rounds/T1")["round"] == 6
-    assert workflow.store.get(rid, "budget_grants/T1") == 6
+    assert workflow.store.recovery_history(rid, "T1")["total_actions"] >= 5
     assert not workflow.store.pending(rid)
 
 
 @pytest.mark.asyncio
-async def test_review_wording_changes_do_not_prevent_early_stop(tmp_path):
+async def test_review_wording_changes_are_not_progress_and_decision_can_request_pause(tmp_path):
     class RejectedAgent(ApprovingAgent):
         iterations = 0
         async def invoke(self, stage, context, schema, *args, **kwargs):
             if stage == "implement":
                 self.iterations += 1
                 return ImplementationResult(summary="candidate", changes=[Change(path="value.py", content=f"value = {self.iterations}\n")])
+            if stage == "decision" and self.iterations == 3:
+                return DecisionResult(action="ask_user", reason="Repeated review rejection without progress")
             if schema is ReviewResult:
                 return ReviewResult(approved=False, summary=f"still missing {self.iterations}", findings=[Finding(
                     severity="major", location=f"line {self.iterations}", description="same unmet requirement", evidence="source", resolution="fix")])
@@ -534,10 +527,16 @@ async def test_review_wording_changes_do_not_prevent_early_stop(tmp_path):
         acceptance=["correct behavior"], checks=[command])
     contract = PlanResult(summary="value", document="value", tasks=[task], final_checks=[command])
     async def pause(question):
-        assert "停止自动" in question["prompt"]
+        assert "Repeated review rejection" in question["prompt"]
         return "n"
     workflow.question_handler = pause
+    workflow.store.checkpoint(rid, "plan", contract.model_dump())
+    workflow.workspaces.allocate(rid, "integration", base)
     with pytest.raises(asyncio.CancelledError):
-        await workflow._task(rid, task, base, contract, {"specification": {}})
-    assert agent.iterations == 3 and not agent.calls
+        for _ in range(3):
+            with pytest.raises(RecoveryNeeded) as caught:
+                await workflow._task(rid, task, base, contract, {"specification": {}})
+            workflow.recovery.submit(rid, caught.value.failure)
+            await workflow.recovery.resume(rid)
+    assert agent.iterations == 3 and agent.calls
     assert workflow.store.get(rid, "rounds/T1")["stalled"] == 2

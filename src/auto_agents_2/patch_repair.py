@@ -3,7 +3,13 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from .errors import PatchRepairBlocked, PolicyViolation, ProviderError, ReplacementMismatch
+from .errors import (
+    PatchRepairBlocked,
+    PatchRepairExhausted,
+    PolicyViolation,
+    ProviderError,
+    ReplacementMismatch,
+)
 from .models import Change, Record
 from .util import digest
 from .workspace import prepare_changes, tree_hash
@@ -58,7 +64,7 @@ class PatchRepairService:
                 if len(state["attempts"]) >= MAX_PATCH_CORRECTIONS:
                     state.update(phase="blocked", failure=failure)
                     engine.store.checkpoint(rid, key, state)
-                    raise PatchRepairBlocked(
+                    raise PatchRepairExhausted(
                         f"补丁自动纠错已达 {MAX_PATCH_CORRECTIONS} 次上限：{failure['path']} "
                         f"第 {failure['change_index'] + 1} 项替换仍匹配 {failure['matches']} 次。"
                         "原候选、纠错响应和当前文件均已保留；重复重试不会重置额度。")
