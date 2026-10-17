@@ -38,6 +38,19 @@ class PolicyViolation(AA2Error):
     code = "POLICY_VIOLATION"
 
 
+class ReplacementMismatch(PolicyViolation):
+    """A replace anchor failed validation before any files were written."""
+
+    def __init__(self, path, index, matches, reason):
+        self.details = {"path": path, "change_index": index, "matches": matches, "reason": reason}
+        super().__init__(f"Replacement must match exactly once: {path} "
+                         f"(change {index + 1}, matches={matches}, reason={reason})")
+
+
+class PatchRepairBlocked(AA2Error):
+    code = "PATCH_REPAIR_BLOCKED"
+
+
 class ProtectedChange(PolicyViolation):
     """A valid candidate requiring independent protected-file authorization."""
 

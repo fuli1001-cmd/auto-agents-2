@@ -186,5 +186,13 @@ class PromptCompiler:
                 "design": " This is a PRE-IMPLEMENTATION architecture gate. Assess boundaries, contracts, data invariants and verification strategy against the specification. Implementation files are not expected yet.",
                 "research": " This gate assesses external-service claims only. Use the controller's retrieved documents to check that URLs are first-party, versions and claims match the cited text, and documented capabilities are distinguished from actual live API tests. Implementation files are not expected yet.",
             }.get(kind, " This is a completed implementation gate. Require the actual code and independently executed task evidence.")
+        if context.get("patch_repair"):
+            task = ("Correct ONLY the failed replacement identified by patch_repair.failure. "
+                    "Read the current public file and account for all preceding replacements in candidate_changes. "
+                    "Return only old_text and content using the requested ReplacementCorrection schema. "
+                    "The old_text must match exactly once at that step; copy it exactly, including whitespace. "
+                    "Preserve the intended edit and retain any extra disambiguating context in content. "
+                    "Do not write files or alter paths, other operations, tests' meaning, acceptance criteria, "
+                    "document metadata or approval decisions. This is proposal correction, not a completed gate.")
         prompt = f"{CORE}\n{style}\n<context>\n{data}\n</context>\n<task stage=\"{stage}\">\n{task}\n</task>"
         return prompt, family

@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from .errors import AA2Error, IntegrationConflict, PolicyViolation, ProtectedChange
+from .errors import AA2Error, IntegrationConflict, PolicyViolation, ProtectedChange, ReplacementMismatch
 from .models import Change
 from .util import atomic_write, contained, digest
 
@@ -183,7 +183,7 @@ def prepare_changes(root: Path, changes: list[Change], scopes: list[str], *, pro
     prepared = []
     by_path = {}
     _, tracked = _tree_paths(root)
-    for change in changes:
+    for index, change in enumerate(changes):
         path, canonical = write_path(root, change.path)
         previous = by_path.get(path)
         if previous is not None and (previous["operation"] != "replace" or change.operation != "replace"):
@@ -208,7 +208,10 @@ def prepare_changes(root: Path, changes: list[Change], scopes: list[str], *, pro
             except UnicodeError as exc:
                 raise PolicyViolation(f"Replacement requires supported UTF-8 text: {canonical}") from exc
             if source is None or not change.old_text or source.count(change.old_text) != 1:
-                raise PolicyViolation(f"Replacement must match exactly once: {change.path}")
+                matches = source.count(change.old_text) if source is not None and change.old_text else 0
+                reason = ("missing_file" if source is None else "empty_old_text" if not change.old_text
+                          else "not_found" if matches == 0 else "ambiguous")
+                raise ReplacementMismatch(canonical, index, matches, reason)
             content = source.replace(change.old_text, change.content, 1)
         else:
             content = change.content

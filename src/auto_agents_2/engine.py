@@ -48,6 +48,7 @@ from .models import (
     PlanResult,
     ReviewResult,
 )
+from .patch_repair import PatchRepairService
 from .plan_revision import materialize_plan
 from .planning import ready_batch, validate_plan
 from .profiles import ProjectProfile
@@ -106,6 +107,7 @@ class WorkflowEngine:
         self.approvals = PrototypeApprovals(self.store, self.artifacts)
         self.workspaces = WorkspaceManager(self.project)
         self.contexts = ContextBuilder(self.config.load().sensitive_paths)
+        self.patch_repair = PatchRepairService(self)
         self.resources = ResourceManager(self.store, cfg.cleanup)
         self.environments = EnvironmentManager(self.config, self.sandbox)
         self.verifier = VerificationService(self.store.root, self.sandbox, self.resources)
@@ -888,8 +890,10 @@ class WorkflowEngine:
                 raise Replan("clarify", "Existing prototypes require explicit prototype_paths; preserve unrelated designs")
             if any(not (p == "DESIGN.md" or p.startswith("design/prototypes/")) for p in specification.prototype_paths):
                 raise Replan("clarify", "prototype_paths must refer only to prototype pages or DESIGN.md")
-            pending.update(document=document.model_dump(), retrieved=retrieved,
-                           prepared=prepare_changes(work, document.files, scopes, protected=False, contracts=True))
+            files, prepared = await self.patch_repair.prepare(rid, work, document.files, scopes,
+                stage="prototype", context=context, operation=f"prototype/{identity}", contracts=True)
+            document = document.model_copy(update={"files": files})
+            pending.update(document=document.model_dump(), retrieved=retrieved, prepared=prepared)
             self.store.checkpoint(rid, key, pending)
         self._replan_contract(rid, "prototype_scope", True)
         if "fingerprint" not in pending:
@@ -1205,7 +1209,11 @@ class WorkflowEngine:
             self.store.checkpoint(rid, "candidate/readme", {**pending, "document": docs.model_dump()})
             if any(c.path.startswith(("docs/requirements/", "docs/aa2/")) for c in docs.files):
                 raise Replan("plan", "Documentation changes cannot overwrite accepted requirements, architecture or controller evidence")
-            patch = pending.get("patch") or prepare_changes(work, docs.files, ["README.md", "docs", ".env.example"], protected=False)
+            patch = pending.get("patch")
+            if patch is None:
+                files, patch = await self.patch_repair.prepare(rid, work, docs.files,
+                    ["README.md", "docs", ".env.example"], stage="readme", context=context, operation="readme")
+                docs = docs.model_copy(update={"files": files})
             self.store.checkpoint(rid, "candidate/readme", {"document": docs.model_dump(), "patch": patch})
             apply_prepared(work, patch)
             self.store.checkpoint(rid, "readme", docs.model_dump())
@@ -1464,7 +1472,14 @@ class WorkflowEngine:
                 saved["implementation"] = change.model_dump()
                 self.store.checkpoint(rid, key, saved)
                 try:
-                    prepared = saved.get("patch") or prepare_changes(work, change.changes, task.allowed_paths)
+                    prepared = saved.get("patch")
+                    if prepared is None:
+                        changes, _ = await self.patch_repair.prepare(rid, work, change.changes, task.allowed_paths,
+                            stage="implement", context=task_context, operation=f"{key}/r{counters['round']}")
+                        change = change.model_copy(update={"changes": changes})
+                        saved["implementation"] = change.model_dump()
+                        self.store.checkpoint(rid, key, saved)
+                        prepared = prepare_changes(work, change.changes, task.allowed_paths)
                 except ProtectedChange:
                     review = await self._invoke("review", {**task_context, "candidate_changes": change.model_dump(),
                                                            "review_kind": "test_changes",
@@ -1929,7 +1944,11 @@ class WorkflowEngine:
             self.store.checkpoint(rid, pending_key, pending)
             contracts = "prototype_feedback" in feedback and all(p == "DESIGN.md" or p.startswith("design/prototypes/") for p in scopes)
             try:
-                pending["patch"] = pending.get("patch") or prepare_changes(work, proposal.changes, scopes, protected=False, contracts=contracts)
+                if pending.get("patch") is None:
+                    changes, pending["patch"] = await self.patch_repair.prepare(rid, work, proposal.changes, scopes,
+                        stage="implement", context=context, operation=f"delivery-repair/{count}", contracts=contracts)
+                    proposal = proposal.model_copy(update={"changes": changes})
+                    pending["proposal"] = proposal.model_dump()
             except PolicyViolation as exc:
                 pending.update(phase="rejected", rejection={"candidate_error": str(exc)})
                 self.store.checkpoint(rid, pending_key, pending)
