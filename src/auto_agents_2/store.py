@@ -373,6 +373,14 @@ class Store:
         with self.connect() as db:
             return self._decision_questions(db, rid, keys)
 
+    def decision_requests(self, rid, state_identity):
+        """Find original decision snapshots for the same guarded controller state."""
+        with self.connect() as db:
+            rows = [(row["key"], json.loads(row["data"])) for row in db.execute(
+                "SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'decisions/requests/%' ORDER BY rowid DESC",
+                (rid,))]
+        return [(key, value) for key, value in rows if value.get("request", {}).get("state_identity") == state_identity]
+
     def decision_question_keys(self, rid, prefix):
         with self.connect() as db:
             return [row[0] for row in db.execute(
