@@ -12,6 +12,8 @@ from auto_agents_2.decisions import (
     DecisionResult,
     DecisionService,
     DecisionValidationError,
+    decision_evidence_references,
+    decision_reference_catalog,
 )
 from auto_agents_2.errors import AA2Error, InvalidStructuredResponse
 from auto_agents_2.util import digest
@@ -24,7 +26,8 @@ def request():
             "evidence": {"commands": [{"argv": ["npm", "run", "test:e2e"]}], "checks": [
                 {"process_exit_code": 0}, {"process_exit_code": 1, "report_status": "invalid",
                     "logs": [{"hash": "a" * 64}], "output": "fabricated-reference"}]},
-            "proposal": {"hash": "b" * 64, "evidence_refs": ["invented"]}},
+            "proposal": {"hash": "b" * 64, "evidence_refs": ["invented"],
+                "changes": [{"path": "frontend/playwright.config.ts", "content": "<PROPOSED_DIAGNOSTIC_CONFIG>"}]}},
             "history": {"recent": [{"outcome": {"diagnosis": {
                 "action": "recheck", "evidence_refs": ["unverified-citation"]}}}]},
             "consumption": {"implementation": {"round": 1}, "tokens": {"total_tokens": 100}}})
@@ -52,13 +55,33 @@ def test_existing_nested_evidence_artifacts_and_controller_aliases_are_valid(ref
     "failure.evidence.checks[2]", "failure.evidence.checks[-1]", "failure.evidence.checks[1].unknown",
     "failure.evidence.checks[1].logs[0].hash.extra", "history.recent[1].outcome.diagnosis",
     "fabricated-reference", "unverified-citation", "invented", "b" * 64, "c" * 64,
-    "failure.proposal.hash", "scope.candidates.recheck", "../private",
+    "scope.candidates.recheck", "../private",
 ])
 def test_unknown_citations_and_proposal_content_do_not_become_evidence(ref):
     with pytest.raises(DecisionValidationError) as error:
         DecisionService.validate(request(), approval([ref]))
     assert error.value.feedback["code"] == "unknown_evidence"
     assert error.value.feedback["unresolved_indexes"] == [0]
+
+
+@pytest.mark.parametrize("ref", ["failure.proposal", "failure.proposal.changes", "failure.proposal.changes[0]",
+                                "failure.proposal.hash", "failure.proposal.evidence_refs[0]"])
+def test_existing_proposal_paths_require_controller_evidence(ref):
+    current = request()
+    catalog = decision_reference_catalog(current.evidence)
+    assert ref in catalog.proposals and ref not in catalog.controller
+    DecisionService.validate(current, approval(["failure.evidence.checks[1]", ref]))
+    with pytest.raises(DecisionValidationError) as error:
+        DecisionService.validate(current, approval([ref]))
+    assert error.value.feedback["code"] == "controller_evidence_required"
+
+
+@pytest.mark.parametrize("ref", ["failure.proposal.changes[99]", "failure.proposal.unknown", "invented", "b" * 64,
+                                "frontend/playwright.config.ts.invented"])
+def test_a_proposal_cannot_introduce_unknown_paths_or_artifact_ids(ref):
+    with pytest.raises(DecisionValidationError) as error:
+        DecisionService.validate(request(), approval(["failure.evidence.checks[1]", ref]))
+    assert error.value.feedback["code"] == "unknown_evidence"
 
 
 @pytest.mark.asyncio
@@ -233,3 +256,89 @@ async def test_legacy_pending_recovery_resumes_without_calls_and_preserves_human
             assert workflow.store.question(question["id"])["superseded"]
             assert workflow.store.get(rid, key)["revalidation"]["valid"]
     assert calls == ["decision", "decision"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [None, "y", "n", "source_drift"])
+async def test_v2_proposal_rejection_resumes_through_controller_without_bypassing_review(tmp_path, monkeypatch, answer):
+    from auto_agents_2.recovery import Diagnosis
+    from auto_agents_2.workspace import tree_hash
+    record = failure(evidence={"checks": [{"exit_code": 1, "process_exit_code": 1,
+        "failure_reasons": ["test_report_invalid"]}]}, proposal={"changes": [
+            {"path": "part3.py", "operation": "write", "content": "unreviewed = True\n"}]})
+    workflow, rid, work, contract, record = ready(tmp_path, record=record)
+    (work / "part3.py").write_text("original = True\n")
+    before = tree_hash(work)
+    active = workflow.store.get(rid, "recovery/active")
+    workflow.store.checkpoints(rid, {"recovery/active": {**active, "attempt": 2},
+        "recovery/count/" + record.id: 2})
+    rule_key = "recovery/rules/" + digest(["T3", record.step, sorted(record.obligations), "diagnose"])
+    workflow.store.checkpoint(rid, rule_key, {"permit": "earlier-diagnosis"})
+    calls = []
+    async def respond(stage, context, *args, **kwargs):
+        calls.append(stage)
+        if stage == "recovery_diagnosis":
+            assert answer == "y", "Only a human choosing the original diagnose action needs a new diagnosis"
+            return Diagnosis(action="repair", task_ids=["T3"], reason="Repair within scope",
+                             evidence_refs=context["failure"]["evidence_refs"])
+        assert stage == "decision"
+        return approval(["failure.evidence.checks[0]", "failure.proposal.changes"], selected_action="repair")
+    workflow.agent.invoke = respond
+    def v2_validate(request, result):
+        refs = decision_evidence_references(request.evidence)
+        missing = [i for i, ref in enumerate(result.evidence_refs) if ref not in refs]
+        if missing:
+            raise DecisionValidationError("unknown_evidence", "evidence_refs", "Cite only supplied evidence paths.",
+                                          unresolved_indexes=missing)
+        DecisionService.validate(request, result)
+    async def leave_open(question):
+        raise asyncio.CancelledError()
+    workflow.question_handler = leave_open
+    monkeypatch.setattr(workflow.decisions, "validate", v2_validate)
+    with pytest.raises(asyncio.CancelledError):
+        await workflow.recovery.resume(rid)
+    question = workflow.store.pending(rid)[0]
+    key, saved = next((k, v) for k, v in workflow.store.delivery_evidence(rid).items()
+                      if k.startswith("decisions/requests/"))
+    workflow.store.checkpoint(rid, key, {**saved, "validation_version": 2})
+    monkeypatch.setattr(workflow.decisions, "validate", DecisionService.validate)
+    async def no_question(*args, **kwargs):
+        pytest.fail("The existing controller facts and supplied proposal need no extra confirmation")
+    workflow.question_handler = no_question
+    if answer in {"y", "n"}:
+        workflow.store.answer(question["id"], answer)
+    if answer == "source_drift":
+        (work / "user.txt").write_text("preserve this user edit")
+        with pytest.raises(AA2Error, match="source changed"):
+            await workflow.recovery.resume(rid)
+        assert (work / "user.txt").read_text() == "preserve this user edit"
+    elif answer == "n":
+        with pytest.raises(asyncio.CancelledError):
+            await workflow.recovery.resume(rid)
+    else:
+        await workflow.recovery.resume(rid)
+        assert workflow.store.get(rid, "recovery/active") is None
+        assert workflow.store.get(rid, "develop/task/T3")["phase"] == "rejected"
+        assert "T3" not in workflow.store.get(rid, "develop/done", [])
+        assert workflow.store.get(rid, "plan") == contract.model_dump()
+        assert (work / "part3.py").read_text() == "original = True\n" and tree_hash(work) == before
+        assert workflow.store.question(question["id"])["answer"] == answer
+        if answer is None:
+            latest = workflow.store.get(rid, key)
+            assert latest["attempts"] == 2 and latest["revalidation"]["valid"]
+            assert latest["revalidation"]["previous_error"]["code"] == "unknown_evidence"
+            assert latest["result"]["selected_action"] == "repair"
+            assert workflow.store.question(question["id"])["superseded"]
+    assert calls == ["decision", "decision"] + (["recovery_diagnosis"] if answer == "y" else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refs", [["failure.proposal.changes"], ["failure", "failure.proposal.changes[9]"],
+                                  ["failure", "b" * 64]])
+async def test_v2_revalidation_keeps_rejecting_unsupported_approvals(tmp_path, refs):
+    workflow, rid = setup(tmp_path)
+    key = legacy_request(workflow, rid, request(), approval(refs), validation_version=2, fallback=True,
+        error={"code": "unknown_evidence", "field": "evidence_refs"})
+    _, result = await workflow.decisions.propose(rid, request(), tmp_path)
+    assert result.action == "ask_user" and not workflow.agent.calls
+    assert not workflow.store.get(rid, key)["revalidation"].get("valid")

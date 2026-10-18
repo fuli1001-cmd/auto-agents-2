@@ -6,13 +6,14 @@ from typing import Literal
 from pydantic import Field, ValidationError
 
 from .errors import AA2Error, InvalidStructuredResponse, PostCommitError
-from .evidence_refs import supplied_references
+from .evidence_refs import controller_context_catalog
 from .interaction import choice_spec, is_prototype_approval
 from .models import Record
+from .recovery_identity import action_contract, failure_contract
 from .util import digest
 from .workspace import tree_hash
 
-VALIDATION_VERSION = 2
+VALIDATION_VERSION = 4
 LEGACY_FALLBACK_REASON = "自动决策未返回有效结论，保留现场并交由用户决定。"
 
 
@@ -26,13 +27,11 @@ class DecisionValidationError(ValueError):
 
 def decision_evidence_references(evidence):
     """Resolve paths and artifact IDs from supplied data, never from proposal text."""
-    refs = supplied_references(evidence)
-    # RecoveryController already indexes its failure's public files and records.
-    # Do not promote citations from diagnoses, history or other model proposals.
-    failure = evidence.get("failure")
-    if isinstance(failure, dict):
-        refs.update(ref for ref in failure.get("evidence_refs", []) if isinstance(ref, str))
-    return refs
+    return decision_reference_catalog(evidence).controller
+
+
+def decision_reference_catalog(evidence):
+    return controller_context_catalog(evidence)
 
 
 def decision_request_identity(request):
@@ -40,6 +39,10 @@ def decision_request_identity(request):
     if request.kind == "recovery_action":
         # The decision's own token charges must not create another decision on resume.
         data["evidence"].get("consumption", {}).pop("tokens", None)
+        if "failure" in data["evidence"]:
+            data["evidence"]["failure"] = failure_contract(data["evidence"]["failure"])
+        if "candidates" in data["scope"]:
+            data["scope"]["candidates"] = {key: action_contract(value) for key, value in data["scope"]["candidates"].items()}
     return digest(data)
 
 
@@ -102,13 +105,7 @@ class DecisionService:
                 saved["pending"] = True
                 saved["attempt_context"] = {
                     "validation_feedback": saved.get("error"),
-                    "evidence_reference_contract": {
-                        "roots": sorted(request.evidence),
-                        "syntax": "Cite an existing path in decision_request.evidence using dot fields and [index], "
-                                  "for example failure.evidence.checks[0] or history.recent[0].outcome.diagnosis. "
-                                  "A supplied artifact hash or controller-indexed failure.evidence_refs entry also works. "
-                                  "A root name is valid. Proposal prose cannot create evidence references.",
-                    },
+                    "evidence_reference_contract": decision_reference_catalog(request.evidence).contract(request.evidence),
                 }
             # Preserve the exact context of an interrupted older invocation.
             context = {"decision_request": request.model_dump(), **saved.get("attempt_context", {
@@ -146,14 +143,36 @@ class DecisionService:
 
     def _revalidate_legacy(self, rid, key, saved, request):
         """Reassess only the last committed response rejected by the old validator."""
+        if saved.get("validation_version", 1) >= VALIDATION_VERSION or saved.get("failed") or saved.get("pending"):
+            return
+        if not saved.get("fallback") and saved["result"].get("action") != "ask_user":
+            review = {"previous_result": saved["result"], "previous_version": saved.get("validation_version", 1)}
+            try:
+                self.validate(request, DecisionResult.model_validate(saved["result"]))
+            except (ValueError, ValidationError) as exc:
+                review["feedback"] = self.validation_feedback(exc)
+                saved.update(error=review["feedback"], fallback=True, result=DecisionResult(action="ask_user",
+                    reason="旧决策未通过当前证据协议；请选择已展示范围内的具体恢复动作。").model_dump())
+            else:
+                review["valid"] = True
+            saved.update(validation_version=VALIDATION_VERSION, revalidation=review)
+            self.store.checkpoint(rid, key, saved)
+            return
+        error = saved.get("error")
+        legacy_fallback = (error == "ValueError: invalid action, answer or evidence reference"
+            and saved["result"] == DecisionResult(action="ask_user", reason=LEGACY_FALLBACK_REASON).model_dump())
+        citation_fallback = (saved.get("fallback") is True and saved["result"].get("action") == "ask_user"
+            and isinstance(error, dict) and error.get("code") == "unknown_evidence"
+            and error.get("field") == "evidence_refs")
         if (saved.get("validation_version", 1) >= VALIDATION_VERSION or saved.get("failed")
                 or saved.get("pending") or saved.get("attempts") != 2
-                or saved.get("error") != "ValueError: invalid action, answer or evidence reference"
-                or saved["result"] != DecisionResult(action="ask_user", reason=LEGACY_FALLBACK_REASON).model_dump()):
+                or not (legacy_fallback or citation_fallback)):
             return
         invocation_key = f"invocation/{key}/{saved['attempts']}"
         invocation = self.store.get(rid, invocation_key, {})
         review = {"invocation": invocation_key, "previous_result": saved["result"], "previous_error": saved["error"]}
+        if saved.get("revalidation"):
+            review["previous_revalidation"] = saved["revalidation"]
         try:
             result = DecisionResult.model_validate(invocation.get("result"))
             self.validate(request, result)
@@ -184,14 +203,20 @@ class DecisionService:
         if result.action not in request.allowed_choices:
             raise DecisionValidationError("action_not_allowed", "action", "Choose an allowed action.",
                                           allowed_choices=request.allowed_choices)
-        refs = decision_evidence_references(request.evidence)
-        unresolved = [i for i, ref in enumerate(result.evidence_refs) if ref not in refs]
+        refs = decision_reference_catalog(request.evidence)
+        resolved = [refs.resolve(ref) for ref in result.evidence_refs]
+        unresolved = [i for i, ref in enumerate(resolved) if ref is None]
         if unresolved:
             raise DecisionValidationError("unknown_evidence", "evidence_refs", "Cite only supplied evidence paths, "
-                "artifact hashes or controller-indexed references; a root name is also valid.",
+                "artifact hashes, controller-indexed references or existing unverified proposal paths; "
+                "a controller root name is also valid.",
                 unresolved_indexes=unresolved, allowed_roots=sorted(request.evidence))
         if result.action != "ask_user" and not result.evidence_refs:
             raise DecisionValidationError("evidence_required", "evidence_refs", "Cite at least one supplied evidence reference.")
+        if result.action != "ask_user" and not refs.controller.intersection(resolved):
+            raise DecisionValidationError("controller_evidence_required", "evidence_refs",
+                "Unverified proposals describe suggested work, not verified results. Cite at least one controller record.",
+                allowed_roots=sorted(request.evidence))
         if request.kind == "recovery_action" and result.action == "approve":
             if result.selected_action not in request.scope["candidates"]:
                 raise DecisionValidationError("unknown_candidate", "selected_action", "Select exactly one supplied candidate.",

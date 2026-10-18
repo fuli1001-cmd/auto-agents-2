@@ -16,7 +16,7 @@ from .util import digest, file_lock, identifier, now, redact
 TERMINAL = ("SUCCEEDED", "CANCELLED")
 SCHEMA = """
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            INSERT OR IGNORE INTO meta VALUES('schema_version','7');
+            INSERT OR IGNORE INTO meta VALUES('schema_version','8');
             CREATE TABLE IF NOT EXISTS runs(
                 id TEXT PRIMARY KEY, status TEXT NOT NULL, stage TEXT NOT NULL,
                 created REAL NOT NULL, updated REAL NOT NULL, data TEXT NOT NULL);
@@ -67,7 +67,7 @@ class Store:
                 meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
                 row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() if meta else None
                 version = row[0] if row else "0"
-                if version not in {"0", "1", "2", "3", "4", "5", "6", "7"}:
+                if version not in {"0", "1", "2", "3", "4", "5", "6", "7", "8"}:
                     raise AA2Error("Unsupported state database version")
             return
         if readonly:
@@ -128,7 +128,7 @@ class Store:
             import re
             required = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", SCHEMA))
             columns = {row[1] for row in db.execute("PRAGMA table_info(questions)")}
-            if version == "7" and required <= tables and {"interaction", "superseded"} <= columns:
+            if version == "8" and required <= tables and {"interaction", "superseded"} <= columns:
                 return
             backup = self.root / f"state-v{version if version != '0' else '1'}.backup.sqlite"
             if not backup.exists():
@@ -159,6 +159,18 @@ class Store:
                     "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
                 self._put(db, rid, f"migration/v{version if version != '0' else '1'}",
                           {"version": int(version), "records": records})
+                # Raw v1 records and answered questions remain authoritative. The
+                # active view is adapted; old hashes can still be verified exactly.
+                active = records.get("recovery/active")
+                if active:
+                    from .recovery import FailureRecord
+                    failure = FailureRecord.model_validate(active["failure"])
+                    failure = failure.model_copy(update={"version": 2,
+                        "phase": "task" if failure.task_id else "final",
+                        "observation_id": failure.observation_id or digest([rid, failure.id, active["attempt"]])})
+                    self._put(db, rid, "recovery/active", {**active, "version": 2, "failure": failure.model_dump()})
+                self._put(db, rid, "migration/recovery-contracts", {"version": 2, "from_state": int(version),
+                    "evidence_policy": "verification-v12", "reference_validation": 4})
                 for task in (records.get("plan") or {}).get("tasks", []):
                     owner = task.get("origin_id") or task["id"]
                     key = "automation/engineering/" + owner
@@ -174,7 +186,7 @@ class Store:
                         self._put(db, rid, "task_state/" + task["id"], {
                             "version": 1, "revision": 1, "implementation": "accepted" if task["id"] in done else "pending",
                             "evidence": "stale" if task["id"] in done else "absent"})
-                if version in {"3", "4", "5", "6", "7"}:
+                if version in {"3", "4", "5", "6", "7", "8"}:
                     continue  # v3 data semantics are already current; only its schema needs repair.
                 owners = {}
                 for key, value in records.items():
@@ -195,8 +207,8 @@ class Store:
                     if key.startswith("replanning/evidence/") and key != "replanning/evidence/contracts":
                         self._put(db, rid, key, {**value, "comparable": False,
                                                "comparison_reason": "legacy evidence requires revalidation"})
-            db.execute("UPDATE meta SET value='7' WHERE key='schema_version'")
-            self._event(db, None, "state.migrated", {"version": 7, "backup": str(backup)})
+            db.execute("UPDATE meta SET value='8' WHERE key='schema_version'")
+            self._event(db, None, "state.migrated", {"version": 8, "backup": str(backup)})
 
     def finish_recovery(self, rid, updates, pending, *, replan=None, successor=None):
         """Dispatch and retire the obsolete question together; retain raw history."""
@@ -222,6 +234,27 @@ class Store:
             self._event(db, rid, "recovery.dispatched", {"pending_issues_retained": True})
 
     def _put(self, db, rid, key, value):
+        if key.startswith("verification/batches/"):
+            from .faults import StateConflict
+            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+            previous = json.loads(row[0]) if row else None
+            if previous and previous.get("phase") == "completed" and previous != value:
+                raise StateConflict("Completed verification observation cannot be overwritten")
+        if key.startswith("recovery/permits/"):
+            from .faults import StateConflict
+            from .recovery_identity import action_contract
+            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+            previous = json.loads(row[0]) if row else None
+            if previous and previous.get("outcome_hash") and previous["outcome_hash"] != digest(previous.get("outcome", {})):
+                raise StateConflict("Completed action result integrity mismatch")
+            if previous and previous.get("phase") == "completed":
+                if (not value or value.get("phase") != "completed" or value.get("outcome") != previous.get("outcome")
+                        or action_contract(value.get("action", {})) != action_contract(previous.get("action", {}))
+                        or any(value.get(name) != previous.get(name) for name in
+                               ("source_hash", "plan_hash", "task_scopes", "cycle_id", "owner"))):
+                    raise StateConflict("Completed action outcome cannot be overwritten")
+            if value and value.get("phase") == "completed":
+                value = {**value, "outcome_hash": digest(value.get("outcome", {}))}
         db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
                    (rid, key, json.dumps(value, ensure_ascii=True)))
         adopt_logs(db, self.root, value)
@@ -334,6 +367,20 @@ class Store:
                        (status or row["status"], stage or row["stage"], now(), json.dumps(body), rid))
             self._event(db, rid, "run.updated", {"status": status, "stage": stage, **data})
 
+    def record_fault(self, rid, record, *, pause=False):
+        """Save the classification and retire generic legacy prompts atomically."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._put(db, rid, "recovery/current-fault", record)
+            self._put(db, rid, "recovery/faults/" + record.get("incident_id", digest(record)), record)
+            if pause or record.get("route") == "human":
+                db.execute("UPDATE questions SET superseded=1 WHERE run_id=? AND key LIKE 'incident/%' AND answer IS NULL", (rid,))
+            if pause:
+                body = json.loads(db.execute("SELECT data FROM runs WHERE id=?", (rid,)).fetchone()[0])
+                body.update(pause_reason="internal_error", incident_id=record["incident_id"])
+                db.execute("UPDATE runs SET status='PAUSED',updated=?,data=? WHERE id=?", (now(), json.dumps(body), rid))
+            self._event(db, rid, "workflow.internal_error" if pause else "recovery.classified", record)
+
     def checkpoint(self, rid, key, data):
         self.checkpoints(rid, {key: data})
 
@@ -350,9 +397,7 @@ class Store:
                     existing = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
                     if existing:
                         data = {**data, "round": max(data.get("round", 0), json.loads(existing[0]).get("round", 0))}
-                db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
-                           (rid, key, json.dumps(data, ensure_ascii=True)))
-                adopt_logs(db, self.root, data)
+                self._put(db, rid, key, data)
                 self._event(db, rid, "checkpoint.saved", {"key": key})
 
     def get(self, rid, key, default=None):
@@ -373,13 +418,14 @@ class Store:
         with self.connect() as db:
             return self._decision_questions(db, rid, keys)
 
-    def decision_requests(self, rid, state_identity):
+    def decision_requests(self, rid, state_identity=None):
         """Find original decision snapshots for the same guarded controller state."""
         with self.connect() as db:
             rows = [(row["key"], json.loads(row["data"])) for row in db.execute(
                 "SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'decisions/requests/%' ORDER BY rowid DESC",
                 (rid,))]
-        return [(key, value) for key, value in rows if value.get("request", {}).get("state_identity") == state_identity]
+        return [(key, value) for key, value in rows
+                if state_identity is None or value.get("request", {}).get("state_identity") == state_identity]
 
     def decision_question_keys(self, rid, prefix):
         with self.connect() as db:
@@ -409,6 +455,7 @@ class Store:
                 self._put(db, rid, key, value)
             self._put(db, rid, receipt, {"actor": actor, "request": request, "result": result,
                 "result_key": result_key, "answers": answers or {}, "applied": True})
+            db.execute("UPDATE questions SET superseded=1 WHERE run_id=? AND key LIKE 'incident/%' AND answer IS NULL", (rid,))
             if actor != "human" or supersede_keys is not None:
                 for key in question_keys if supersede_keys is None else supersede_keys:
                     db.execute("UPDATE questions SET superseded=1 WHERE run_id=? AND key=? AND answer IS NULL", (rid, key))

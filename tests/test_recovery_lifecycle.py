@@ -123,7 +123,12 @@ def test_v2_migration_preserves_active_recovery_and_is_transactional(tmp_path):
     before = store.get(rid, "migration/v2")
     store.migrate()
     assert store.get(rid, "migration/v2") == before
-    assert store.get(rid, "recovery/active") == active
+    from auto_agents_2.recovery_identity import failure_contract
+    upgraded = store.get(rid, "recovery/active")
+    assert upgraded["version"] == 2 and upgraded["attempt"] == active["attempt"]
+    assert upgraded["diagnosis_round"] == active["diagnosis_round"]
+    assert failure_contract(upgraded["failure"]) == failure_contract(active["failure"])
+    assert before["records"]["recovery/active"] == active
     assert store.get(rid, "task_state/T3")["revision"] == 4
     assert store.get(rid, "plan_revision/current")["revision"] == 5
     assert store.get(rid, "recovery/budgets/diagnosis/T3")["round"] == 2

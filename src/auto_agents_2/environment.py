@@ -7,6 +7,7 @@ import platform
 import re
 import shlex
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -73,6 +74,26 @@ def node_dependency_inputs(workspace):
 
 
 class EnvironmentManager:
+    async def install_browser(self, workspace, cache, scratch):
+        """One project-local install. The recovery controller decides subsequent attempts."""
+        env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(cache), "TMPDIR": str(scratch)}
+        try:
+            process = await self.sandbox.spawn([sys.executable, "-m", "playwright", "install", "chromium"],
+                                               workspace, env, [cache, scratch])
+        except OSError as exc:
+            raise RetryableInfrastructureError("Browser installer could not start") from exc
+        try:
+            async with asyncio.timeout(900):
+                await capture_output(process)
+            if process.returncode:
+                raise RetryableInfrastructureError(f"Browser installer exited with code {process.returncode}")
+            if not any(cache.glob("chromium-*/chrome-linux*/chrome")):
+                raise RetryableInfrastructureError("Browser installation produced no usable executable")
+        except TimeoutError as exc:
+            raise RetryableInfrastructureError("Browser installation timed out") from exc
+        finally:
+            await self.sandbox.stop(process)
+
     def __init__(self, config: ConfigStore, sandbox: SandboxRunner):
         self.config, self.sandbox = config, sandbox
         self.root = config.project / ".aa2"

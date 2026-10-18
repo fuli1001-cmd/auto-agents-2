@@ -319,7 +319,7 @@ def delivery_fixture(tmp_path, monkeypatch):
     rid = store.admit("fixture", {})["id"]
     journal = {"identity_version": 2, "phase": "runtime", "target": "main", "old": "c", "candidate": "c",
         "incoming": "c", "candidate_tree": "tree", "work": str(tmp_path), "source_hash": "source",
-        "environment": {"prefix": "/no-installation", "fingerprint": "fixture"}, "plan": {}, "reintegrations": 0,
+        "environment": {"prefix": sys.prefix, "fingerprint": "fixture"}, "plan": {}, "reintegrations": 0,
         "runtime_budget_used": 0, "outcome": "DELIVERED", "validation": "proof"}
     store.checkpoint(rid, "delivery/journal", journal)
     monkeypatch.setattr("auto_agents_2.delivery.tree_hash", lambda *a: "source")
@@ -332,8 +332,17 @@ def delivery_fixture(tmp_path, monkeypatch):
     async def prepare(*a):
         pass
     def make(runtime):
+        async def checked_runtime(*args):
+            evidence = await runtime(*args)
+            if not evidence.get("checks"):
+                from auto_agents_2.builds import runtime_commands
+                environment = Environment(Path(sys.prefix), "fixture")
+                verifier = VerificationService(store.root, SandboxRunner(store.root, _test_unconfined=True))
+                rows = await verifier.run(runtime_commands(None, tmp_path, environment), tmp_path, environment)
+                evidence = {**evidence, "checks": [row.model_dump() for row in rows]}
+            return evidence
         return DeliveryCoordinator(store, workspace, SimpleNamespace(finish_delivery=lambda *a: None),
-                                   SimpleNamespace(prepare_delivery=prepare), verify, runtime)
+                                   SimpleNamespace(prepare_delivery=prepare), verify, checked_runtime)
     return config, store, rid, make
 
 
@@ -501,7 +510,7 @@ def test_actual_missing_table_schema_migration_is_atomic(tmp_path, version, fail
     store.migrate()
     store.migrate()
     with store.connect() as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "7"
+        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "8"
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='diagnostic_holds'").fetchone()
     assert store.get("old", "rounds/T") == {"round": 4}
     assert (state / f"state-v{version}.backup.sqlite").is_file()
@@ -549,7 +558,7 @@ async def test_completion_pending_does_not_accept_changed_inputs(tmp_path, monke
         with pytest.raises(OSError):
             await make(runtime).finish(rid)
     monkeypatch.setattr("auto_agents_2.delivery.tree_hash", lambda *a: "changed")
-    with pytest.raises(AA2Error, match="inputs changed"):
+    with pytest.raises(AA2Error, match="source changed"):
         await make(runtime).finish(rid)
     assert calls == [1] and store.run(rid)["status"] != "SUCCEEDED"
 

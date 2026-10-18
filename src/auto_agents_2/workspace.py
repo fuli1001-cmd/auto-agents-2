@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from .errors import AA2Error, IntegrationConflict, PolicyViolation, ProtectedChange, ReplacementMismatch
+from .faults import StateConflict
 from .models import Change
 from .util import atomic_write, contained, digest
 
@@ -287,7 +288,7 @@ class WorkspaceManager:
             git(self.project, "init", "-b", "main")
         else:
             if top != self.project:
-                raise AA2Error("Project must be a Git repository root")
+                raise StateConflict("Project must be a Git repository root")
         self._ensure_exclusions()
 
     def _ensure_exclusions(self):
@@ -343,15 +344,15 @@ class WorkspaceManager:
     def checkpoint(self, path: Path, ref: str, message: str, *, expected_ref=None, expected_tree=None, expected_parents=None) -> str:
         self._stage_checkpoint(path)
         if expected_tree and git(path, "write-tree") != expected_tree:
-            raise AA2Error("Prepared checkpoint tree changed; preserving staged user changes")
+            raise StateConflict("Prepared checkpoint tree changed; preserving staged user changes")
         merge_file = Path(git(path, "rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"))
         if merge_file.exists() or git(path, "diff", "--cached", "--name-only"):
             git(path, "-c", "user.name=aa2", "-c", "user.email=aa2@localhost", "commit", "-m", message)
         commit = git(path, "rev-parse", "HEAD")
         if expected_tree and git(path, "rev-parse", "HEAD^{tree}") != expected_tree:
-            raise AA2Error("Prepared checkpoint commit does not contain the complete reviewed tree")
+            raise StateConflict("Prepared checkpoint commit does not contain the complete reviewed tree")
         if expected_parents is not None and git(path, "rev-list", "--parents", "-n", "1", commit).split()[1:] != expected_parents:
-            raise AA2Error("Prepared checkpoint merge parents changed; preserving recovery state")
+            raise StateConflict("Prepared checkpoint merge parents changed; preserving recovery state")
         git(self.project, "update-ref", ref, commit, *([] if expected_ref is None else [expected_ref or "0" * len(commit)]))
         return commit
 
@@ -368,24 +369,24 @@ class WorkspaceManager:
     def finish_checkpoint(self, path, intent):
         """Reconcile an interrupted, reviewed commit without accepting unrelated index/HEAD edits."""
         if tree_hash(path) != intent["source"]:
-            raise AA2Error("Prepared checkpoint source changed; preserving user changes")
+            raise StateConflict("Prepared checkpoint source changed; preserving user changes")
         expected_tree = intent.get("tree")
         if expected_tree is None:
             if "index" not in intent:
-                raise AA2Error("Legacy checkpoint lacks enough evidence to reconstruct its tree")
+                raise StateConflict("Legacy checkpoint lacks enough evidence to reconstruct its tree")
             flags = git(path, "ls-files", "-v", "-z")
             if any(row and row[0] != "H" for row in flags.split("\0")):
-                raise AA2Error("Legacy checkpoint lacks the original index flags; preserve it for reconciliation")
+                raise StateConflict("Legacy checkpoint lacks the original index flags; preserve it for reconciliation")
             expected_tree = self._checkpoint_tree(path, intent["index"])
         head = git(path, "rev-parse", "HEAD")
         current_ref = git(self.project, "for-each-ref", "--format=%(objectname)", intent["ref"])
         if current_ref not in {intent["ref_before"], head}:
-            raise AA2Error("Prepared checkpoint reference changed")
+            raise StateConflict("Prepared checkpoint reference changed")
         if head == intent["head"]:
             merge_file = Path(git(path, "rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"))
             parents = [head, *(merge_file.read_text().splitlines() if merge_file.exists() else [])]
             if parents != intent["parents"]:
-                raise AA2Error("Prepared checkpoint merge parents changed; preserving user changes")
+                raise StateConflict("Prepared checkpoint merge parents changed; preserving user changes")
             def entries(raw):
                 result = {}
                 for row in raw.split("\0"):
@@ -402,16 +403,16 @@ class WorkspaceManager:
                 actual = view.file_entry(name)
                 expected = [f"{actual['mode']} {actual['oid']} 0"] if actual and "oid" in actual else None
                 if current.get(name) != expected:
-                    raise AA2Error("Prepared checkpoint index changed; preserving staged user changes")
+                    raise StateConflict("Prepared checkpoint index changed; preserving staged user changes")
             if self._checkpoint_tree(path, git(path, "ls-files", "--stage", "-z"), git(path, "ls-files", "-v", "-z")) != expected_tree:
-                raise AA2Error("Prepared checkpoint tree changed; preserving staged user changes")
+                raise StateConflict("Prepared checkpoint tree changed; preserving staged user changes")
             return self.checkpoint(path, intent["ref"], "aa2: reviewed integration repair",
                                    expected_ref=current_ref, expected_tree=expected_tree,
                                    expected_parents=intent["parents"] if len(intent["parents"]) > 1 or git(path, "rev-parse", "HEAD^{tree}") != expected_tree else None)
         parents = git(path, "rev-list", "--parents", "-n", "1", head).split()[1:]
         if (parents != intent["parents"] or git(path, "diff", "--name-only", "HEAD")
                 or git(path, "rev-parse", "HEAD^{tree}") != expected_tree):
-            raise AA2Error("Prepared checkpoint HEAD changed; preserving user commits")
+            raise StateConflict("Prepared checkpoint HEAD changed; preserving user commits")
         git(self.project, "update-ref", intent["ref"], head, current_ref or "0" * len(head))
         return head
 
@@ -462,22 +463,22 @@ class WorkspaceManager:
     def clean_target(self, branch: str, *, switch: bool = False):
         git(self.project, "check-ref-format", "--branch", branch)
         if branch.startswith("-"):
-            raise AA2Error("Invalid target branch")
+            raise StateConflict("Invalid target branch")
         if git(self.project, "status", "--porcelain", "--untracked-files=all"):
-            raise AA2Error("项目主目录有未提交或未跟踪的修改。请自行提交或保存到其它目录，再回复 retry；aa2 不会自动暂存或覆盖。")
+            raise StateConflict("项目主目录有未提交或未跟踪的修改。请自行提交或保存到其它目录，再回复 retry；aa2 不会自动暂存或覆盖。")
         for record in git(self.project, "worktree", "list", "--porcelain").split("\n\n"):
             lines = record.splitlines()
             if f"branch refs/heads/{branch}" in lines and f"worktree {self.project}" not in lines:
-                raise AA2Error(f"目标分支 {branch} 被另一个 worktree 占用，请先释放该分支")
+                raise StateConflict(f"目标分支 {branch} 被另一个 worktree 占用，请先释放该分支")
         try:
             current = git(self.project, "symbolic-ref", "-q", "HEAD")
         except AA2Error:
             current = ""
         if current != f"refs/heads/{branch}":
             if not switch:
-                raise AA2Error(f"主目录分支已变化，请切回 {branch} 后继续")
+                raise StateConflict(f"主目录分支已变化，请切回 {branch} 后继续")
             if not self.head(branch):
-                raise AA2Error(f"目标分支不存在：{branch}")
+                raise StateConflict(f"目标分支不存在：{branch}")
             git(self.project, "switch", "--no-overwrite-ignore", branch)
 
     def committed_baseline(self, rid: str, target: str) -> str:
@@ -509,7 +510,7 @@ class WorkspaceManager:
                 meta, path = entry.split("\t", 1)
                 mode, kind, oid = meta.split()
                 if kind != "blob":
-                    raise AA2Error("Automatic delivery does not support submodule entries")
+                    raise StateConflict("Automatic delivery does not support submodule entries")
                 result[path] = {"mode": mode, "oid": oid}
         return result
 
@@ -547,7 +548,7 @@ class WorkspaceManager:
             if parent == self.project:
                 break
             if parent.is_symlink():
-                raise AA2Error(f"Symlinked publication parent: {name}")
+                raise StateConflict(f"Symlinked publication parent: {name}")
         if path.is_symlink():
             content = os.readlink(path).encode()
             mode = "120000"
@@ -569,7 +570,7 @@ class WorkspaceManager:
                 self._attributable_directory(name, manifest)
                 continue
             if actual != images["before"]:
-                raise AA2Error(f"发布路径与基线不符（可能含被忽略的用户文件）：{name}")
+                raise StateConflict(f"发布路径与基线不符（可能含被忽略的用户文件）：{name}")
 
     def publication_entry(self, name, manifest):
         """A verified file/link ancestor can hide an absent journal descendant."""
@@ -584,7 +585,7 @@ class WorkspaceManager:
                 if any(actual == images.get(phase) and images.get(phase) is not None
                        and manifest[name].get(phase) is None for phase in ("before", "after")):
                     return None
-                raise AA2Error(f"Unattributable publication parent: {name}")
+                raise StateConflict(f"Unattributable publication parent: {name}")
         return self.file_entry(name)
 
     def _attributable_directory(self, name, manifest, recovery=False):
@@ -594,9 +595,9 @@ class WorkspaceManager:
             if child.is_dir() and not child.is_symlink():
                 continue
             if relative not in manifest or not recovery and manifest[relative]["after"] is not None:
-                raise AA2Error(f"Publication directory contains unrelated data: {relative}")
+                raise StateConflict(f"Publication directory contains unrelated data: {relative}")
             if self.file_entry(relative) not in (manifest[relative]["before"], manifest[relative]["after"] if recovery else None):
-                raise AA2Error(f"Publication directory contains modified data: {relative}")
+                raise StateConflict(f"Publication directory contains modified data: {relative}")
 
     @staticmethod
     def checkout_policy(work, paths):
@@ -633,7 +634,7 @@ class WorkspaceManager:
     def publish(self, target: str, old: str, candidate: str):
         self.clean_target(target)
         if self.head(target) != old:
-            raise AA2Error("Target advanced before publication; reintegration required")
+            raise StateConflict("Target advanced before publication; reintegration required")
         git(self.project, "merge", "--ff-only", "--no-overwrite-ignore", candidate)
 
     def recover_publication(self, journal: dict):
@@ -642,41 +643,41 @@ class WorkspaceManager:
         current = self.head(target)
         if current not in {old, new}:
             if self.is_ancestor(new, current):
-                raise AA2Error("交付后目标分支又有新提交，请恢复交付版本或人工核对后继续；不会重置用户提交")
-            raise AA2Error("发布中目标分支发生未知变化，需要人工核对")
+                raise StateConflict("交付后目标分支又有新提交，请恢复交付版本或人工核对后继续；不会重置用户提交")
+            raise StateConflict("发布中目标分支发生未知变化，需要人工核对")
         if git(self.project, "symbolic-ref", "-q", "HEAD") != f"refs/heads/{target}":
-            raise AA2Error("发布恢复需要主目录位于目标分支")
+            raise StateConflict("发布恢复需要主目录位于目标分支")
         lock = Path(git(self.project, "rev-parse", "--git-path", "index.lock"))
         if not lock.is_absolute():
             lock = self.project / lock
         if lock.exists():
-            raise AA2Error("Git index.lock 存在，请确认没有其它 Git 进程后处理；aa2 不会删除未知锁")
+            raise StateConflict("Git index.lock 存在，请确认没有其它 Git 进程后处理；aa2 不会删除未知锁")
         tree = git(self.project, "write-tree")
         empty = git(self.project, "hash-object", "-t", "tree", "--stdin", input="")
         old_tree = git(self.project, "rev-parse", f"{old}^{{tree}}") if old else empty
         new_tree = git(self.project, "rev-parse", f"{new}^{{tree}}")
         if tree not in {old_tree, new_tree}:
-            raise AA2Error("发布恢复发现未知暂存区修改，保留现场等待处理")
+            raise StateConflict("发布恢复发现未知暂存区修改，保留现场等待处理")
         manifest = journal["manifest"]
         if journal.get("checkout_policy"):
             policy = self.checkout_policy(Path(journal["work"]), sorted(self.entries(new)))
             if policy != journal["checkout_policy"]:
-                raise AA2Error("Publication conversion policy changed during recovery")
+                raise StateConflict("Publication conversion policy changed during recovery")
         for name, images in manifest.items():
             actual = self.publication_entry(name, manifest)
             if actual == {"directory": True} and (images["before"] is None or images["after"] is None):
                 self._attributable_directory(name, manifest, recovery=True)
                 continue
             if actual not in (images["before"], images["after"]):
-                raise AA2Error(f"发布恢复发现用户修改：{name}")
+                raise StateConflict(f"发布恢复发现用户修改：{name}")
             raw = self.raw_file_hash(self.project / name) if actual and actual != {"directory": True} else None
             if "before_bytes" in images and raw not in (images["before_bytes"], images["after_bytes"]):
-                raise AA2Error(f"Publication recovery found changed file bytes: {name}")
+                raise StateConflict(f"Publication recovery found changed file bytes: {name}")
         # Unchanged tracked files must remain clean; nonignored untracked files also block.
         changed = set(git(self.project, "diff", "--name-only", "-z").split("\0")) - {""}
         untracked = set(git(self.project, "ls-files", "--others", "--exclude-standard", "-z").split("\0")) - {""}
         if (changed | untracked) - manifest.keys():
-            raise AA2Error("发布恢复发现无关用户修改，保留现场等待处理")
+            raise StateConflict("发布恢复发现无关用户修改，保留现场等待处理")
         # Remove old leaves before creating parents or replacing directories.
         ordered = sorted(manifest, key=lambda n: (manifest[n]["after"] is not None,
                                                   -len(Path(n).parts) if manifest[n]["after"] is None else len(Path(n).parts), n))
@@ -690,7 +691,7 @@ class WorkspaceManager:
                 continue
             structural = actual == {"directory": True} and images["before"] is None
             if actual != images["before"] and not structural:
-                raise AA2Error(f"发布恢复期间文件变化：{name}")
+                raise StateConflict(f"发布恢复期间文件变化：{name}")
             path = self.project / name
             after = images["after"]
             if after is None:
@@ -706,7 +707,7 @@ class WorkspaceManager:
                 content = subprocess.run(["git", "-C", str(self.project), "cat-file", *conversion],
                                          capture_output=True, check=True, env=git_environment(), timeout=120).stdout
                 if "after_bytes" in images and digest(content) != images["after_bytes"]:
-                    raise AA2Error("Checkout bytes changed during recovery")
+                    raise StateConflict("Checkout bytes changed during recovery")
                 if after["mode"] == "120000":
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.unlink(missing_ok=True)

@@ -11,13 +11,13 @@ from .errors import AA2Error
 from .util import contained, digest
 from .workspace import input_entry, tree_hash
 
-CHECKER_VERSION = "verification-v10"
+CHECKER_VERSION = "verification-v12"
 NODE_RUNTIME_CACHES = {".cache", ".vite", ".vite-temp", ".tmp"}
 RUNTIME_CACHES = {"__pycache__", ".pytest_cache", *NODE_RUNTIME_CACHES}
 
 
 def input_identity(workspace, command):
-    entries = [(p, generated_entry(contained(workspace, p), workspace)) for p in command.inputs]
+    dependencies = []
     seen = set()
     def visit(directory):
         resolved = directory.resolve()
@@ -26,11 +26,19 @@ def input_identity(workspace, command):
         seen.add(resolved)
         modules = directory / "node_modules"
         if modules.exists() and any(p.name not in RUNTIME_CACHES for p in modules.iterdir()):
-            entries.append((directory.relative_to(workspace).as_posix(), input_entry(modules, workspace, excluded=RUNTIME_CACHES)))
+            dependencies.append((directory.relative_to(workspace).as_posix(), modules))
         for child in sorted(directory.iterdir()):
             if child.name not in {"node_modules", ".git", ".aa2", ".venv", ".conda-env", *RUNTIME_CACHES} and child.is_dir():
                 visit(child)
     visit(workspace)
+    # Explicit inputs (including ancestors/aliases of node_modules) and automatic
+    # dependency discovery must describe the same immutable content. Only cache
+    # roots are mutable; package source with a cache-like name is still hashed.
+    omitted = {base / name for _, modules in dependencies for base in (modules, modules.resolve())
+               for name in RUNTIME_CACHES}
+    entries = [(p, generated_entry(contained(workspace, p), workspace, omitted=omitted)) for p in command.inputs]
+    entries.extend((name, input_entry(modules, workspace, excluded=set(), omitted=omitted))
+                   for name, modules in dependencies)
     return digest(sorted(entries))
 
 
@@ -51,9 +59,26 @@ def runtime_configuration(workspace, command, environment):
 
 
 @dataclass(frozen=True)
+class EvidenceIssue:
+    code: str
+    command_index: int
+    cwd: str
+    argv: tuple[str, ...]
+    category: str
+
+    def record(self):
+        return {"code": self.code, "command_index": self.command_index, "cwd": self.cwd,
+                "argv": list(self.argv), "category": self.category}
+
+
+@dataclass(frozen=True)
 class ReuseDecision:
     allowed: bool
     reason: str
+    issues: tuple[EvidenceIssue, ...] = ()
+
+    def record(self):
+        return {"allowed": self.allowed, "reason": self.reason, "issues": [issue.record() for issue in self.issues]}
 
 
 @dataclass(frozen=True)
@@ -61,6 +86,11 @@ class EvidenceAssessment:
     valid: bool
     passed: bool
     reason: str
+    code: str = "verified"
+
+    @property
+    def verdict(self):
+        return "unknown" if not self.valid else "passed" if self.passed else "failed"
 
 
 def assess_observation(command, result, workspace, environment, artifacts):
@@ -70,60 +100,82 @@ def assess_observation(command, result, workspace, environment, artifacts):
     try:
         return _assess_observation(command, result, workspace, environment, artifacts, invalid)
     except (OSError, ValueError, KeyError, TypeError, ET.ParseError, AA2Error):
-        return EvidenceAssessment(False, False, "evidence artifact or execution identity unavailable or changed")
+        return EvidenceAssessment(False, False, "evidence artifact or execution identity unavailable or changed", "evidence_unavailable")
 
 
 def _assess_observation(command, result, workspace, environment, artifacts, invalid):
     if artifacts is None or not workspace.is_dir():
-        return EvidenceAssessment(False, False, "artifact verification unavailable")
-    if (result.checker_version != CHECKER_VERSION or result.source_hash != tree_hash(workspace)
-            or result.environment_hash != (environment.fingerprint if environment else "host")
-            or result.command_hash != digest(command.model_dump())
-            or result.input_hash != input_identity(workspace, command)
-            or result.runtime_config_hash != runtime_configuration(workspace, command, environment)
-            or result.process_exit_code is None or result.timed_out
-            or invalid.intersection(result.failure_reasons)):
-        return EvidenceAssessment(False, False, "execution identity or complete evidence unavailable")
+        return EvidenceAssessment(False, False, "artifact verification unavailable", "evidence_unavailable")
+    identities = (
+        (result.source_hash, lambda: tree_hash(workspace), "verified source changed", "source_changed"),
+        (result.checker_version, lambda: CHECKER_VERSION, "verification policy changed", "policy_changed"),
+        (result.environment_hash, lambda: environment.fingerprint if environment else "host", "verification environment changed", "environment_changed"),
+        (result.command_hash, lambda: digest(command.model_dump()), "verification command changed", "command_changed"),
+        (result.input_hash, lambda: input_identity(workspace, command), "declared inputs or installed dependencies changed", "inputs_changed"),
+        (result.runtime_config_hash, lambda: runtime_configuration(workspace, command, environment), "execution environment configuration changed", "runtime_configuration_changed"),
+    )
+    for previous, current, reason, code in identities:
+        if previous != current():
+            return EvidenceAssessment(False, False, reason, code)
+    if result.process_exit_code is None or result.timed_out or invalid.intersection(result.failure_reasons):
+        code = ("source_changed" if "source_changed" in result.failure_reasons else
+                "execution_timeout" if result.timed_out else
+                "inputs_changed" if "execution_inputs_changed" in result.failure_reasons else
+                "evidence_collection_failed" if "evidence_collection_failed" in result.failure_reasons else "execution_incomplete")
+        return EvidenceAssessment(False, False, "complete execution evidence unavailable", code)
     from .collection import policy_identity
     if ((result.capture_policy_hash or result.test_runner == "playwright")
             and result.capture_policy_hash != policy_identity(artifacts.store.root)):
-        return EvidenceAssessment(False, False, "attachment capture policy changed")
+        return EvidenceAssessment(False, False, "attachment capture policy changed", "capture_policy_changed")
     report_failed = False
     for ref in result.logs:
         if not ref.get("capture_complete", True):
-            return EvidenceAssessment(False, False, "incomplete log capture")
+            return EvidenceAssessment(False, False, "incomplete log capture", "log_incomplete")
         if not artifacts.released(ref):
             artifacts.bytes(ref)
     if result.test_runner:
         from .test_reports import read_junit
         if result.report_status != "valid" or not result.report:
-            return EvidenceAssessment(False, False, "machine report unavailable")
+            return EvidenceAssessment(False, False, "machine report unavailable", "report_unavailable")
         cases = read_junit(artifacts.bytes(result.report))
         report_failed = cases.failures
         if (cases.ids != result.test_ids or cases.passed != result.passed_test_ids
                 or cases.passed_count != result.tests or cases.skipped != result.skipped):
-            return EvidenceAssessment(False, False, "machine report differs from observation")
+            return EvidenceAssessment(False, False, "machine report differs from observation", "report_mismatch")
     for attachment in result.attachments:
         if not artifacts.released(attachment["artifact"]):
             artifacts.bytes(attachment["artifact"])
     success = (not report_failed and not result.exit_code and not result.process_exit_code and not result.failure_reasons
                and result.tests >= max(command.expected_tests, int(bool(result.test_runner))))
-    if success and result.generated_outputs != output_hashes(command, workspace):
-        return EvidenceAssessment(False, False, "generated build outputs changed")
-    return EvidenceAssessment(True, bool(success), "verified observation")
+    if success:
+        try:
+            outputs = output_hashes(command, workspace)
+        except (OSError, ValueError, AA2Error):
+            return EvidenceAssessment(False, False, "generated build outputs unavailable", "outputs_unavailable")
+        if result.generated_outputs != outputs:
+            return EvidenceAssessment(False, False, "generated build outputs changed", "outputs_changed")
+    return EvidenceAssessment(True, bool(success), "verified observation", "verified" if success else "check_failed")
 
 
 def reusable(commands, results, workspace: Path, environment, artifacts):
     try:
         commands = verification_commands(commands, workspace)
     except (OSError, ValueError, AA2Error):
-        return ReuseDecision(False, "verification contract unavailable")
+        return ReuseDecision(False, "verification contract unavailable",
+                             (EvidenceIssue("contract_unavailable", -1, ".", (), "contract"),))
     if len(commands) != len(results) or not results:
-        return ReuseDecision(False, "missing command evidence")
-    for command, result in zip(commands, results):
+        return ReuseDecision(False, "missing command evidence",
+                             (EvidenceIssue("missing_observation", -1, ".", (), "evidence"),))
+    issues, reasons = [], []
+    for index, (command, result) in enumerate(zip(commands, results)):
         assessment = assess_observation(command, result, workspace, environment, artifacts)
         if not assessment.valid or not assessment.passed:
-            return ReuseDecision(False, assessment.reason if not assessment.valid else "unsuccessful observation")
+            reason = assessment.reason if not assessment.valid else "unsuccessful observation"
+            reasons.append(f"{command.cwd}: {' '.join(command.argv)}: {reason}")
+            category = "state_conflict" if assessment.code == "source_changed" else "checks" if assessment.valid else "evidence"
+            issues.append(EvidenceIssue(assessment.code, index, command.cwd, tuple(command.argv), category))
+    if issues:
+        return ReuseDecision(False, "; ".join(reasons), tuple(issues))
     return ReuseDecision(True, "complete matching controller evidence")
 
 

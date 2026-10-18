@@ -5,6 +5,7 @@ import shutil
 import sys
 import time
 import xml.etree.ElementTree as ET
+from contextvars import ContextVar
 from pathlib import Path
 
 from .artifacts import ArtifactStore
@@ -32,6 +33,19 @@ from .test_reports import is_python, read_junit, report_command, test_runner
 from .util import SECRET, contained, digest, scrub_text
 from .workspace import tree_hash
 
+verification_operation = ContextVar("verification_operation", default=None)
+
+
+class VerificationRefreshNeeded(VerificationPreparationError):
+    def __init__(self, checks, reason_code):
+        self.checks, self.reason_code = checks, reason_code
+        super().__init__("Verification observation requires a new recovery action: " + reason_code)
+
+
+class InterruptedVerification(VerificationRefreshNeeded):
+    def __init__(self, checks):
+        super().__init__(checks, "execution_interrupted")
+
 MAX_REPORT_BYTES = 32 * 1024 * 1024
 
 
@@ -54,6 +68,27 @@ class VerificationService:
         baseline = tree_hash(workspace)
         store = self.resources.store
         run = store.current(unfinished=True)
+        operation = verification_operation.get()
+        batch_key = "verification/batches/" + operation if operation and run else None
+        batch = store.get(run["id"], batch_key) if batch_key else None
+        if batch:
+            from .faults import StateConflict
+            if batch["source_hash"] != baseline:
+                raise StateConflict("Verification source changed; preserve its reserved observation")
+            if batch["phase"] == "completed":
+                if (batch.get("commands") != [command.model_dump() for command in commands]
+                        or batch.get("environment_hash") != (environment.fingerprint if environment else "host")):
+                    raise VerificationRefreshNeeded(batch["checks"], "execution_inputs_changed")
+                store.event(run["id"], "verification.result_reused", {"batch": batch_key})
+                return [CheckResult.model_validate(row) for row in batch["checks"]]
+            if batch["phase"] == "interrupted":
+                raise InterruptedVerification(batch["checks"])
+            raise StateConflict("Interrupted verification has no durable completion; reservation remains occupied")
+        if batch_key:
+            batch = {"phase": "started", "source_hash": baseline,
+                     "environment_hash": environment.fingerprint if environment else "host",
+                     "commands": [c.model_dump() for c in commands], "checks": []}
+            store.checkpoint(run["id"], batch_key, batch)
         activity = Activity(store, run["id"] if run else None, f"执行检查（{workspace.name}）", total=len(commands))
         failed_outputs, unsafe_source = set(), False
         try:
@@ -81,11 +116,15 @@ class VerificationService:
                 unsafe_source |= bool({"source_changed", "execution_inputs_changed"}.intersection(result.failure_reasons))
         except asyncio.CancelledError:
             activity.finish("interrupted")
+            if batch_key:
+                store.checkpoint(run["id"], batch_key, {**batch, "phase": "interrupted", "checks": [r.model_dump() for r in results]})
             raise
         except Exception:
             activity.finish("error")
             raise
         activity.finish("success" if passed(results) else "error")
+        if batch_key:
+            store.checkpoint(run["id"], batch_key, {**batch, "phase": "completed", "checks": [r.model_dump() for r in results]})
         return results
 
     async def _check(self, command, workspace, environment, baseline, scratch, activity=None, log_root=None):

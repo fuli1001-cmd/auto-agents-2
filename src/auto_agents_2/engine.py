@@ -4,7 +4,6 @@ import asyncio
 import json
 import shlex
 import shutil
-import sys
 from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import quote
@@ -39,6 +38,15 @@ from .errors import (
     VerificationPreparationError,
 )
 from .evidence import CHECKER_VERSION, invocation_identity, reusable
+from .faults import (
+    ApprovalBoundary,
+    HumanIntervention,
+    HumanRequirement,
+    InternalWorkflowError,
+    ResourceBoundary,
+    StateConflict,
+    known_exception,
+)
 from .interaction import choice_spec, is_prototype_approval, question_text
 from .issues import IssueLedger
 from .models import (
@@ -53,7 +61,7 @@ from .patch_repair import PatchRepairService
 from .plan_revision import materialize_plan
 from .planning import ready_batch, validate_plan
 from .profiles import ProjectProfile
-from .progress import capture_output, observe_activity
+from .progress import observe_activity
 from .providers import Agent, ProviderRouter
 from .recovery import (
     ExecutionContract,
@@ -63,6 +71,7 @@ from .recovery import (
     request_from,
 )
 from .recovery_controller import RecoveryController
+from .recovery_identity import invocation_contract
 from .recovery_policy import RecoveryPolicy
 from .replanning import browser_criteria, check_criteria
 from .requirements import capture, validate_coverage
@@ -73,7 +82,7 @@ from .store import Store
 from .task_baselines import refresh_task_baseline
 from .test_reports import test_runner
 from .util import atomic_write, digest, file_lock, identifier, scrub_text
-from .verification import VerificationService, passed
+from .verification import VerificationRefreshNeeded, VerificationService, passed, verification_operation
 from .workspace import (
     WorkspaceManager,
     apply_prepared,
@@ -156,7 +165,7 @@ class WorkflowEngine:
                 "message": "生成及验收阶段的累计实现、诊断和停滞次数仅供决策参考；旧轮数上限不再触发停止。"})
             if self.store.get(rid, "control/cancel"):
                 self.store.checkpoint(rid, "control/cancel", False)
-            self.store.update(rid, status="RUNNING")
+            self.store.update(rid, status="RUNNING", pause_reason=None, incident_id=None)
             if self.store.get(rid, "replanning/evidence/contracts") is None:
                 self._replan_evidence(rid, "contracts", {"coverage": False, "prototype_scope": False, "plan": False})
             owner = asyncio.current_task()
@@ -187,11 +196,14 @@ class WorkflowEngine:
                         self.recovery.submit(rid, exc.failure)
                     except Replan as exc:
                         self._controller_replan(rid, exc)
+                    except HumanIntervention as exc:
+                        await self._wait_prerequisite(rid, exc)
                     except Exception as exc:
-                        incidents = self.store.get(rid, "incidents", 0) + 1
-                        self.store.checkpoint(rid, "incidents", incidents)
-                        detail = str(exc).strip() or type(exc).__name__
-                        await self._ask(rid, f"incident/{incidents}", f"执行遇到阻塞：{detail}\n修复配置或环境后回复 retry；也可以通过 aa2 cancel 取消本轮。", digest(detail))
+                        boundary = known_exception(exc, self.store.run(rid)["stage"])
+                        if boundary:
+                            await self._wait_prerequisite(rid, boundary)
+                        else:
+                            raise self._internal_error(rid, exc) from None
             except asyncio.CancelledError:
                 if self.store.get(rid, "control/cancel"):
                     journal = self.store.get(rid, "delivery/journal", {})
@@ -202,11 +214,19 @@ class WorkflowEngine:
                         self.store.checkpoint(rid, "cancellation/archive_hold", hold)
                     self.store.update(rid, status="PAUSED" if published else "CANCELLED")
                     return self.store.run(rid)
+                if collector.done() and not collector.cancelled() and collector.exception() is not None:
+                    raise self._internal_error(rid, collector.exception()) from None
                 self.store.update(rid, status="PAUSED")
                 raise
             except BaseException as exc:
-                self.store.update(rid, status="PAUSED", last_error=str(exc)[:2000])
-                raise
+                if isinstance(exc, Exception) and not isinstance(exc, (InternalWorkflowError, HumanIntervention)):
+                    exc = self._internal_error(rid, exc)
+                try:
+                    self.store.update(rid, status="PAUSED", last_error=str(exc)[:2000] if isinstance(exc, InternalWorkflowError)
+                                      else type(exc).__name__)
+                except Exception:
+                    pass  # Preserve the original failure when the state store is unavailable.
+                raise exc from None
             finally:
                 collector.cancel()
                 await asyncio.gather(collector, return_exceptions=True)
@@ -232,6 +252,33 @@ class WorkflowEngine:
                 if errors:
                     from .progress import safe_event
                     safe_event(self.store, rid, "cleanup.pending", {"errors": errors})
+
+    async def _wait_prerequisite(self, rid, error):
+        requirement = error.requirement.model_dump()
+        identity = digest([error.reason_code, error.phase, requirement])
+        self.store.record_fault(rid, {"route": "human", "reason_code": error.reason_code,
+                                     "phase": error.phase, "human_requirement": requirement})
+        key = "prerequisite/" + identity
+        attempt = self.store.get(rid, key, 0)
+        interaction = choice_spec(["已处理，重新核对", "暂停，稍后续跑"], ["retry", "pause"], yes_no=True)
+        interaction["pause_on"] = "n"
+        await self._ask(rid, f"{key}/{attempt}", error.requirement.prompt(), identity, interaction)
+        self.store.checkpoint(rid, key, attempt + 1)
+
+    def _internal_error(self, rid, error):
+        import traceback
+        incident = identifier("incident")
+        # Exception text and locals may contain native configuration or credentials.
+        frames = [{"file": Path(frame.filename).name, "line": frame.lineno, "function": frame.name}
+                  for frame in traceback.extract_tb(error.__traceback__)]
+        record = {"route": "internal_error", "reason_code": "unclassified_exception", "incident_id": incident,
+                  "exception_type": type(error).__name__, "frames": frames}
+        try:
+            record["phase"] = self.store.run(rid)["stage"]
+            self.store.record_fault(rid, record, pause=True)
+        except Exception:
+            return InternalWorkflowError(incident, type(error).__name__, saved=False)
+        return InternalWorkflowError(incident, type(error).__name__)
 
     def _replan_evidence(self, rid, scope, criteria, **identity):
         self.store.checkpoint(rid, f"replanning/evidence/{scope}", {"criteria": criteria, **identity})
@@ -511,11 +558,39 @@ class WorkflowEngine:
         except VerificationPreparationError as exc:
             raise self._preparation_failure(rid, task.checks, work, exc, task) from exc
 
-    async def _checks(self, rid, commands, work, environment, task=None):
+    def _verification_operation(self, rid, commands, work, environment, task=None, *, phase="final", operation=None):
+        if phase == "runtime" and operation:
+            return digest([rid, phase, operation])
+        saved = self.store.get(rid, "develop/task/" + task.id, {}) if task else {}
+        permit = saved.get("recovery_permit") if task else self.store.get(rid, "recovery/final-action")
+        return digest([rid, phase, str(work), tree_hash(work), environment.fingerprint if environment else "host",
+                       [c.model_dump() for c in commands], CHECKER_VERSION, permit, saved.get("observation_id"), operation])
+
+    async def _checks(self, rid, commands, work, environment, task=None, *, phase="final", operation=None):
+        identity = self._verification_operation(rid, commands, work, environment, task, phase=phase, operation=operation)
+        token = verification_operation.set(identity)
         try:
             return await self.verifier.run(commands, work, environment)
+        except VerificationRefreshNeeded as exc:
+            evidence = {"commands": [c.model_dump() for c in commands], "checks": exc.checks,
+                "execution_interrupted": exc.reason_code == "execution_interrupted", "verification_assessment": {
+                    "allowed": False, "issues": [{"code": exc.reason_code, "category": "evidence"}]}}
+            if phase in {"runtime", "reintegration"}:
+                raise RuntimeVerificationError(evidence) from exc
+            raise RecoveryNeeded(FailureRecord.create(kind="evidence", component="verification",
+                origin_id=(task.origin_id or task.id) if task else "final", task_id=task.id if task else "",
+                step=exc.reason_code, phase="task" if task else phase,
+                obligations=task.requirement_ids if task else [digest(c.model_dump()) for c in commands],
+                evidence_refs=["verification/batches/" + identity],
+                evidence=evidence)) from exc
         except VerificationPreparationError as exc:
+            if phase in {"runtime", "reintegration"}:
+                raise RuntimeVerificationError({"commands": [c.model_dump() for c in commands], "checks": [],
+                    "verification_error": "verification contract unavailable", "verification_assessment": {
+                        "allowed": False, "issues": [{"code": "contract_unavailable", "category": "contract"}]}}) from exc
             raise self._preparation_failure(rid, commands, work, exc, task) from exc
+        finally:
+            verification_operation.reset(token)
 
     async def _refresh_legacy_approval_context(self, rid):
         """Let an old, unapplied task reassess its exact replan with proven consent.
@@ -557,9 +632,9 @@ class WorkflowEngine:
             except Replan as exc:
                 # A pending rollback cannot be replaced by raising another Replan.
                 # Preserve it and expose the real failed gate without a busy loop.
-                raise AA2Error(f"历史原型审批复核未通过：{exc.reason}") from exc
+                raise ApprovalBoundary(f"历史原型审批复核未通过：{exc.reason}") from exc
             if (tree_hash(work) != source or not self.approvals.current(rid, work, actions, PROTOTYPE_BROWSER_VERSION)):
-                raise AA2Error("审批恢复期间候选发生变化，已保留回退现场")
+                raise StateConflict("审批恢复期间候选发生变化，已保留回退现场")
             record["approval"] = receipt
             updated = {**saved, "approval_context_version": APPROVAL_CONTEXT_VERSION,
                        "feedback": {**saved.get("feedback", {}), "controller_approval_recheck": {
@@ -655,9 +730,28 @@ class WorkflowEngine:
     async def _invoke(self, stage, context, schema, workspace, rid, key, fresh=False, *, interactive_retry=True):
         invocation_key = "invocation/" + key
         source_before = tree_hash(workspace)
+        saved = self.store.get(rid, invocation_key, {})
+        logical = None
+        if stage in {"decision", "recovery_diagnosis"}:
+            logical_key = "recovery/invocation-inputs/" + digest([stage, key])
+            logical = self.store.get(rid, logical_key)
+            if logical:
+                if (logical["source_hash"] != source_before
+                        or invocation_contract(logical["context"]) != invocation_contract(context)):
+                    raise StateConflict("Recovery invocation source changed; preserve its frozen request and response")
+                # Logical operation keys are immutable; prompt/provenance versions
+                # cannot regenerate an already completed operation on restart.
+                context = logical["context"]
+                if (saved.get("result") and (saved.get("logical_input") == logical_key
+                        or digest(saved) != logical["previous_invocation"])):
+                    if saved.get("cleanup_record"):
+                        self.sandbox.confirm_record(saved["cleanup_record"])
+                    return schema.model_validate(saved["result"])
+            else:
+                logical = {"source_hash": source_before, "context": context, "previous_invocation": digest(saved)}
+                self.store.checkpoint(rid, logical_key, logical)
         execution = self.agent.execution_identity(stage) if isinstance(self.agent, ProviderRouter) else None
         identity = invocation_identity(stage, context, schema, workspace, self.config.load(), source_before, execution)
-        saved = self.store.get(rid, invocation_key, {})
         compatible = {identity}
         if stage == "recovery_diagnosis":
             old_execution = self.agent.execution_identity("review") if isinstance(self.agent, ProviderRouter) else None
@@ -684,7 +778,8 @@ class WorkflowEngine:
         if isinstance(result, ReviewResult):
             IssueLedger(self.store, self.artifacts).record(rid, key, result, context)
         self.store.checkpoint(rid, invocation_key, {"identity": identity, "result": result.model_dump(mode="json"),
-                                                  "artifact": artifact})
+                                                  "artifact": artifact,
+                                                  **({"logical_input": logical_key} if logical else {})})
         self.store.event(rid, "artifact.created", {"stage": stage, "operation": key, "artifact": artifact})
         return result
 
@@ -720,7 +815,7 @@ class WorkflowEngine:
             answer = await self._ask(rid, "prototype-approval", prompt, fingerprint,
                                      choice_spec(["通过，继续开发", "不通过，填写修改意见"], ["approve", "reject"]))
             if self._prototype_hash(work) != content_hash:
-                raise AA2Error("原型在审核期间发生变化，已保留现场；请核对修改后再续跑")
+                raise StateConflict("原型在审核期间发生变化，已保留现场；请核对修改后再续跑")
             if answer not in {"approve", "通过", "批准"}:  # Includes saved legacy approvals.
                 feedback = await self._ask(rid, "prototype-feedback", "请输入原型修改意见：", fingerprint)
                 return feedback
@@ -749,7 +844,7 @@ class WorkflowEngine:
         except PrototypeBrowserError as exc:
             results, error = exc.results, str(exc)
         if self._prototype_hash(work) != fingerprint:
-            raise AA2Error("原型在检查期间被修改，需要重新检查")
+            raise StateConflict("原型在检查期间被修改，需要重新检查")
         results = self._archive_visuals(results)
         report = {"version": PROTOTYPE_BROWSER_VERSION, "source_hash": fingerprint,
                   "actions_hash": digest([a.model_dump() for a in document.browser_actions]),
@@ -811,7 +906,7 @@ class WorkflowEngine:
             self.store.checkpoint(rid, verification_key, {**binding, "review": review, "visuals": visuals,
                                                          "browser_version": PROTOTYPE_BROWSER_VERSION})
         if prototype_identity(work, actions) != binding:
-            raise AA2Error("原型在审批复核期间发生变化，已保留现场")
+            raise StateConflict("原型在审批复核期间发生变化，已保留现场")
         return await self._record_prototype_approval(rid, work, document, review, visuals)
 
     def _task_approval_context(self, rid, work, context):
@@ -821,7 +916,7 @@ class WorkflowEngine:
         record = (self.approvals.current(rid, work, prototype.get("browser_actions", []), PROTOTYPE_BROWSER_VERSION)
                   if prototype else None)
         if not record:
-            raise AA2Error("当前任务缺少与原型内容及交互动作匹配的人工审批证据，已暂停派发")
+            raise ApprovalBoundary("当前任务缺少与原型内容及交互动作匹配的人工审批证据，已暂停派发")
         return {"prototype_approval": self.approvals.context(record)}
 
     async def _prepare_prototype(self, rid, work, specification, assessment, context, original):
@@ -941,7 +1036,7 @@ class WorkflowEngine:
             pending.pop("browser_version", None)
             self.store.checkpoint(rid, key, pending)
         if fingerprint != pending["fingerprint"]:
-            raise AA2Error("待审核原型已被修改，已保留现场；请核对修改后再续跑")
+            raise StateConflict("待审核原型已被修改，已保留现场；请核对修改后再续跑")
         if "visuals" in pending and pending.get("browser_version") != PROTOTYPE_BROWSER_VERSION:
             self.artifacts.put(pending, "prototype-recovery")
             pending.pop("visuals")
@@ -956,7 +1051,7 @@ class WorkflowEngine:
             pending["browser_version"] = PROTOTYPE_BROWSER_VERSION
             self.store.checkpoint(rid, key, pending)
         if self._prototype_hash(work) != fingerprint:
-            raise AA2Error("原型在检查期间被修改，需要重新检查")
+            raise StateConflict("原型在检查期间被修改，需要重新检查")
         pending["visuals"] = self._archive_visuals(pending["visuals"])
         self._replan_evidence(rid, "prototype-browser", browser_criteria(document.browser_actions, pending["visuals"]),
                               source_hash=fingerprint)
@@ -969,7 +1064,7 @@ class WorkflowEngine:
             pending["review"] = review.model_dump()
             self.store.checkpoint(rid, key, pending)
         if self._prototype_hash(work) != fingerprint:
-            raise AA2Error("原型在检查期间被修改，需要重新检查")
+            raise StateConflict("原型在检查期间被修改，需要重新检查")
         context["prototype_approval"] = await self._record_prototype_approval(
             rid, work, document, pending["review"], pending["visuals"])
         return document, pending["retrieved"]
@@ -984,7 +1079,7 @@ class WorkflowEngine:
                 try:
                     await self._ensure_prototype_approval(rid, Path(journal["work"]))
                 except Replan as exc:
-                    raise AA2Error(f"交付原型审批未通过，已保留交付现场：{exc.reason}") from exc
+                    raise ApprovalBoundary(f"交付原型审批未通过，已保留交付现场：{exc.reason}") from exc
             return await self.delivery.finish(rid)
         run = self.store.run(rid)
         raw = self.store.get(rid, "capture")
@@ -1278,6 +1373,8 @@ class WorkflowEngine:
         if not passed(evidence):
             self._final_progress(rid, plan, observation_round, frontend=result.frontend)
             raise RecoveryNeeded(check_failure(commands, evidence, step="final_checks", evidence_ref="verify/checks"))
+        self._require_candidate_evidence(rid, commands, evidence, work, environment,
+                                         phase="final", expected_source=candidate_hash)
         visuals = []
         if ProjectProfile.detect(work, self.config.load().project_profile).has_frontend and not result.frontend:
             raise Replan("clarify", "Implementation introduced a frontend without a prototype and browser verification contract")
@@ -1299,6 +1396,8 @@ class WorkflowEngine:
             self.store.checkpoint(rid, "verify/visuals", visuals)
             self._replan_evidence(rid, "application-browser", browser_criteria(plan.preview.actions, visuals),
                                   source_hash=tree_hash(work))
+        self._require_candidate_evidence(rid, commands, evidence, work, environment,
+                                         phase="final", expected_source=candidate_hash)
         review_key = digest([verify_key, [r.model_dump() for r in evidence], visuals])
         cached_review = self.store.get(rid, "verify/review") if self.store.get(rid, "verify/review_identity") == review_key else None
         review = ReviewResult.model_validate(cached_review) if cached_review else await self._invoke("verify", {**context, "project": self.contexts.build(work),
@@ -1317,9 +1416,9 @@ class WorkflowEngine:
         self.store.checkpoint(rid, "verify/review_identity", review_key)
         if (git(work, "rev-parse", "HEAD") != candidate or tree_hash(work) != candidate_hash
                 or git(work, "diff", "--name-only", "HEAD")):
-            raise AA2Error("Candidate changed during verification")
-        if not reusable(commands, evidence, work, environment, self.artifacts).allowed:
-            raise AA2Error("Verified build inputs or outputs changed during final acceptance")
+            raise StateConflict("Candidate changed during verification")
+        self._require_candidate_evidence(rid, commands, evidence, work, environment,
+                                         phase="final", expected_source=candidate_hash)
         self._final_progress(rid, plan, observation_round, frontend=result.frontend, visuals=visuals, approved=True)
         self._task_approval_context(rid, work, context)
         self.store.update(rid, external_dependencies=bool(context.get("provider_research", {}).get("sources")))
@@ -1384,12 +1483,11 @@ class WorkflowEngine:
             if shutil.disk_usage(self.store.root).free < cfg.cleanup.min_free_bytes:
                 self.resources.collect()
                 if shutil.disk_usage(self.store.root).free < cfg.cleanup.min_free_bytes:
-                    await self._ask(rid, "disk-space", "可用磁盘不足，请释放空间或调整配额后回复 continue。")
-                    if shutil.disk_usage(self.store.root).free < self.config.load().cleanup.min_free_bytes:
-                        raise AA2Error("磁盘空间仍不足")
+                    raise ResourceBoundary("磁盘空间仍不足", action="释放项目所在文件系统的磁盘空间。",
+                        condition="资源管理器核对可用空间达到当前配置要求。", phase="generation")
             batch = ready_batch(plan.tasks, done, cfg.execution.max_parallel_tasks)
             if not batch:
-                raise AA2Error("Task graph cannot make progress")
+                raise Replan("plan", "Task graph cannot make progress; reconcile accepted task dependencies")
             base = git(integration, "rev-parse", "HEAD")
             from .task_batch import collect_batch
             outcomes = await collect_batch([self._task(rid, task, base, plan, context) for task in batch])
@@ -1425,13 +1523,15 @@ class WorkflowEngine:
         self.store.checkpoint(rid, "rounds/" + owner, {**counters, "stalled": progress.get("stalled", 0)})
         return progress
 
-    def _task_failure(self, rid, task, saved, *, kind=None, step="checks", proposal=None):
+    def _task_failure(self, rid, task, saved, *, kind=None, step="checks", proposal=None, verification_error=None):
         feedback = saved.get("feedback", {})
         current = saved if any(k in saved for k in ("checks", "review", "environment_error", "candidate_error")) else feedback
         evidence = {k: current.get(k) for k in
                     ("checks", "review", "environment_error", "candidate_error")}
         evidence["checks"] = evidence["checks"] or []
         evidence["task"] = task.model_dump()
+        if verification_error is not None:
+            evidence["verification_error"] = verification_error
         if kind is None:
             kind = ("integration" if feedback.get("baseline_refresh", {}).get("retained_candidate") else
                     "environment" if evidence["environment_error"] else "proposal" if evidence["candidate_error"]
@@ -1443,6 +1543,61 @@ class WorkflowEngine:
         return FailureRecord.create(kind=kind, component="implementation", origin_id=task.origin_id or task.id,
             task_id=task.id, step=step, obligations=task.requirement_ids, evidence_refs=["develop/task/" + task.id],
             evidence=evidence, proposal=proposal or {})
+
+    def _require_task_evidence(self, rid, task, saved, commands, checks, work, environment):
+        failure = self._verification_problem(rid, commands, checks, work, environment, phase="task",
+                                             task=task, expected_source=saved.get("source_hash"))
+        if failure is None:
+            return
+        # Verification drift is a new evidence observation, not an implementation
+        # defect or implicit permission to accept a stale review.
+        saved["phase"] = "reverify"
+        state_key = "task_state/" + task.id
+        state = self.store.get(rid, state_key, {})
+        self.store.checkpoints(rid, {"develop/task/" + task.id: saved,
+            state_key: {**state, "evidence": "stale"}})
+        raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="evidence", step="verification_inputs",
+            verification_error=failure.evidence["verification_error"]).model_copy(update={
+                "reason_code": failure.reason_code,
+                "evidence": {**self._task_failure_evidence(task, saved), **failure.evidence}}))
+
+    @staticmethod
+    def _task_failure_evidence(task, saved):
+        return {"task": task.model_dump(), "review": saved.get("review"),
+                "environment_error": saved.get("environment_error"), "candidate_error": saved.get("candidate_error")}
+
+    def _verification_problem(self, rid, commands, checks, work, environment, *, phase, task=None, expected_source=None):
+        """Shared gate assessment. Stage adapters own the recovery dispatch, never its classification."""
+        reuse = reusable(commands, checks, work, environment, self.artifacts)
+        source = tree_hash(work)
+        if (expected_source and source != expected_source
+                or any(row.source_hash and row.source_hash != source for row in checks)):
+            raise StateConflict("Verified task source changed; preserve the candidate and user edits"
+                                if task else "Verified candidate source changed; preserve the candidate and user edits", phase=phase)
+        if reuse.allowed:
+            return None
+        evidence = {"commands": [c.model_dump() for c in commands], "checks": [c.model_dump() for c in checks],
+                    "verification_error": reuse.reason, "verification_assessment": reuse.record()}
+        key = "develop/task/" + task.id if task else "verify/checks"
+        previous_review = self.store.get(rid, "develop/task/" + task.id, {}).get("review") if task else self.store.get(rid, "verify/review")
+        history = {"phase": phase, **evidence, "review": previous_review}
+        updates = {f"recovery/verification-history/{task.id if task else phase}/{digest(history)}": history}
+        if not task and phase not in {"runtime", "completion"}:
+            updates.update({"verify/checks": evidence["checks"], "verify/identity": None, "verify/review_identity": None,
+                            "verify/review": None})
+        self.store.checkpoints(rid, updates)
+        self.store.event(rid, "evidence.invalidated", {"phase": phase, **reuse.record()})
+        code = reuse.issues[0].code if reuse.issues else "evidence_unavailable"
+        return FailureRecord.create(kind="checks" if reuse.issues and all(i.category == "checks" for i in reuse.issues) else "evidence",
+            component="verification", origin_id=(task.origin_id or task.id) if task else "final", task_id=task.id if task else "",
+            step="verification_inputs", phase=phase, reason_code=code,
+            obligations=task.requirement_ids if task else [digest(c.model_dump()) for c in commands], evidence_refs=[key], evidence=evidence)
+
+    def _require_candidate_evidence(self, rid, commands, checks, work, environment, *, phase, expected_source=None):
+        failure = self._verification_problem(rid, commands, checks, work, environment,
+                                             phase=phase, expected_source=expected_source)
+        if failure:
+            raise RecoveryNeeded(failure)
 
     def _final_progress(self, rid, plan, token, *, frontend=False, visuals=(), approved=False):
         observation = self.store.get(rid, "replanning/evidence/final-checks", {})
@@ -1477,7 +1632,7 @@ class WorkflowEngine:
         work = (Path(saved["workspace"]) if saved.get("workspace") else legacy if legacy.is_dir() and not saved.get("revision")
                 else self.workspaces.allocate(rid, name, seed))
         if not work.is_dir():
-            raise AA2Error("Task workspace missing; restore its recovery snapshot before retrying")
+            raise StateConflict("Task workspace missing; restore its recovery snapshot before retrying")
         saved["workspace"] = str(work)
         self.resources.register(work, "worktree", rid)
         if saved.get("phase") == "implementing" and saved.get("patch"):
@@ -1604,6 +1759,11 @@ class WorkflowEngine:
             if saved.get("phase") == "tested" and reuse.allowed:
                 checks = prior_checks
             else:
+                if any(row.checker_version != CHECKER_VERSION for row in prior_checks):
+                    previous = {"checks": saved["checks"], "review": saved.get("review"),
+                        "source_hash": saved.get("source_hash"), "reason": reuse.reason}
+                    self.store.checkpoint(rid,
+                        f"recovery/verification-history/{task.origin_id or task.id}/{digest(previous)}", previous)
                 checks = await self._checks(rid, commands, work, environment, task)
                 saved.update(phase="tested", checks=[c.model_dump() for c in checks], source_hash=tree_hash(work))
                 self.store.checkpoint(rid, key, saved)
@@ -1618,6 +1778,7 @@ class WorkflowEngine:
                     "kind": failure_record.kind, "evidence": key, "observation": digest(failure_record.evidence)})
                 raise RecoveryNeeded(failure_record)
             if passed(checks):
+                self._require_task_evidence(rid, task, saved, commands, checks, work, environment)
                 task_context.update(self._task_approval_context(rid, work, context))
                 review = await self._invoke("review", {**task_context, "implementation": change.model_dump(),
                                                        "project": self.contexts.build(work, scopes=task.allowed_paths),
@@ -1626,8 +1787,7 @@ class WorkflowEngine:
                 saved["review"] = review.model_dump()
                 if review.approved:
                     self._task_approval_context(rid, work, context)
-                    if not reusable(commands, checks, work, environment, self.artifacts).allowed:
-                        raise AA2Error("Verified build inputs or outputs changed during task review")
+                    self._require_task_evidence(rid, task, saved, commands, checks, work, environment)
                     self._task_progress(rid, task, saved, checked=True, approved=True)
                     recovery_ref = f"refs/aa2/{rid}/tasks/{task.id}/r{state['revision']}/{base[:8]}"
                     commit = self.workspaces.checkpoint(work, recovery_ref, f"aa2: {task.title}")
@@ -1644,20 +1804,40 @@ class WorkflowEngine:
         cache = self.store.root / "cache/browsers"
         cache.mkdir(parents=True, exist_ok=True)
         self.resources.register(cache, "cache", rid)
-        if any(cache.glob("chromium-*/chrome-linux*/chrome")):
-            return
-        import os
-        with observe_activity(self.store, rid, "准备浏览器环境"), self.resources.temporary("browser-install") as scratch:
-            env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(cache), "TMPDIR": str(scratch)}
-            process = await self.sandbox.spawn([sys.executable, "-m", "playwright", "install", "chromium"],
-                                               workspace, env, [cache, scratch])
+        key = "infrastructure/browser/" + digest([str(workspace), tree_hash(workspace)])
+        while not any(cache.glob("chromium-*/chrome-linux*/chrome")):
+            previous = self.store.get(rid, key, {"attempts": 0})
+            attempt = previous["attempts"] + 1
+            permit = None
+            if previous["attempts"]:
+                if (self.store.get(rid, "delivery/journal") or {}).get("publication_started"):
+                    raise HumanIntervention(HumanRequirement(kind="external_input",
+                        reason="发布后的浏览器环境准备失败。", action="检查浏览器下载连接与项目内工具链。",
+                        resume_condition="浏览器可执行文件在项目缓存中就绪；发布记录和运行预算保持不变。",
+                        evidence_refs=[key]), reason_code="browser_install_failed", phase="runtime")
+                from .recovery import RecoveryDecision
+                failure = FailureRecord.create(kind="environment", component="browser_environment", origin_id="browser_environment",
+                    step="browser_install", obligations=[key], evidence_refs=[key], evidence={"installation": previous})
+                active = {"attempt": attempt, "failure": failure.model_dump()}
+                suggested = RecoveryDecision(failure_id=failure.id, action="recheck", budget_owner=failure.origin_id,
+                    reason="浏览器环境准备失败，评估是否重试当前项目内的安装操作", evidence_refs=[key])
+                _, permit = await self.recovery_policy.authorize(rid, failure, active, workspace, None, suggested,
+                    operation=f"browser-install/{attempt}", force_decision=True, candidates={"recheck": suggested})
+                self.recovery_policy.start(rid, permit)
             try:
-                async with asyncio.timeout(900):
-                    _, stderr = await capture_output(process)
-                if process.returncode:
-                    raise AA2Error("Project-local browser installation failed: " + stderr.decode(errors="replace")[-2000:])
-            finally:
-                await self.sandbox.stop(process)
+                await self._install_browser(workspace, cache)
+            except RetryableInfrastructureError as exc:
+                result = {"attempts": attempt, "reason_code": "browser_install_failed", "error": str(exc)}
+                self.store.checkpoint(rid, key, result)
+                self.recovery_policy.complete(rid, permit, {"status": "failed", "evidence": key, "attempt": attempt})
+                continue
+            self.recovery_policy.complete(rid, permit, {"status": "verified", "evidence": key})
+            return
+
+    async def _install_browser(self, workspace, cache):
+        run = self.store.current(unfinished=True)
+        with observe_activity(self.store, run["id"] if run else None, "准备浏览器环境"), self.resources.temporary("browser-install") as scratch:
+            await self.environments.install_browser(workspace, cache, scratch)
 
     def _agent_instructions(self, work, plan):
         path = work / "AGENTS.md"
@@ -1730,11 +1910,11 @@ class WorkflowEngine:
         approval_context = {}
         if self.store.get(rid, "clarify", {}).get("frontend"):
             if not self.store.get(rid, "prototype") or not plan or not plan.preview:
-                raise AA2Error("现有前端缺少原型审批或应用浏览器验收契约，不能跳过门禁交付")
+                raise ApprovalBoundary("现有前端缺少原型审批或应用浏览器验收契约，不能跳过门禁交付")
             try:
                 approval_context["prototype_approval"] = await self._ensure_prototype_approval(rid, work)
             except Replan as exc:
-                raise AA2Error(f"复用前端审批未通过，已保留现场：{exc.reason}") from exc
+                raise ApprovalBoundary(f"复用前端审批未通过，已保留现场：{exc.reason}") from exc
         environment = await self._environment(work, rid, plan)
         # A source-only match cannot establish current environment or evidence identity.
         candidate = self.workspaces.checkpoint(work, f"refs/aa2/{rid}/candidate", "aa2: dependency lock verification")
@@ -1743,10 +1923,12 @@ class WorkflowEngine:
         candidate_hash = tree_hash(work)
         checks = self._candidate_checks(plan, work) if plan else (
             IntakeResult.model_validate(self.store.get(rid, "clarify")).verification or self.config.load().verification)
-        evidence = await self.verifier.run(checks, work, environment)
+        evidence = await self._checks(rid, checks, work, environment, phase="reuse")
         if not passed(evidence):
             self.store.checkpoint(rid, "verify/checks", [c.model_dump() for c in evidence])
             raise RecoveryNeeded(check_failure(checks, evidence, step="reuse_checks", evidence_ref="verify/checks"))
+        self._require_candidate_evidence(rid, checks, evidence, work, environment,
+                                         phase="reuse", expected_source=candidate_hash)
         visuals = []
         if approval_context:
             await self._ensure_browser(rid, work)
@@ -1762,6 +1944,8 @@ class WorkflowEngine:
                     evidence_refs=["verify/visuals"], evidence={"results": visuals, "error": str(exc)})) from exc
             visuals = self._archive_visuals(visuals)
             self.store.checkpoint(rid, "verify/visuals", visuals)
+        self._require_candidate_evidence(rid, checks, evidence, work, environment,
+                                         phase="reuse", expected_source=candidate_hash)
         review = await self._invoke("verify", {**approval_context, "project": self.contexts.build(work),
                                     "verification_contract": self._verification_contract(checks),
                                     "specification": self.store.get(rid, "clarify"),
@@ -1769,13 +1953,18 @@ class WorkflowEngine:
                                     "evidence": [c.model_dump() for c in evidence], "implemented_visuals": visuals},
                                     ReviewResult, work, rid, "no-change-review", fresh=True)
         if not review.approved:
-            raise AA2Error(review.summary)
+            self.store.checkpoints(rid, {"verify/review": review.model_dump(),
+                                         "verify/checks": [row.model_dump() for row in evidence]})
+            raise RecoveryNeeded(FailureRecord.create(kind="review", component="reuse_review", origin_id="final",
+                step="reuse_review", phase="reuse", obligations=[digest(c.model_dump()) for c in checks],
+                evidence_refs=["verify/review", "verify/checks"],
+                evidence={"review": review.model_dump(), "checks": [row.model_dump() for row in evidence]}))
         self._task_approval_context(rid, work, {"specification": self.store.get(rid, "clarify", {})})
         if (tree_hash(work) != candidate_hash or git(work, "rev-parse", "HEAD") != candidate
                 or git(work, "diff", "--name-only", "HEAD")):
-            raise AA2Error("Reused candidate changed during verification")
-        if not reusable(checks, evidence, work, environment, self.artifacts).allowed:
-            raise AA2Error("Verified build inputs or outputs changed during reuse acceptance")
+            raise StateConflict("Reused candidate changed during verification")
+        self._require_candidate_evidence(rid, checks, evidence, work, environment,
+                                         phase="reuse", expected_source=candidate_hash)
         self.store.checkpoint(rid, "verify/checks", [c.model_dump() for c in evidence])
         self.store.checkpoint(rid, "verify/review", review.model_dump())
         self.store.checkpoint(rid, "verify/identity", digest([tree_hash(work), environment.fingerprint,
@@ -1786,17 +1975,23 @@ class WorkflowEngine:
     async def _runtime_checks(self, rid, journal, environment):
         plan = PlanResult.model_validate(journal["plan"]) if journal["plan"] else None
         commands = runtime_commands(plan, self.project, environment)
+        attempt = journal.get("runtime_attempt_id") or identifier("runtime-probe")
         checks = []
         for index, command in enumerate(commands):
             identity = digest([journal["candidate"], environment.fingerprint, command.model_dump()])
             key = f"delivery/runtime/{index}"
             # Outputs and runtime caches may change without a source commit. Probe every handoff.
-            results = await self.verifier.run([command], self.project, environment)
+            results = await self._checks(rid, [command], self.project, environment, phase="runtime",
+                                         operation=[attempt, index])
             if not passed(results):
                 raise RuntimeVerificationError({"checks": [c.model_dump() for c in [*checks, *results]], "visuals": []})
             checks.extend(results)
             self.store.checkpoint(rid, key, {"identity": identity, "checks": [c.model_dump() for c in results]})
         evidence = {"checks": [c.model_dump() for c in checks]}
+        failure = self._verification_problem(rid, commands, checks, self.project, environment,
+                                             phase="runtime", expected_source=journal.get("source_hash"))
+        if failure:
+            raise RuntimeVerificationError(failure.evidence)
         if plan and plan.preview:
             await self._ensure_browser(rid, self.project)
             try:
@@ -1809,8 +2004,10 @@ class WorkflowEngine:
                 raise RuntimeVerificationError(evidence) from exc
         if "visuals" in evidence:
             evidence["visuals"] = self._archive_visuals(evidence["visuals"])
-        if not reusable(commands, checks, self.project, environment, self.artifacts).allowed:
-            raise AA2Error("Verified build inputs or outputs changed during runtime acceptance")
+        failure = self._verification_problem(rid, commands, checks, self.project, environment,
+                                             phase="runtime", expected_source=journal.get("source_hash"))
+        if failure:
+            raise RuntimeVerificationError({**evidence, **failure.evidence})
         return evidence
 
     def _archive_visuals(self, rows):
@@ -1841,7 +2038,7 @@ class WorkflowEngine:
         unfinished = self.store.get(rid, "candidate/delivery-repair", {})
         if unfinished and not unfinished.get("commit") and unfinished.get("phase") != "rejected":
             if not all(key in unfinished for key in ("feedback", "scopes", "trigger", "base_source")):
-                raise AA2Error("Legacy unfinished delivery repair lacks its input identity; preserve and reconcile it before continuing")
+                raise StateConflict("Legacy unfinished delivery repair lacks its input identity; preserve and reconcile it before continuing")
             await self._delivery_repair(rid, work, unfinished["feedback"], unfinished["scopes"], observation=unfinished["trigger"])
         if journal.get("runtime_failure"):
             failure = digest([journal["candidate"], journal["runtime_failure"], journal.get("runtime_attempt_id")])
@@ -1873,15 +2070,27 @@ class WorkflowEngine:
             checks = (self._candidate_checks(plan, work) if plan else
                       IntakeResult.model_validate(self.store.get(rid, "clarify")).verification)
             checks = checks or self.config.load().verification
-            observation = identifier("delivery-verification")
+            verification_operation_id = self.store.get(rid, "recovery/delivery-recheck-active") or [journal["candidate"], incoming, journal["reintegrations"]]
+            batch_key = "verification/batches/" + self._verification_operation(rid, checks, work, environment,
+                phase="reintegration", operation=verification_operation_id)
+            observation = digest(["delivery-verification", rid, candidate, before, verification_operation_id])
             self.store.checkpoint(rid, "delivery/verification-observation", {
                 "id": observation, "candidate": candidate, "source_hash": before})
-            self.recovery.start_delivery_recheck(rid, work)
-            evidence = await self.verifier.run(checks, work, environment)
+            self.recovery.start_delivery_recheck(rid, work, completed_evidence=batch_key)
+            try:
+                evidence = await self._checks(rid, checks, work, environment, phase="reintegration",
+                    operation=verification_operation_id)
+            except RuntimeVerificationError as exc:
+                self.recovery.complete_delivery_recheck(rid, exc.evidence)
+                await self._delivery_repair(rid, work, exc.evidence,
+                    [p for p in git(work, "ls-files", "-z").split("\0") if p], observation=observation)
+                continue
             if not passed(evidence):
                 self.recovery.complete_delivery_recheck(rid, {"checks": [c.model_dump() for c in evidence]})
                 await self._delivery_repair(rid, work, {"checks": [c.model_dump() for c in evidence]},
                                             [p for p in git(work, "ls-files", "-z").split("\0") if p], observation=observation)
+                continue
+            if await self._recover_delivery_evidence(rid, checks, evidence, work, environment, before, observation):
                 continue
             visuals = []
             approval_context = {}
@@ -1906,6 +2115,8 @@ class WorkflowEngine:
                     await self._delivery_repair(rid, work, {"visuals": visuals, "browser_error": str(exc)},
                         [p for p in git(work, "ls-files", "-z").split("\0") if p], observation=observation)
                     continue
+            if await self._recover_delivery_evidence(rid, checks, evidence, work, environment, before, observation):
+                continue
             review = await self._invoke("verify", {**approval_context, "project": self.contexts.build(work), "specification": self.store.get(rid, "clarify"),
                 "verification_contract": self._verification_contract(checks),
                 "approved_prototype_visuals": self.store.get(rid, "prototype_approval", {}).get("visuals", []),
@@ -1918,9 +2129,9 @@ class WorkflowEngine:
                 continue
             if (tree_hash(work) != before or git(work, "rev-parse", "HEAD") != candidate
                     or git(work, "diff", "--name-only", "HEAD")):
-                raise AA2Error("Reintegrated candidate changed during verification")
-            if not reusable(checks, evidence, work, environment, self.artifacts).allowed:
-                raise AA2Error("Verified build inputs or outputs changed during reintegration acceptance")
+                raise StateConflict("Reintegrated candidate changed during verification")
+            if await self._recover_delivery_evidence(rid, checks, evidence, work, environment, before, observation):
+                continue
             self._task_approval_context(rid, work, {"specification": self.store.get(rid, "clarify", {})})
             identity = digest([candidate, before, environment.fingerprint, [c.model_dump() for c in evidence], review.model_dump()])
             self.store.checkpoint(rid, "verify/identity", identity)
@@ -1933,6 +2144,16 @@ class WorkflowEngine:
             return {"candidate": candidate, "candidate_tree": git(work, "rev-parse", f"{candidate}^{{tree}}"),
                     "source_hash": before, "validation": identity,
                     "environment": {"prefix": str(environment.prefix), "fingerprint": environment.fingerprint}}
+
+    async def _recover_delivery_evidence(self, rid, commands, checks, work, environment, source, observation):
+        failure = self._verification_problem(rid, commands, checks, work, environment,
+                                             phase="reintegration", expected_source=source)
+        if failure is None:
+            return False
+        self.recovery.complete_delivery_recheck(rid, failure.evidence)
+        await self._delivery_repair(rid, work, failure.evidence,
+            [p for p in git(work, "ls-files", "-z").split("\0") if p], observation=observation)
+        return True
 
     async def _delivery_repair(self, rid, work, feedback, scopes, *, observation=None):
         key = "rounds/delivery"
@@ -1951,7 +2172,7 @@ class WorkflowEngine:
         if resuming:
             source = prepared_before_hash(work, previous["patch"]) if previous.get("patch") else tree_hash(work)
             if source != previous.get("base_source"):
-                raise AA2Error("Delivery repair candidate changed; preserving the pending patch and user changes")
+                raise StateConflict("Delivery repair candidate changed; preserving the pending patch and user changes")
         trigger = observation or (previous.get("trigger") if resuming else digest([tree_hash(work), feedback_identity]))
         identity = digest([trigger, feedback_identity])
         if await self.recovery.delivery_decision(rid, work, feedback, scopes, observation=identity) == "recheck":
@@ -1963,7 +2184,7 @@ class WorkflowEngine:
                 count = self.store.get(rid, key, {"round": 0})["round"]
                 published = bool((self.store.get(rid, "delivery/journal", {}) or {}).get("publication_started"))
                 if published and count >= self.config.load().execution.max_rounds:
-                    raise AA2Error("主分支集成修复预算耗尽，请人工核对规划")
+                    raise ResourceBoundary("主分支集成修复预算耗尽，请人工核对规划", action="核对交付故障并明确增加 execution.max_rounds。", condition="发布后修复预算已明确增加，原候选和历史消耗仍可核对。", phase="runtime")
                 if pending.get("phase") == "rejected" and not published:
                     self.recovery.complete_delivery_action(rid, pending.get("recovery_permit"),
                         {"status": "rejected", "feedback": rejection})
@@ -1983,7 +2204,7 @@ class WorkflowEngine:
             if pending.get("commit"):
                 if (pending.get("result_source") != tree_hash(work)
                         or git(work, "rev-parse", "HEAD") != pending["commit"]):
-                    raise AA2Error("Completed delivery repair changed before resumption; preserving user changes")
+                    raise StateConflict("Completed delivery repair changed before resumption; preserving user changes")
                 return
             count = pending["round"]
             context = {"task": {"description": "Repair the isolated reintegration without weakening accepted behaviour", "allowed_paths": scopes},
@@ -2009,7 +2230,10 @@ class WorkflowEngine:
                 self.store.checkpoint(rid, pending_key, pending)
                 continue
             if not proposal.changes:
-                raise AA2Error("集成修复未提供可应用的修改，已保留失败证据")
+                pending.update(phase="rejected", proposal=proposal.model_dump(),
+                    rejection={"candidate_error": "Repair proposal contains no applicable changes"})
+                self.store.checkpoint(rid, pending_key, pending)
+                continue
             pending["proposal"] = proposal.model_dump()
             self.store.checkpoint(rid, pending_key, pending)
             contracts = "prototype_feedback" in feedback and all(p == "DESIGN.md" or p.startswith("design/prototypes/") for p in scopes)
@@ -2034,7 +2258,7 @@ class WorkflowEngine:
             pending["review"] = review.model_dump()
             self.store.checkpoint(rid, pending_key, pending)
             if pending.get("base_head", git(work, "rev-parse", "HEAD")) != git(work, "rev-parse", "HEAD"):
-                raise AA2Error("Delivery repair HEAD changed before publication; preserving user commits")
+                raise StateConflict("Delivery repair HEAD changed before publication; preserving user commits")
             apply_prepared(work, pending["patch"])
             pending["commit_intent"] = self.workspaces.checkpoint_intent(work, f"refs/aa2/{rid}/candidate")
             self.store.checkpoint(rid, pending_key, pending)

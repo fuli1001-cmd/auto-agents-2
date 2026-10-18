@@ -368,7 +368,7 @@ def test_partial_schema_v5_is_repaired_without_changing_budgets(tmp_path):
     question = reopened.request(rid, 'test', 'Prompt', '')
     reopened.answer(question['id'], 'answer', '')
     with reopened.connect() as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == '7'
+        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == '8'
     assert (reopened.root / 'state-v5.backup.sqlite').exists()
 
 

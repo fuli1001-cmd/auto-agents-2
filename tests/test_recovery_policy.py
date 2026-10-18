@@ -254,7 +254,7 @@ def test_v6_migration_preserves_counts_pause_and_answers(tmp_path):
     with sqlite3.connect(store.root / "state-v6.backup.sqlite") as db:
         assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "6"
     with store.connect() as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "7"
+        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "8"
 
 
 async def test_task_reaches_verified_result_after_twenty_failed_rounds(tmp_path):

@@ -96,6 +96,22 @@ def test_evidence_catalog_resolves_supplied_nested_records_hashes_and_public_fil
     assert decision.action == "plan_patch"
 
 
+def test_proposal_citations_cannot_supply_repair_evidence_or_expand_owned_paths():
+    contract = plan()
+    record = failure(proposal={"changes": [{"path": "outside.py", "content": "unreviewed"}]})
+    record = record.model_copy(update={"evidence_refs": evidence_references(record, {"inventory": ["part1.py"]})})
+    context = {"failure": record.model_dump(), "plan": contract.model_dump()}
+    proposed = "failure.proposal.changes"
+    diagnosis = Diagnosis(action="repair", task_ids=["T1"], reason="Evaluate a proposed repair within the existing scope",
+        evidence_refs=["part1.py", proposed], repair_targets=[RepairTarget(task_id="T1", paths=["part1.py"],
+            evidence_refs=["part1.py", proposed], reason="Current owned source and an unverified suggestion")])
+    assert adjudicate(record, diagnosis=diagnosis, plan=contract, evidence_context=context).action == "repair"
+    for update in ({"evidence_refs": [proposed]}, {"paths": ["outside.py"]}):
+        altered = diagnosis.model_copy(update={"repair_targets": [diagnosis.repair_targets[0].model_copy(update=update)]})
+        with pytest.raises(AA2Error, match="outside the evidenced existing task scope"):
+            adjudicate(record, diagnosis=altered, plan=contract, evidence_context=context)
+
+
 @pytest.mark.parametrize("tasks,refs", [(["unknown"], ["develop/task/T3"]), (["T2"], ["develop/task/T3"]),
                                        (["T3"], ["fabricated"]), ([], ["develop/task/T3"])])
 def test_diagnosis_cannot_invent_evidence_or_widen_repair_scope(tasks, refs):
@@ -157,7 +173,7 @@ def test_migration_is_explicit_idempotent_and_preserves_raw_unapplied_proposals(
     state = tmp_path / ".aa2"
     state.mkdir()
     with sqlite3.connect(state / "state.sqlite") as db:
-        db.executescript(";".join(s for s in SCHEMA.replace("'schema_version','7'", "'schema_version','1'").split(";")
+        db.executescript(";".join(s for s in SCHEMA.replace("'schema_version','8'", "'schema_version','1'").split(";")
                                  if "resource_holds" not in s))
     store = Store(tmp_path)
     rid = store.admit("requirements", {})["id"]

@@ -27,6 +27,14 @@ def fixture(tmp_path):
     return project, requirements
 
 
+def pause_at_boundary(workflow, expected):
+    async def pause(question):
+        assert expected in question["prompt"]
+        assert "继续条件" in question["prompt"]
+        return "n"
+    workflow.question_handler = pause
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("branch", ["main", "master", "release"])
 async def test_delivers_root_and_reuses_target_without_run_branches(tmp_path, branch):
@@ -65,7 +73,8 @@ async def test_dirty_user_work_is_not_captured(tmp_path, kind):
     if kind == "staged":
         git(project, "add", "user.txt")
     status = git(project, "status", "--porcelain")
-    with pytest.raises(AssertionError, match="未提交"):
+    pause_at_boundary(workflow, "未提交")
+    with pytest.raises(asyncio.CancelledError):
         await workflow.start(str(requirements))
     assert git(project, "rev-parse", "HEAD") == original
     assert git(project, "status", "--porcelain") == status
@@ -80,7 +89,8 @@ async def test_ignored_collision_never_overwritten(tmp_path):
     (project / ".gitignore").write_text("calc.py\n")
     commit(project)
     (project / "calc.py").write_text("ignored user file")
-    with pytest.raises(AssertionError):
+    pause_at_boundary(workflow, "检查失败")
+    with pytest.raises(asyncio.CancelledError):
         await workflow.start(str(requirements))
     assert (project / "calc.py").read_text() == "ignored user file"
     assert Store(project).current()["status"] == "PAUSED"
@@ -341,13 +351,16 @@ async def test_reintegration_budget_survives_restarts(tmp_path):
     workflow = engine(project, agent)
     (project / "initial.txt").write_text("initial")
     commit(project)
-    with pytest.raises(AssertionError, match="预算"):
+    pause_at_boundary(workflow, "预算")
+    with pytest.raises(asyncio.CancelledError):
         await workflow.start(str(requirements))
     run = workflow.store.current()
     assert workflow.store.get(run["id"], "delivery/journal")["reintegrations"] == 2
     count = len(agent.calls)
-    with pytest.raises(AssertionError, match="预算"):
-        await engine(project, agent).start()
+    restarted = engine(project, agent)
+    pause_at_boundary(restarted, "预算")
+    with pytest.raises(asyncio.CancelledError):
+        await restarted.start()
     assert len(agent.calls) == count
 
 
@@ -367,8 +380,10 @@ async def test_later_user_commit_after_publication_is_never_reset(tmp_path):
         await workflow.start(str(requirements))
     (project / "user.txt").write_text("after publication")
     user_commit = commit(project)
-    with pytest.raises(AssertionError, match="提交发生变化"):
-        await engine(project, workflow.agent).start()
+    restarted = engine(project, workflow.agent)
+    pause_at_boundary(restarted, "提交发生变化")
+    with pytest.raises(asyncio.CancelledError):
+        await restarted.start()
     assert git(project, "rev-parse", "HEAD") == user_commit
     assert (project / "user.txt").read_text() == "after publication"
 

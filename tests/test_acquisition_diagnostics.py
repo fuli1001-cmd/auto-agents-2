@@ -5,6 +5,7 @@ import pytest
 from test_workflow import CodingAgent, engine
 
 from auto_agents_2.artifacts import ArtifactStore
+from auto_agents_2.faults import InternalWorkflowError
 from auto_agents_2.store import Store
 
 
@@ -45,22 +46,21 @@ async def test_download_timeout_identifies_operation_without_url_details(tmp_pat
 
 @pytest.mark.parametrize("failure,expected", [(TimeoutError(), "TimeoutError"),
                                               (RuntimeError("  "), "RuntimeError"),
-                                              (RuntimeError("EXAMPLE actionable message"), "EXAMPLE actionable message")])
-async def test_incident_prompt_has_a_reason_even_for_empty_exceptions(tmp_path, failure, expected):
+                                              (RuntimeError("EXAMPLE actionable message"), "RuntimeError")])
+async def test_unknown_incident_exits_with_a_reason_without_generic_question(tmp_path, failure, expected):
     workflow = engine(tmp_path, CodingAgent())
 
     async def fail(rid):
         raise failure
 
     async def pause(question):
-        raise asyncio.CancelledError
+        pytest.fail("Unknown internal exceptions must not create an authorization prompt")
 
     workflow._execute = fail
     workflow.question_handler = pause
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(InternalWorkflowError, match=expected):
         await workflow.start("fixture")
     run = workflow.store.current()
     assert run["status"] == "PAUSED"
-    question = workflow.store.pending(run["id"])[0]
-    assert f"执行遇到阻塞：{expected}\n" in question["prompt"]
-    assert question["answer"] is None
+    assert not workflow.store.pending(run["id"])
+    assert workflow.store.get(run["id"], "recovery/current-fault")["exception_type"] == expected

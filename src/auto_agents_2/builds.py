@@ -7,7 +7,7 @@ from .errors import AA2Error, PolicyViolation, VerificationPreparationError
 from .models import Command
 from .profiles import package_manifest
 from .util import contained, digest
-from .workspace import git, input_entry, repository_workspace
+from .workspace import EXCLUDED, git, input_entry, repository_workspace
 
 BUILD_CONTRACT_VERSION = 1
 
@@ -52,10 +52,12 @@ def normalized(command: Command, workspace: Path) -> Command:
     return command.model_copy(update={"outputs": outputs})
 
 
-def generated_entry(path: Path, workspace: Path):
+def generated_entry(path: Path, workspace: Path, *, omitted=()):
     # Next's runtime cache and tracing are mutable; server code and build manifests
     # remain part of the immutable output identity.
-    omitted = {path / "cache", path / "trace", path / "server/route-cache"} if path.name == ".next" else set()
+    omitted = set(omitted)
+    if path.name == ".next":
+        omitted.update({path / "cache", path / "trace", path / "server/route-cache"})
     return input_entry(path, workspace, excluded=set(), omitted=omitted)
 
 
@@ -95,8 +97,21 @@ def overlaps(workspace, first, second):
 
 def runtime_commands(plan, workspace, environment):
     commands = verification_commands(plan.runtime_probes, workspace, plan.runtime_prepare, prepare_all=True) if plan else []
-    return commands or [Command(argv=[str(environment.prefix / "bin/python"), "-c",
-                                      "import sys; sys.exit(0 if sys.prefix == " + repr(str(environment.prefix)) + " else 1)"])]
+    commands = commands or [Command(argv=[str(environment.prefix / "bin/python"), "-c",
+                                   "import sys; sys.exit(0 if sys.prefix == " + repr(str(environment.prefix)) + " else 1)"])]
+    # Legacy runtime probes could read generated files without declaring inputs.
+    # Their results are replayable only when the known generated roots still match.
+    roots = {output for command in commands for output in command.outputs}
+    def visit(directory):
+        for child in directory.iterdir():
+            if child.name in {"dist", "build", ".next"}:
+                roots.add(child.relative_to(workspace).as_posix())
+            elif (not child.name.startswith(".") and child.name not in EXCLUDED
+                  and not child.is_symlink() and child.is_dir()):
+                visit(child)
+    visit(workspace)
+    return [command.model_copy(update={"inputs": sorted(roots)})
+            if not command.inputs and not command.outputs else command for command in commands]
 
 
 def verification_commands(commands: list[Command], workspace: Path, preparations=(), *, prepare_all=False) -> list[Command]:

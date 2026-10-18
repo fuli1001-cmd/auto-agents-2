@@ -279,7 +279,8 @@ async def test_subdirectory_verification_reads_current_workspace_root(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_delivery_probes_never_reuse_stale_generated_output(tmp_path):
+@pytest.mark.parametrize("attempt", [None, "durable-attempt"])
+async def test_delivery_probes_never_reuse_stale_generated_output(tmp_path, attempt):
     from test_workflow import CodingAgent, engine
 
     from auto_agents_2.delivery import RuntimeVerificationError
@@ -293,7 +294,7 @@ async def test_delivery_probes_never_reuse_stale_generated_output(tmp_path):
     output = tmp_path / "dist/value"
     output.parent.mkdir()
     output.write_text("good")
-    journal = {"candidate": "unchanged", "plan": plan.model_dump()}
+    journal = {"candidate": "unchanged", "plan": plan.model_dump(), "runtime_attempt_id": attempt}
     environment = Environment(Path(sys.prefix), "fixture")
     await workflow._runtime_checks(rid, journal, environment)
     output.write_text("bad")

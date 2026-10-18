@@ -151,6 +151,14 @@ class ProgressDisplay:
         elif kind == "recovery.authorized":
             actor = {"rule": "控制器规则", "agent": "决策代理", "human": "用户"}[data["actor"]]
             self.message(f"恢复授权｜{data['owner']}｜{data['action']}｜{actor}\n{data['reason']}")
+        elif kind == "evidence.invalidated":
+            codes = ", ".join(row["code"] for row in data.get("issues", [])) or data.get("code", "evidence_unavailable")
+            self.message(f"证据待复验｜{data['phase']}｜{codes}｜候选及原始证据已保留")
+        elif kind == "recovery.classified":
+            route = {"rule": "控制器恢复", "decision": "自动决策", "human": "需要外部处理"}.get(data["route"], data["route"])
+            self.message(f"故障分类｜{data['phase']}｜{data['reason_code']}｜{route}")
+        elif kind == "workflow.internal_error":
+            self.message(f"aa2 内部错误｜{data['exception_type']}｜故障编号 {data['incident_id']}｜已保留现场并停止本次执行")
         elif kind == "automation.engineering":
             if data["improved"]:
                 self.message(f"工程进展｜{data['owner']}｜{data['milestone']}｜业务验收仍须独立验证")

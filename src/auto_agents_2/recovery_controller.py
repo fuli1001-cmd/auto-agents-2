@@ -8,14 +8,17 @@ from .collection import policy_identity
 from .design import PROTOTYPE_BROWSER_VERSION
 from .errors import AA2Error, InvalidStructuredResponse
 from .evidence import assess_observation
+from .evidence_refs import controller_context_catalog
+from .faults import HumanRequirement, ResourceBoundary, StateConflict, route_failure
 from .interaction import choice_spec
-from .models import CheckResult, Command, PlanResult, ReviewResult
+from .models import CheckResult, PlanResult, ReviewResult
 from .plan_revision import PlanPatch, apply_patch, descendants, materialize_plan
 from .recovery import (
     Diagnosis,
     FailureRecord,
     adjudicate,
-    check_failure,
+    check_kind,
+    check_rows,
     evidence_references,
     failure_summary,
     implemented_candidate,
@@ -33,16 +36,20 @@ class RecoveryController:
         active = self.store.get(rid, "recovery/active")
         if active:
             if active["failure"]["id"] != failure.id:
-                raise AA2Error("Another recovery is pending; preserve both candidates")
+                raise StateConflict("Another recovery is pending; preserve both candidates")
             return
         history = self.store.get(rid, "recovery/count/" + failure.id, 0)
+        failure = failure.model_copy(update={"version": 2,
+            "observation_id": failure.observation_id or digest([rid, failure.id, history + 1])})
         self.store.checkpoints(rid, {
-            "recovery/active": {"version": 1, "failure": failure.model_dump(), "attempt": history + 1},
+            "recovery/active": {"version": 2, "failure": failure.model_dump(), "attempt": history + 1},
             f"recovery/failures/{failure.id}/{history + 1}": failure.model_dump(),
             "recovery/count/" + failure.id: history + 1,
         })
         self.store.event(rid, "recovery.requested", {"failure": failure.id, "owner": failure.origin_id,
-                                                     "component": failure.component, "kind": failure.kind})
+            "component": failure.component, "kind": failure.kind, "observation": failure.observation_id})
+        self.store.record_fault(rid, {"failure": failure.id, "observation": failure.observation_id,
+                                     **route_failure(failure).model_dump()})
 
     async def _capture_retry(self, rid, checks, work):
         failed = [row for row in checks if "evidence_collection_failed" in row.get("failure_reasons", [])]
@@ -50,12 +57,16 @@ class RecoveryController:
             return False
         identity = digest(failed)
         key = "evidence/capture-wait/" + identity
+        requirement = HumanRequirement(kind="resource_limit", reason="测试附件未能完整归档，验收暂未通过。",
+            action="调整 attachment_capture 上限或测试录制配置；候选代码、JUnit 和原始附件已保留。",
+            resume_condition="采集配置或录制输入已变化；相同配置不会重复执行测试，也不会自动修改业务代码。")
+        self.store.record_fault(rid, {"route": "human", "reason_code": "evidence_collection_failed", "phase": "verification",
+                                     "human_requirement": requirement.model_dump()})
         while (all(row.get("capture_policy_hash") == policy_identity(self.store.root) for row in failed)
                and all(row.get("source_hash") == tree_hash(work) for row in failed)):
             count = self.store.get(rid, key, 0)
             await self.engine._ask(rid, f"evidence-capture/{identity}/{count}",
-                "测试附件未能完整归档，验收暂未通过。候选代码、JUnit 和原始附件已保留。"
-                "请调整 attachment_capture 上限或测试录制配置后继续；相同配置不会重复执行测试，也不会自动修改业务代码。",
+                requirement.prompt(),
                 identity)
             self.store.checkpoint(rid, key, count + 1)
         return True
@@ -68,8 +79,7 @@ class RecoveryController:
 
     async def _delivery_decision(self, rid, work, feedback, scopes, *, observation=None):
         """Same fact policy, with delivery journal authority and its existing scope/budget."""
-        capture_rows = feedback.get("checks", feedback.get("runtime_failure", {}).get("checks", [])
-            if isinstance(feedback.get("runtime_failure"), dict) else [])
+        capture_rows = check_rows(feedback)
         capture_retry = await self._capture_retry(rid, capture_rows, work)
         observation = digest([observation or tree_hash(work), feedback])
         key = "recovery/delivery/" + observation
@@ -82,22 +92,24 @@ class RecoveryController:
             return saved["decision"]["action"]
         evidence_source = tree_hash(work)
         if saved and saved.get("evidence_source_hash", evidence_source) != evidence_source:
-            raise AA2Error("Delivery recovery evidence source changed; preserve the candidate")
+            raise StateConflict("Delivery recovery evidence source changed; preserve the candidate")
         if saved and saved.get("decision", {}).get("action") == "recheck" and saved.get("recheck_key"):
             reservation = self.store.get(rid, saved["recheck_key"], {})
             if reservation.get("phase") == "reserved" and reservation.get("observation") == observation:
                 return "recheck"
             if reservation.get("phase") == "started":
-                raise AA2Error("Interrupted delivery recheck lacks a completed observation; preserve its occupied reservation")
+                raise StateConflict("Interrupted delivery recheck lacks a completed observation; preserve its occupied reservation")
         evidence_ref = "recovery/delivery-evidence/" + observation
         self.store.checkpoint(rid, evidence_ref, feedback)
         kind = "integration" if feedback.get("conflicts") else "review"
-        if feedback.get("checks"):
-            results = [CheckResult.model_validate(c) for c in feedback["checks"]]
-            commands = [Command(argv=c.argv, cwd=c.cwd) for c in results]
-            kind = check_failure(commands, results).kind
-        checks = feedback.get("checks", feedback.get("runtime_failure", {}).get("checks", [])
-                              if isinstance(feedback.get("runtime_failure"), dict) else [])
+        if capture_rows:
+            kind = check_kind(capture_rows, default=kind)
+        runtime_feedback = feedback.get("runtime_failure")
+        runtime_feedback = runtime_feedback if isinstance(runtime_feedback, dict) else {}
+        verification = feedback.get("verification_assessment", runtime_feedback.get("verification_assessment", {}))
+        if verification.get("allowed") is False:
+            kind = "evidence"
+        checks = capture_rows
         recheck_identity = digest([tree_hash(work), sorted(scopes),
             [{k: row.get(k) for k in ("argv", "cwd", "command_hash", "environment_hash", "input_hash",
                                       "runtime_config_hash", "checker_version", "capture_policy_hash")} for row in checks],
@@ -105,6 +117,7 @@ class RecoveryController:
         recheck_key = "recovery/delivery-rechecks/" + recheck_identity
         already_rechecked = bool(self.store.get(rid, recheck_key))
         failure = FailureRecord.create(kind=kind, component="delivery", origin_id="delivery", step="delivery",
+            phase="runtime" if published else "reintegration", observation_id=observation,
             obligations=sorted(scopes), evidence_refs=[evidence_ref], evidence={**feedback, "allowed_paths": scopes})
         count_key = "recovery/budgets/diagnosis/delivery"
         count = self.store.get(rid, count_key, self.store.get(rid, "recovery/diagnosis/" + failure.id, {"round": 0}))
@@ -138,6 +151,7 @@ class RecoveryController:
                 permit = saved.get("diagnosis_permit")
             policy.start(rid, permit)
         if decision.action == "diagnose":
+            authorization_failure = failure
             project = self.engine.contexts.build(work)
             failure = failure.model_copy(update={"evidence_refs": evidence_references(failure, project)})
             saved = {**(saved or {}), "failure": failure.model_dump(), "evidence_source_hash": evidence_source}
@@ -147,7 +161,7 @@ class RecoveryController:
                     await self._grant(rid, count_key + f"/grant/{count['round']}",
                         "交付故障已达到诊断额度或诊断修正仍不合格。继续只增加一次独立诊断机会。\n" + self._summary(failure, saved))
                 if tree_hash(work) != evidence_source:
-                    raise AA2Error("Delivery recovery evidence source changed during diagnosis approval; preserve the candidate")
+                    raise StateConflict("Delivery recovery evidence source changed during diagnosis approval; preserve the candidate")
                 count["round"] += 1
                 saved = {**(saved or {}), "failure": failure.model_dump(), "round": count["round"],
                          "diagnosis_permit": permit}
@@ -159,10 +173,14 @@ class RecoveryController:
                 "diagnosis_feedback": saved.get("diagnosis_feedback"),
                 "specification": self.store.get(rid, "clarify"), "delivery_journal": self.store.get(rid, "delivery/journal"),
                 "constraint": "Delivery may only repair within supplied allowed_paths or recheck. Gate/plan changes require user reconciliation; never invalidate a published journal."}
-            diagnosis, schema_error = await self._diagnose(diagnosis_context,
-                work, rid, f"recovery/diagnose/{failure.id}/{saved['round']}")
+            diagnosis = policy.completed_diagnosis(rid, permit, failure, active, work, None,
+                authorization_failure=authorization_failure)
+            schema_error = None
+            if diagnosis is None:
+                diagnosis, schema_error = await self._diagnose(diagnosis_context,
+                    work, rid, f"recovery/diagnose/{failure.id}/{saved['round']}")
             if tree_hash(work) != evidence_source:
-                raise AA2Error("Delivery recovery evidence source changed during diagnosis; preserve the candidate")
+                raise StateConflict("Delivery recovery evidence source changed during diagnosis; preserve the candidate")
             try:
                 if schema_error:
                     raise AA2Error(schema_error)
@@ -189,15 +207,17 @@ class RecoveryController:
                     return None
         if decision.action not in {"repair", "recheck"}:
             self.store.checkpoint(rid, key, {"failure": failure.model_dump(), "evidence_source_hash": evidence_source, "blocked_decision": decision.model_dump()})
-            raise AA2Error("交付恢复需要核对已保留的发布记录：" + decision.reason)
+            raise StateConflict("交付恢复需要核对已保留的发布记录：" + decision.reason, phase="delivery")
         if tree_hash(work) != evidence_source:
-            raise AA2Error("Delivery recovery evidence source changed before dispatch; preserve the candidate")
+            raise StateConflict("Delivery recovery evidence source changed before dispatch; preserve the candidate")
         updates = {key: {"failure": failure.model_dump(), "decision": decision.model_dump(),
                          "evidence_source_hash": evidence_source, "permit": permit}}
         if decision.action == "recheck":
             if already_rechecked and published:
                 self.store.checkpoint(rid, key, {"failure": failure.model_dump(), "evidence_source_hash": evidence_source, "blocked_decision": decision.model_dump()})
-                raise AA2Error("同一交付输入已自动复验一次；保留证据并等待新的修复或输入")
+                raise ResourceBoundary("同一交付输入已自动复验一次；保留证据并等待新的修复或输入",
+                    action="核对发布日志并处理已记录的故障或检查输入。",
+                    condition="控制器核验新的修复或输入；相同输入不重复消费发布后复验。", phase="runtime")
             if already_rechecked:
                 recheck_key += "/" + digest(permit)
             updates[recheck_key] = {"observation": observation, "failure": failure.id, "phase": "reserved",
@@ -231,15 +251,18 @@ class RecoveryController:
             cycle = self.store.get(rid, key)
             self.store.checkpoint(rid, key, {**cycle, "phase": "completed", "outcomes": outcome})
 
-    def start_delivery_recheck(self, rid, work):
+    def start_delivery_recheck(self, rid, work, *, completed_evidence=None):
         key = self.store.get(rid, "recovery/delivery-recheck-active")
         if not key:
             return
         saved = self.store.get(rid, key, {})
         if saved.get("phase") != "reserved":
-            raise AA2Error("Interrupted delivery recheck has no durable completion; reservation remains occupied")
+            observation = self.store.get(rid, completed_evidence, {}) if completed_evidence else {}
+            if (saved.get("phase") != "started" or observation.get("phase") != "completed"
+                    or observation.get("source_hash") != tree_hash(work)):
+                raise StateConflict("Interrupted delivery recheck has no durable completion; reservation remains occupied")
         if saved.get("workspace") != str(work) or saved.get("source_hash") != tree_hash(work):
-            raise AA2Error("Reserved delivery recheck input changed; preserve recovery evidence")
+            raise StateConflict("Reserved delivery recheck input changed; preserve recovery evidence")
         self.store.checkpoint(rid, key, {**saved, "phase": "started"})
 
     def complete_delivery_recheck(self, rid, outcome):
@@ -271,7 +294,7 @@ class RecoveryController:
         if not work.is_dir():
             work = integration
         if not work.is_dir():
-            raise AA2Error("Recovery workspace missing; restore the recorded worktree before continuing")
+            raise StateConflict("Recovery workspace missing; restore the recorded worktree before continuing")
         capture_retry = await self._capture_retry(rid, failure.evidence.get("checks", []), work)
         if capture_retry:
             active.pop("decision", None)
@@ -281,7 +304,7 @@ class RecoveryController:
             rows = [CheckResult.model_validate(c) for c in failure.evidence.get("checks", [])]
             source = tree_hash(work)
             if rows and any(c.source_hash != source for c in rows):
-                raise AA2Error("Retained candidate changed since its recorded checks; preserve user changes before recovery")
+                raise StateConflict("Retained candidate changed since its recorded checks; preserve user changes before recovery")
             environment = await engine._environment(work, rid, plan)
             matching = {digest(c.model_dump()): c for c in commands}
             if (set(matching) != {row.command_hash for row in rows} or len(rows) != len(matching)
@@ -305,7 +328,7 @@ class RecoveryController:
                      for before in (digest(journal["previous_plan"]["document"]), None)])
                 owned = any(prepared_before_hash(work, [item]) == active["evidence_source_hash"] for item in preimages)
             if not owned:
-                raise AA2Error("Recovery evidence source changed; preserve the candidate before reassessing the decision")
+                raise StateConflict("Recovery evidence source changed; preserve the candidate before reassessing the decision")
         # A legacy plan hold constrains a plan action, not diagnosis or scoped repair.
         # Keep it journalled until the actual action is known.
         # Pending legacy questions are retired atomically with an effective permit.
@@ -360,7 +383,7 @@ class RecoveryController:
             if decision.action == "diagnose":
                 if not active.get("diagnosis_round"):
                     if tree_hash(work) != active["evidence_source_hash"]:
-                        raise AA2Error("Recovery evidence source changed during diagnosis approval; preserve the candidate")
+                        raise StateConflict("Recovery evidence source changed during diagnosis approval; preserve the candidate")
                     budget["round"] += 1
                     active.update(diagnosis_round=budget["round"], diagnosis_permit=permit)
                     self.store.checkpoints(rid, {budget_key: budget, "recovery/active": active,
@@ -376,10 +399,13 @@ class RecoveryController:
                     "current_issues": self.store.get(rid, "issues", {}),
                     "observations": self.store.get(rid, "recovery/observations/" + failure.origin_id, []),
                 }
-                diagnosis, schema_error = await self._diagnose(diagnosis_context,
-                    work, rid, f"recovery/diagnose/{failure.id}/{active['diagnosis_round']}")
+                diagnosis = policy.completed_diagnosis(rid, permit, failure, active, work, plan)
+                schema_error = None
+                if diagnosis is None:
+                    diagnosis, schema_error = await self._diagnose(diagnosis_context,
+                        work, rid, f"recovery/diagnose/{failure.id}/{active['diagnosis_round']}")
                 if tree_hash(work) != active["evidence_source_hash"]:
-                    raise AA2Error("Recovery evidence source changed during diagnosis; preserve the candidate")
+                    raise StateConflict("Recovery evidence source changed during diagnosis; preserve the candidate")
                 try:
                     if schema_error:
                         raise AA2Error(schema_error)
@@ -461,7 +487,7 @@ class RecoveryController:
         if decision.action not in {"repair", "recheck"}:
             raise AA2Error("Recovery has no executable action")
         if active.get("evidence_source_hash") and tree_hash(work) != active["evidence_source_hash"]:
-            raise AA2Error("Recovery evidence source changed before dispatch; preserve the candidate")
+            raise StateConflict("Recovery evidence source changed before dispatch; preserve the candidate")
         affected = descendants(plan, decision.task_ids) if plan else set()
         updates = {}
         done = set(self.store.get(rid, "develop/done", []))
@@ -511,7 +537,9 @@ class RecoveryController:
 
     async def _diagnose(self, context, work, rid, key):
         try:
-            return await self.engine._invoke("recovery_diagnosis", context, Diagnosis, work, rid, key, fresh=True), None
+            catalog = controller_context_catalog(context)
+            return await self.engine._invoke("recovery_diagnosis", {**context,
+                "evidence_reference_contract": catalog.contract(context)}, Diagnosis, work, rid, key, fresh=True), None
         except InvalidStructuredResponse:
             return None, "诊断返回格式不符合 Diagnosis schema；请按请求的完整结构修正。"
 
@@ -528,7 +556,7 @@ class RecoveryController:
     def _summary(failure, active):
         evidence = failure.evidence
         feedback = evidence.get("feedback", {})
-        return failure_summary(evidence.get("checks", feedback.get("checks", [])),
+        return failure_summary(check_rows(evidence),
             review=evidence.get("review", feedback.get("review")),
             environment_error=evidence.get("environment_error", feedback.get("environment_error")),
             diagnosis_feedback=active.get("diagnosis_feedback"))
@@ -564,12 +592,12 @@ class RecoveryController:
         if journal:
             if journal["phase"] != "activated" and (tree_hash(work) != journal["source_hash"]
                     or git(work, "rev-parse", "HEAD") != journal["base_commit"]):
-                raise AA2Error("Integration changed before patch activation; preserved journal requires reconciliation")
+                raise StateConflict("Integration changed before patch activation; preserved journal requires reconciliation")
             if journal["phase"] != "activated":
                 for snapshot in journal.get("snapshots", {}).values():
                     path = Path(snapshot["workspace"])
                     if not path.is_dir() or tree_hash(path) != snapshot["source_hash"]:
-                        raise AA2Error("Retained candidate changed before activation; reconcile the saved snapshot first")
+                        raise StateConflict("Retained candidate changed before activation; reconcile the saved snapshot first")
             self.store.activate_plan_patch(rid, identity)
             return True
         # Charge only an actual amendment, retaining the historical progress barrier.
@@ -602,7 +630,7 @@ class RecoveryController:
         def unchanged(proposal):
             if tree_hash(work) != baseline["source_hash"] or git(work, "rev-parse", "HEAD") != baseline["base_commit"]:
                 self.store.checkpoint(rid, "recovery/patch-drift/" + identity, {**baseline, **proposal})
-                raise AA2Error("Integration baseline changed during plan amendment; preserved proposal requires reconciliation")
+                raise StateConflict("Integration baseline changed during plan amendment; preserved proposal requires reconciliation")
         unchanged({"phase": "approved"})
         patch = await engine._invoke("plan", {"plan_patch": True, "base_revision": revision,
             "plan": plan.model_dump(), "failure": failure.model_dump(), "task_origins": self.store.task_origin_state(rid),
@@ -637,7 +665,7 @@ class RecoveryController:
             path = Path(saved["workspace"]) if saved.get("workspace") else None
             if path and path.is_dir():
                 if saved.get("source_hash") and tree_hash(path) != saved["source_hash"]:
-                    raise AA2Error("Task source changed before plan amendment; preserve user changes and reconcile first")
+                    raise StateConflict("Task source changed before plan amendment; preserve user changes and reconcile first")
                 ref = f"refs/aa2/{rid}/plan-patches/{revision}/{task_id}"
                 snapshot = saved_snapshots.get(task_id)
                 if snapshot is None:
@@ -665,7 +693,7 @@ class RecoveryController:
             return False
         for task_id, snapshot in snapshots.items():
             if tree_hash(Path(snapshot["workspace"])) != snapshot["source_hash"]:
-                raise AA2Error("Task source changed during plan review; preserve user changes before activation")
+                raise StateConflict("Task source changed during plan review; preserve user changes before activation")
         document = work / "docs/aa2/plan.md"
         journal = {"version": 1, "phase": "prepared", "base_revision": revision, "previous_plan": plan.model_dump(),
             "plan": candidate.model_dump(), "patch": patch.model_dump(), "review": review.model_dump(),

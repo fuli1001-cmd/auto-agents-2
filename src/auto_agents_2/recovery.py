@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import Field
 
 from .errors import AA2Error
-from .evidence_refs import supplied_references
+from .evidence_refs import controller_context_catalog, supplied_references
 from .models import Command, Record, RecoveryRequest
 from .util import digest
 
@@ -27,7 +27,7 @@ class ExecutionContract(Record):
 
 
 class FailureRecord(Record):
-    version: Literal[1] = 1
+    version: Literal[1, 2] = 2
     id: str
     kind: Literal["proposal", "checks", "evidence", "build", "environment", "review", "integration", "contract"]
     component: str
@@ -39,12 +39,19 @@ class FailureRecord(Record):
     evidence: dict = {}
     proposal: dict = {}
     reason_code: str = ""
+    phase: str = "recovery"
+    observation_id: str = ""
 
     @classmethod
     def create(cls, *, kind, component, origin_id, step, obligations, **kwargs):
         # No model prose, current plan revision, task name or fluctuating output.
         identity = digest([origin_id, step, sorted(obligations)])
         kwargs.setdefault("reason_code", kind + "/" + step)
+        kwargs.setdefault("phase", "task" if kwargs.get("task_id") else
+                          "runtime" if step.startswith("runtime") else
+                          "reuse" if step.startswith("reuse") else
+                          "reintegration" if step.startswith("reintegration") else
+                          "delivery" if origin_id == "delivery" else "final" if origin_id == "final" else "generation")
         return cls(id=identity, kind=kind, component=component, origin_id=origin_id,
                    step=step, obligations=obligations, **kwargs)
 
@@ -92,12 +99,37 @@ def request_from(proposal):
 
 
 def current_failures(failure):
-    rows = failure.evidence.get("checks", failure.evidence.get("feedback", {}).get("checks", []))
+    rows = check_rows(failure.evidence)
     return [{"argv": row.get("argv"), "process_exit_code": row.get("process_exit_code"),
              "exit_code": row.get("exit_code"), "report_status": row.get("report_status"),
              "unpassed_test_ids": [case for case in row.get("test_ids", []) if case not in row.get("passed_test_ids", [])],
              "failure_reasons": row.get("failure_reasons", [])}
             for row in rows if row.get("exit_code") or row.get("failure_reasons")]
+
+
+def check_rows(evidence):
+    """Current checks have one meaning in task, legacy and delivery envelopes."""
+    if not isinstance(evidence, dict):
+        return []
+    if "checks" in evidence:
+        return evidence["checks"] or []
+    for name in ("runtime_failure", "feedback"):
+        nested = evidence.get(name)
+        if isinstance(nested, dict) and "checks" in nested:
+            return nested["checks"] or []
+    return []
+
+
+def check_kind(rows, *, default="checks"):
+    """Classify observed failures without manufacturing CheckResult proof for legacy errors."""
+    reasons = {reason for row in rows for reason in row.get("failure_reasons", [])}
+    if "build_outputs_missing_or_invalid" in reasons:
+        return "build"
+    if reasons & COLLECTION_FAILURES:
+        return "evidence"
+    if any(row.get("exit_code") or row.get("process_exit_code") or row.get("timed_out") or row.get("failure_reasons") for row in rows):
+        return "checks"
+    return default
 
 
 def observation_identity(checks, review=None, environment_error=None):
@@ -123,13 +155,7 @@ def implemented_candidate(saved, accepted=False):
 
 
 def check_failure(commands, results, *, task=None, step="checks", evidence_ref=""):
-    failed = [r for r in results if r.exit_code or r.failure_reasons or r.timed_out]
-    reasons = {reason for r in failed for reason in r.failure_reasons}
-    kind = "checks"
-    if reasons & COLLECTION_FAILURES:
-        kind = "evidence"
-    if reasons & {"build_outputs_missing_or_invalid"}:
-        kind = "build"
+    kind = check_kind([result.model_dump() for result in results])
     return FailureRecord.create(
         kind=kind, component="verification", origin_id=(task.origin_id or task.id) if task else "final",
         task_id=task.id if task else "", step=step,
@@ -153,12 +179,18 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None,
     if diagnosis:
         if len({target.task_id for target in diagnosis.repair_targets}) != len(diagnosis.repair_targets):
             raise AA2Error("Duplicate repair-target task IDs")
-        supplied = set(evidence_references(failure, context=evidence_context))
-        missing = [i for i, ref in enumerate(diagnosis.evidence_refs) if ref not in supplied]
+        catalog = controller_context_catalog(evidence_context or {"failure": failure.model_dump()},
+                                             aliases=evidence_references(failure))
+        supplied = catalog.controller
+        known_refs = supplied | catalog.proposals
+        resolved = [catalog.resolve(ref) for ref in diagnosis.evidence_refs]
+        missing = [i for i, ref in enumerate(resolved) if ref is None]
         if missing:
             raise AA2Error("Diagnosis cites evidence not supplied by the controller; invalid evidence_refs indexes: "
                 + ", ".join(map(str, missing)) + ". Cite an existing controller-context path, supplied artifact hash "
-                "or failure.evidence_refs entry. Proposal text cannot create evidence references.")
+                "or failure.evidence_refs entry. Existing proposal paths describe unverified suggestions only.")
+        if not supplied.intersection(resolved):
+            raise AA2Error("Diagnosis requires controller evidence; unverified proposals cannot establish results")
         known = {t.id: t for t in plan.tasks} if plan else {}
         if not set(diagnosis.task_ids) <= known.keys():
             raise AA2Error("Diagnosis names unknown tasks")
@@ -171,7 +203,8 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None,
         for task_id, target in targets.items():
             if task_id not in diagnosis.task_ids or task_id not in known:
                 raise AA2Error("Repair target must belong to a named existing task")
-            if (not set(target.evidence_refs) <= supplied
+            target_refs = {catalog.resolve(ref) for ref in target.evidence_refs}
+            if (not target_refs <= known_refs or not supplied.intersection(target_refs)
                     or not all(path in evidence_references(failure) and path_allowed(path, known[task_id].allowed_paths)
                                for path in target.paths)):
                 raise AA2Error("Repair target is outside the evidenced existing task scope; amend the plan if necessary")
@@ -195,7 +228,8 @@ def failure_summary(checks, *, review=None, environment_error=None, diagnosis_fe
         lines.append("当前没有已执行的检查记录；不能据此判断检查通过或失败。")
     for row in checks:
         reasons = row.get("failure_reasons", [])
-        state = ("尚未执行（前置检查阻塞）" if "not_executed" in reasons else
+        state = ("尚未执行（前置检查阻塞）" if row.get("report_status") == "not_executed" or {"not_executed", "prerequisite_failed"}.intersection(reasons) else
+                 "证据无效或采集不完整" if row.get("process_exit_code", row.get("exit_code")) is None else
                  "证据无效或采集不完整" if COLLECTION_FAILURES.intersection(reasons) else
                  "检查失败" if row.get("exit_code") or reasons or row.get("timed_out") else "检查通过")
         failed = [c for c in row.get("test_ids", []) if c not in row.get("passed_test_ids", [])]

@@ -107,7 +107,8 @@ AGENTS.md block as delivery metadata. These do not expand the requested product 
 
 DIAGNOSIS_ACTIONS = (
     " Cite existing paths in the supplied controller context (including plan and current_issues), supplied artifact hashes "
-    "or controller-indexed failure.evidence_refs; proposal text cannot establish evidence. "
+    "or controller-indexed failure.evidence_refs. Existing proposal paths may describe unverified suggestions "
+    "alongside controller evidence; proposal contents cannot create evidence IDs or prove checks passed. "
     "Use recheck to execute the existing check contract and gather missing evidence. "
     "Use repair for justified changes within accepted task scopes, or plan_patch for changes to those contracts. "
     "diagnose requests another read-only model analysis; it does not execute commands or modify files. "
