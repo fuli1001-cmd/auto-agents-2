@@ -1,12 +1,12 @@
 """Recovery facts and controller policy. A model recommendation cannot advance a gate."""
 from __future__ import annotations
 
-import re
 from typing import Literal
 
 from pydantic import Field
 
 from .errors import AA2Error
+from .evidence_refs import supplied_references
 from .models import Command, Record, RecoveryRequest
 from .util import digest
 
@@ -108,24 +108,11 @@ def observation_identity(checks, review=None, environment_error=None):
         "review": review, "environment_error": environment_error})
 
 
-def evidence_references(failure, project=None):
+def evidence_references(failure, project=None, *, context=None):
     """Index supplied controller data, never endorse a model's requested citations."""
-    refs = set(failure.evidence_refs)
-
-    def visit(value, path):
-        if path:
-            refs.update((path, "failure.evidence." + path))
-        if isinstance(value, dict):
-            if isinstance(value.get("hash"), str) and re.fullmatch(r"[a-f0-9]{64}", value["hash"]):
-                refs.add(value["hash"])
-            for key, item in value.items():
-                if key not in {"proposal", "recovery_request", "original_proposal"}:
-                    visit(item, path + "." + key if path else key)
-        elif isinstance(value, list):
-            for index, item in enumerate(value):
-                visit(item, f"{path}[{index}]")
-
-    visit(failure.evidence, "")
+    refs = set(failure.evidence_refs) | supplied_references(failure.evidence, prefixes=("", "failure.evidence."))
+    if context is not None:
+        refs.update(supplied_references(context))
     refs.update((project or {}).get("inventory", []))
     return sorted(refs)
 
@@ -151,7 +138,7 @@ def check_failure(commands, results, *, task=None, step="checks", evidence_ref="
         evidence={"commands": [c.model_dump() for c in commands], "checks": [r.model_dump() for r in results]})
 
 
-def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None):
+def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None, evidence_context=None):
     """Facts first; ambiguous or repeated collection failures require independent diagnosis."""
     action, reason = "diagnose", "需要独立诊断故障归属和最小修复范围"
     tasks = [failure.task_id] if failure.task_id else []
@@ -166,8 +153,12 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None)
     if diagnosis:
         if len({target.task_id for target in diagnosis.repair_targets}) != len(diagnosis.repair_targets):
             raise AA2Error("Duplicate repair-target task IDs")
-        if not set(diagnosis.evidence_refs) <= set(evidence_references(failure)):
-            raise AA2Error("Diagnosis cites evidence not supplied by the controller")
+        supplied = set(evidence_references(failure, context=evidence_context))
+        missing = [i for i, ref in enumerate(diagnosis.evidence_refs) if ref not in supplied]
+        if missing:
+            raise AA2Error("Diagnosis cites evidence not supplied by the controller; invalid evidence_refs indexes: "
+                + ", ".join(map(str, missing)) + ". Cite an existing controller-context path, supplied artifact hash "
+                "or failure.evidence_refs entry. Proposal text cannot create evidence references.")
         known = {t.id: t for t in plan.tasks} if plan else {}
         if not set(diagnosis.task_ids) <= known.keys():
             raise AA2Error("Diagnosis names unknown tasks")
@@ -180,14 +171,14 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None)
         for task_id, target in targets.items():
             if task_id not in diagnosis.task_ids or task_id not in known:
                 raise AA2Error("Repair target must belong to a named existing task")
-            if (not set(target.evidence_refs) <= set(evidence_references(failure))
+            if (not set(target.evidence_refs) <= supplied
                     or not all(path in evidence_references(failure) and path_allowed(path, known[task_id].allowed_paths)
                                for path in target.paths)):
                 raise AA2Error("Repair target is outside the evidenced existing task scope; amend the plan if necessary")
         if diagnosis.action == "repair" and set(diagnosis.task_ids) - {failure.task_id} and failure.origin_id != "delivery":
             if set(targets) != set(diagnosis.task_ids):
                 raise AA2Error("Cross-task repair requires evidence and owned paths for each existing task")
-        action = "blocked" if diagnosis.action == "diagnose" else diagnosis.action
+        action = diagnosis.action
         tasks, refs, reason = diagnosis.task_ids, diagnosis.evidence_refs, diagnosis.reason
     origins = {t.id: t.origin_id or t.id for t in plan.tasks} if plan else {}
     owners = sorted({origins.get(t, failure.origin_id) for t in tasks}) if action == "repair" and tasks else [failure.origin_id]

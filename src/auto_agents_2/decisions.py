@@ -1,12 +1,12 @@
 """Bounded decisions over existing provider transport; never a verification gate."""
 from __future__ import annotations
 
-import re
 from typing import Literal
 
 from pydantic import Field, ValidationError
 
 from .errors import AA2Error, InvalidStructuredResponse, PostCommitError
+from .evidence_refs import supplied_references
 from .interaction import choice_spec, is_prototype_approval
 from .models import Record
 from .util import digest
@@ -26,22 +26,7 @@ class DecisionValidationError(ValueError):
 
 def decision_evidence_references(evidence):
     """Resolve paths and artifact IDs from supplied data, never from proposal text."""
-    refs = set()
-
-    def visit(value, path):
-        if path:
-            refs.add(path)
-        if isinstance(value, dict):
-            if isinstance(value.get("hash"), str) and re.fullmatch(r"[a-f0-9]{64}", value["hash"]):
-                refs.add(value["hash"])
-            for key, item in value.items():
-                if key not in {"proposal", "recovery_request", "original_proposal"}:
-                    visit(item, f"{path}.{key}" if path else key)
-        elif isinstance(value, list):
-            for index, item in enumerate(value):
-                visit(item, f"{path}[{index}]")
-
-    visit(evidence, "")
+    refs = supplied_references(evidence)
     # RecoveryController already indexes its failure's public files and records.
     # Do not promote citations from diagnoses, history or other model proposals.
     failure = evidence.get("failure")

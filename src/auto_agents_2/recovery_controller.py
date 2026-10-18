@@ -61,11 +61,16 @@ class RecoveryController:
         return True
 
     async def delivery_decision(self, rid, work, feedback, scopes, *, observation=None):
+        while True:
+            action = await self._delivery_decision(rid, work, feedback, scopes, observation=observation)
+            if action is not None:
+                return action
+
+    async def _delivery_decision(self, rid, work, feedback, scopes, *, observation=None):
         """Same fact policy, with delivery journal authority and its existing scope/budget."""
         capture_rows = feedback.get("checks", feedback.get("runtime_failure", {}).get("checks", [])
             if isinstance(feedback.get("runtime_failure"), dict) else [])
         capture_retry = await self._capture_retry(rid, capture_rows, work)
-        original_observation = observation
         observation = digest([observation or tree_hash(work), feedback])
         key = "recovery/delivery/" + observation
         saved = self.store.get(rid, key)
@@ -118,7 +123,11 @@ class RecoveryController:
                 active = {"attempt": number, "failure": failure.model_dump()}
                 self.store.checkpoints(rid, {active_key: active, "recovery/delivery-policy-count": number})
             active.update(diagnosis_feedback=(saved or {}).get("diagnosis_feedback"))
-            if not (saved or {}).get("round"):
+            if (saved or {}).get("selection"):
+                from .recovery import RecoveryDecision
+                decision = RecoveryDecision.model_validate(saved.pop("selection"))
+                permit = saved.pop("selection_permit")
+            elif not (saved or {}).get("round"):
                 options = self._delivery_candidates(failure, decision)
                 decision, permit = await policy.authorize(rid, failure, active, work, None, decision,
                     operation=f"delivery-choose/{count['round']}/{(saved or {}).get('diagnosis_errors', 0)}",
@@ -144,32 +153,40 @@ class RecoveryController:
                          "diagnosis_permit": permit}
                 self.store.checkpoints(rid, {key: saved, count_key: count,
                     "recovery/diagnosis/" + failure.id: {"round": count["round"]}})
-            diagnosis, schema_error = await self._diagnose({"review_kind": "recovery_diagnosis",
+            diagnosis_context = {"review_kind": "recovery_diagnosis",
                 **self._approval(rid, work),
                 "failure": failure.model_dump(), "project": project,
                 "diagnosis_feedback": saved.get("diagnosis_feedback"),
                 "specification": self.store.get(rid, "clarify"), "delivery_journal": self.store.get(rid, "delivery/journal"),
-                "constraint": "Delivery may only repair within supplied allowed_paths or recheck. Gate/plan changes require user reconciliation; never invalidate a published journal."},
+                "constraint": "Delivery may only repair within supplied allowed_paths or recheck. Gate/plan changes require user reconciliation; never invalidate a published journal."}
+            diagnosis, schema_error = await self._diagnose(diagnosis_context,
                 work, rid, f"recovery/diagnose/{failure.id}/{saved['round']}")
             if tree_hash(work) != evidence_source:
                 raise AA2Error("Delivery recovery evidence source changed during diagnosis; preserve the candidate")
             try:
                 if schema_error:
                     raise AA2Error(schema_error)
-                decision = adjudicate(failure, diagnosis=diagnosis)
+                decision = adjudicate(failure, diagnosis=diagnosis, evidence_context=diagnosis_context)
             except AA2Error as exc:
                 rejection = {"diagnosis": diagnosis.model_dump() if diagnosis else None, "validation_error": str(exc)}
                 self.store.checkpoints(rid, {key: {"failure": failure.model_dump(), "evidence_source_hash": evidence_source,
                     "diagnosis_feedback": rejection, "diagnosis_errors": saved.get("diagnosis_errors", 0) + 1},
                     f"recovery/diagnosis-rejections/{failure.id}/{saved['round']}": rejection})
                 policy.complete(rid, permit, {"status": "invalid", "feedback": rejection})
-                return await self.delivery_decision(rid, work, feedback, scopes, observation=original_observation)
+                return None
             policy.complete(rid, permit, {"status": "validated", "diagnosis": diagnosis.model_dump()})
             if not published:
+                decision, assess = self._diagnosis_assessment(failure, decision)
                 options = self._delivery_candidates(failure, decision, diagnosed=True)
                 decision, permit = await policy.authorize(rid, failure, active, work, None, decision,
                     operation=f"delivery-dispatch/{saved['round']}", candidates=options, established=True,
+                    diagnosis_assessment=assess,
                     force_decision=decision.action == "recheck" and already_rechecked)
+                if decision.action == "diagnose":
+                    saved.pop("round")
+                    saved.update(selection=decision.model_dump(), selection_permit=permit)
+                    self.store.checkpoint(rid, key, saved)
+                    return None
         if decision.action not in {"repair", "recheck"}:
             self.store.checkpoint(rid, key, {"failure": failure.model_dump(), "evidence_source_hash": evidence_source, "blocked_decision": decision.model_dump()})
             raise AA2Error("交付恢复需要核对已保留的发布记录：" + decision.reason)
@@ -349,7 +366,7 @@ class RecoveryController:
                     self.store.checkpoints(rid, {budget_key: budget, "recovery/active": active,
                         "recovery/diagnosis/" + failure.id: {"round": budget["round"]}})
                 policy.start(rid, permit)
-                diagnosis, schema_error = await self._diagnose({
+                diagnosis_context = {
                     "review_kind": "recovery_diagnosis", "failure": failure_data,
                     "plan": plan_data, "project": project,
                     "specification": self.store.get(rid, "clarify"), "design": self.store.get(rid, "design"),
@@ -358,13 +375,16 @@ class RecoveryController:
                     "diagnosis_feedback": active.get("diagnosis_feedback"),
                     "current_issues": self.store.get(rid, "issues", {}),
                     "observations": self.store.get(rid, "recovery/observations/" + failure.origin_id, []),
-                }, work, rid, f"recovery/diagnose/{failure.id}/{active['diagnosis_round']}")
+                }
+                diagnosis, schema_error = await self._diagnose(diagnosis_context,
+                    work, rid, f"recovery/diagnose/{failure.id}/{active['diagnosis_round']}")
                 if tree_hash(work) != active["evidence_source_hash"]:
                     raise AA2Error("Recovery evidence source changed during diagnosis; preserve the candidate")
                 try:
                     if schema_error:
                         raise AA2Error(schema_error)
-                    suggested = adjudicate(failure, attempts=active["attempt"] - 1, diagnosis=diagnosis, plan=plan)
+                    suggested = adjudicate(failure, attempts=active["attempt"] - 1, diagnosis=diagnosis,
+                        plan=plan, evidence_context=diagnosis_context)
                 except AA2Error as exc:
                     rejection = {"diagnosis": diagnosis.model_dump() if diagnosis else None, "validation_error": str(exc)}
                     rejected_round = active.pop("diagnosis_round")
@@ -377,8 +397,10 @@ class RecoveryController:
                 policy.complete(rid, permit, {"status": "validated", "diagnosis": diagnosis.model_dump()})
                 active.pop("diagnosis_feedback", None)
                 active.pop("diagnosis_errors", None)
+                suggested, assess = self._diagnosis_assessment(failure, suggested)
                 decision, permit = await policy.authorize(rid, failure, active, work, plan, suggested,
                     operation=f"dispatch/{active['diagnosis_round']}", established=True,
+                    diagnosis_assessment=assess,
                     force_decision=suggested.action == "recheck" and repeated_recheck())
                 if decision.action == "diagnose":
                     active.pop("diagnosis_round")
@@ -492,6 +514,15 @@ class RecoveryController:
             return await self.engine._invoke("recovery_diagnosis", context, Diagnosis, work, rid, key, fresh=True), None
         except InvalidStructuredResponse:
             return None, "诊断返回格式不符合 Diagnosis schema；请按请求的完整结构修正。"
+
+    @staticmethod
+    def _diagnosis_assessment(failure, suggested):
+        # An inconclusive model diagnosis cannot declare a human-only boundary.
+        # Controller resource/collection guards remain authoritative.
+        assess = suggested.action in {"diagnose", "blocked"} and adjudicate(failure).action != "blocked"
+        if assess:
+            suggested = suggested.model_copy(update={"action": "diagnose"})
+        return suggested, assess
 
     @staticmethod
     def _summary(failure, active):

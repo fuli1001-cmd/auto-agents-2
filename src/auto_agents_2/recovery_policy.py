@@ -47,7 +47,7 @@ class RecoveryPolicy:
     def cycle_id(failure, active):
         return digest([failure.origin_id, failure.id, active["attempt"]])
 
-    def candidates(self, failure, plan, suggested):
+    def candidates(self, failure, plan, suggested, *, include_declared_checks=False):
         """Freeze admissible actions; the model selects, it cannot supply new scopes."""
         choices = {suggested.action: suggested}
         if suggested.action in {"clarify", "provider_research", "prototype", "design", "blocked"}:
@@ -55,12 +55,14 @@ class RecoveryPolicy:
         common = dict(failure_id=failure.id, evidence_refs=failure.evidence_refs,
                       budget_owner=failure.origin_id, budget_owners=[failure.origin_id])
         tasks = [failure.task_id] if failure.task_id else []
+        task = next((t for t in plan.tasks if t.id == failure.task_id), None) if plan else None
         choices.setdefault("diagnose", RecoveryDecision(action="diagnose", task_ids=tasks,
             reason="独立诊断当前故障及最小修复范围", **common))
-        if failure.evidence.get("checks") or failure.evidence.get("commands"):
+        if (failure.evidence.get("checks") or failure.evidence.get("commands")
+                or include_declared_checks and (task and task.checks or plan and not failure.task_id and plan.final_checks)):
             choices.setdefault("recheck", RecoveryDecision(action="recheck", task_ids=tasks,
                 reason="重新执行现有检查并收集当前证据", **common))
-        if plan and failure.task_id in {t.id for t in plan.tasks}:
+        if task:
             choices.setdefault("repair", RecoveryDecision(action="repair", task_ids=tasks,
                 reason="在责任任务已接受的路径范围内修复并验证", **common))
         if plan:
@@ -87,8 +89,10 @@ class RecoveryPolicy:
                 if not self.store.get(rid, "recovery/legacy-answers/" + digest(key))}
 
     async def authorize(self, rid, failure, active, work, plan, suggested, *, operation,
-                        established=False, correction=False, force_decision=False, candidates=None, controller_owned=False):
+                        established=False, correction=False, force_decision=False, candidates=None, controller_owned=False,
+                        diagnosis_assessment=False):
         """Reserve a concrete action and its audit receipt in one CAS transaction."""
+        force_decision = force_decision or diagnosis_assessment
         cid = self.cycle_id(failure, active)
         cycle_key = "recovery/cycles/" + cid
         permit_key = "recovery/permits/" + digest([cid, operation])
@@ -101,13 +105,25 @@ class RecoveryPolicy:
         cycle = RecoveryCycle.model_validate(self.store.get(rid, cycle_key) or
             RecoveryCycle(id=cid, owner=failure.origin_id, failure_id=failure.id,
                           observation=active["attempt"]).model_dump())
-        choices = candidates if candidates is not None else self.candidates(failure, plan, suggested)
+        question_key = "recovery-cycle/" + digest([cid, operation])
+        binding_key = "recovery/authorization-inputs/" + digest([cid, operation])
+        bound = self.store.get(rid, binding_key)
+        legacy_blocked = suggested.model_copy(update={"action": "blocked"})
+        remapped_diagnosis = (suggested.action == "diagnose" and force_decision and bound is not None
+            and bound["candidates"] == digest({"blocked": legacy_blocked.model_dump()}))
+        if remapped_diagnosis and (prior or any(q["answer"] is not None
+                for q in self.store.decision_questions(rid, [question_key]))):
+            # Existing grants/answers retain their old, narrow meaning. A later
+            # observation can use the new policy; never enlarge a human's consent.
+            suggested = legacy_blocked
+            candidates = {"blocked": legacy_blocked}
+        choices = candidates if candidates is not None else self.candidates(failure, plan, suggested,
+            include_declared_checks=diagnosis_assessment)
         hard_boundary = (not controller_owned and
                          suggested.action in {"clarify", "provider_research", "prototype", "design", "blocked"})
         rule_key = "recovery/rules/" + digest([failure.origin_id, failure.step,
             sorted(failure.obligations), suggested.action])
         legacy = self.legacy_questions(rid, failure, active)
-        question_key = "recovery-cycle/" + digest([cid, operation])
         question_keys = [*legacy, question_key]
         questions = self.store.decision_questions(rid, question_keys)
         answered = [q for q in questions if q["answer"] is not None]
@@ -119,16 +135,21 @@ class RecoveryPolicy:
                   or t.id in suggested.task_ids]
         paths = failure.evidence.get("allowed_paths", [])
         scope_hash = digest([[t.model_dump() for t in scoped], paths])
-        binding_key = "recovery/authorization-inputs/" + digest([cid, operation])
         binding = {"source_hash": source, "plan_hash": plan_hash, "scope_hash": scope_hash,
                    "candidates": digest({key: value.model_dump() for key, value in choices.items()}),
                    "failure": digest(failure.model_dump())}
-        bound = self.store.get(rid, binding_key)
+        binding_updates = {}
         if bound is not None and bound != binding:
-            raise AA2Error("Pending recovery authorization no longer matches its original inputs")
+            if (not remapped_diagnosis
+                    or {k: v for k, v in bound.items() if k != "candidates"}
+                    != {k: v for k, v in binding.items() if k != "candidates"}):
+                raise AA2Error("Pending recovery authorization no longer matches its original inputs")
+            binding_updates = {binding_key: binding,
+                "recovery/authorization-upgrades/" + digest([cid, operation, bound]): {
+                    "previous": bound, "reason": "Reassess an inconclusive diagnosis instead of forcing a human block"}}
         if bound is None:
             self.store.checkpoint(rid, binding_key, binding)
-        guards[binding_key] = binding
+        guards[binding_key] = bound if bound is not None else binding
         if prior:
             return RecoveryDecision.model_validate(permit.action), permit_key
         grant = dict(cycle.human_grant)
@@ -184,7 +205,8 @@ class RecoveryPolicy:
             if not legacy_answer:
                 prompt = ("当前故障：\n" + failure_summary(failure.evidence.get("checks", []),
                         review=failure.evidence.get("review"), environment_error=failure.evidence.get("environment_error"))
-                    + "\n恢复需要人工决定：" + result.reason + "\n原恢复请求：" + suggested.reason
+                    + "\n恢复需要人工决定：" + result.reason
+                    + ("\n原恢复请求：" + suggested.reason if result.reason != suggested.reason else "")
                     + "\n允许范围：" + ("; ".join(t.id + ": " + ", ".join(t.allowed_paths) for t in scoped)
                                                or ", ".join(paths) or "控制器声明的当前操作")
                     + "\n先执行：" + suggested.action
@@ -212,7 +234,8 @@ class RecoveryPolicy:
         cycle.phase = "diagnosis" if choice.action == "diagnose" else "reserved"
         cycle.permits.append(permit_key)
         cycle.human_grant = grant
-        updates = {permit_key: permit.model_dump(), cycle_key: cycle.model_dump(), rule_key: {"permit": permit_key}}
+        updates = {permit_key: permit.model_dump(), cycle_key: cycle.model_dump(),
+                   rule_key: {"permit": permit_key}, **binding_updates}
         if legacy_answer:
             updates["recovery/legacy-answers/" + digest(legacy_answer)] = {"permit": permit_key}
         # New answers may be ours; concurrent answers to other bound questions still win.

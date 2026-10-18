@@ -89,3 +89,46 @@ def test_pause_menu_exits_cleanly_and_does_not_reuse_negative_answer(tmp_path):
     assert store.current()["status"] == "PAUSED"
     with store.connect() as db:
         assert db.execute("SELECT COUNT(*) FROM questions WHERE answer='n' AND superseded=1").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("repetitions", [30, 1000])
+def test_long_chinese_question_and_complete_scope_are_visible_in_a_real_terminal(repetitions):
+    script = '''
+import asyncio, sys
+from prompt_toolkit import PromptSession
+from auto_agents_2.interaction import prompt_answer, choice_spec
+repetitions = int(sys.argv[1])
+question = {"prompt": "QUESTION_START 允许范围：" + "任务范围说明" * repetitions + " SCOPE_END_MARKER\\n恢复依据：" + "诊断依据说明" * repetitions + " REASON_END_MARKER",
+            "interaction": choice_spec(["授权恢复", "暂停"], yes_no=True)}
+asyncio.run(prompt_answer(PromptSession(), question))
+'''
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 80, 0, 0))
+    process = subprocess.Popen([sys.executable, "-c", script, str(repetitions)], stdin=slave, stdout=slave, stderr=slave,
+                               env={**os.environ, "TERM": "xterm-256color"}, start_new_session=True)
+    os.close(slave)
+    output = bytearray()
+    sent = False
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if select.select([master], [], [], 0.1)[0]:
+                try:
+                    output.extend(os.read(master, 65536))
+                except OSError:
+                    break
+            if not sent and "请选择" in output.decode(errors="replace"):
+                os.write(master, b"n\r")
+                sent = True
+            if process.poll() is not None:
+                break
+        process.wait(timeout=3)
+        rendered = output.decode(errors="replace")
+        assert sent and process.returncode == 0, rendered
+        unwrapped = rendered.replace("\r", "").replace("\n", "")
+        assert all(marker in unwrapped for marker in ("QUESTION_START", "SCOPE_END_MARKER", "REASON_END_MARKER"))
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        os.close(master)

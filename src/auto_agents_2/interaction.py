@@ -5,6 +5,8 @@ import re
 from contextlib import nullcontext
 
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.shortcuts import print_formatted_text
+from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.validation import ValidationError, Validator
 
 from .errors import AA2Error
@@ -61,6 +63,22 @@ class AnswerValidator(Validator):
             raise ValidationError(message=str(exc), cursor_position=len(document.text)) from exc
 
 
+def wrap_prompt(text, columns):
+    """PromptSession's multiline prefix does not wrap long lines by itself."""
+    lines = []
+    for line in text.expandtabs(4).split("\n"):
+        row, width = [], 0
+        for char in line:
+            size = get_cwidth(char)
+            if row and width + size > columns:
+                lines.append("".join(row))
+                row, width = [], 0
+            row.append(char)
+            width += size
+        lines.append("".join(row))
+    return "\n".join(lines)
+
+
 async def prompt_answer(session, question: dict) -> str:
     interaction = question.get("interaction", {})
     choice = interaction.get("kind") == "choice"
@@ -83,8 +101,16 @@ async def prompt_answer(session, question: dict) -> str:
 
     # A dumb-terminal prompt is printed before prompt_toolkit enters raw mode.
     # Enter it first so an immediate Ctrl+C cannot be swallowed by line discipline.
+    output = getattr(session, "output", None)
+    if output is not None:
+        message = wrap_prompt(message, max(2, output.get_size().columns - 1))
     prompt_input = getattr(session, "input", None)
     with prompt_input.raw_mode() if prompt_input is not None else nullcontext():
+        if output is not None:
+            # Long static prefixes are clipped vertically by PromptSession's
+            # layout. Keep the full question in terminal scrollback instead.
+            before, _, message = message.rpartition("\n")
+            print_formatted_text(before, output=output)
         return await session.prompt_async(
             message, multiline=not choice, key_bindings=bindings,
             validator=AnswerValidator(interaction), validate_while_typing=False,
