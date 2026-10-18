@@ -91,6 +91,8 @@ from .workspace import (
     path_allowed,
     prepare_changes,
     prepared_before_hash,
+    source_manifest,
+    source_manifest_hash,
     tree_hash,
 )
 
@@ -1101,9 +1103,13 @@ class WorkflowEngine:
                 self.config.select_target(target)
             self.store.update(rid, target_branch=target)
             base = self.workspaces.committed_baseline(rid, target)
-            self.store.checkpoint(rid, "target_base", self.workspaces.head(target))
-            self.store.checkpoint(rid, "baseline", base)
-            self.store.update(rid, project_source_hash=tree_hash(self.project))
+            target_base = self.workspaces.head(target)
+            initial_inputs = source_manifest(self.project)
+            initial_hash = source_manifest_hash(initial_inputs)
+            self.store.checkpoints(rid, {"target_base": target_base, "baseline": base,
+                "baseline/source_snapshot": {"version": 1, "commit": base, "entries": initial_inputs,
+                                             "source_hash": initial_hash}})
+            self.store.update(rid, project_source_hash=initial_hash)
         base = self.store.get(rid, "baseline")
         work = self.workspaces.allocate(rid, "integration", base)
         self.resources.register(work, "worktree", rid)
@@ -1989,7 +1995,7 @@ class WorkflowEngine:
             self.store.checkpoint(rid, key, {"identity": identity, "checks": [c.model_dump() for c in results]})
         evidence = {"checks": [c.model_dump() for c in checks]}
         failure = self._verification_problem(rid, commands, checks, self.project, environment,
-                                             phase="runtime", expected_source=journal.get("source_hash"))
+                                             phase="runtime", expected_source=journal.get("runtime_source_hash", journal.get("source_hash")))
         if failure:
             raise RuntimeVerificationError(failure.evidence)
         if plan and plan.preview:
@@ -2005,7 +2011,7 @@ class WorkflowEngine:
         if "visuals" in evidence:
             evidence["visuals"] = self._archive_visuals(evidence["visuals"])
         failure = self._verification_problem(rid, commands, checks, self.project, environment,
-                                             phase="runtime", expected_source=journal.get("source_hash"))
+                                             phase="runtime", expected_source=journal.get("runtime_source_hash", journal.get("source_hash")))
         if failure:
             raise RuntimeVerificationError({**evidence, **failure.evidence})
         return evidence

@@ -139,8 +139,16 @@ def _tree_paths(root: Path):
 
 
 def tree_hash(root: Path) -> str:
+    return source_manifest_hash(source_manifest(root))
+
+
+def source_manifest(root: Path) -> dict:
     paths, _ = _tree_paths(root)
-    return digest(["execution-v2", [(p, input_entry(root / p, root)) for p in sorted(paths)]])
+    return {p: input_entry(root / p, root) for p in sorted(paths)}
+
+
+def source_manifest_hash(entries: dict) -> str:
+    return digest(["execution-v2", sorted(entries.items())])
 
 
 def prepared_before_hash(root: Path, prepared: list[dict]) -> str:
@@ -513,6 +521,72 @@ class WorkspaceManager:
                     raise StateConflict("Automatic delivery does not support submodule entries")
                 result[path] = {"mode": mode, "oid": oid}
         return result
+
+    def bind_published_inputs(self, journal, baseline, baseline_hash, snapshot=None):
+        """Prove retained main-directory inputs without changing verified source or excluding files globally."""
+        work = Path(journal["work"])
+        verified = source_manifest(work)
+        current = source_manifest(self.project)
+        if (source_manifest_hash(verified) != journal["source_hash"]
+                or git(work, "rev-parse", "HEAD") != journal["candidate"]):
+            raise StateConflict("已验证候选发生变化，无法核对主目录保留输入", phase="delivery")
+        if any(current.get(path) != entry for path, entry in verified.items()):
+            raise StateConflict("主目录中的已验证文件与候选不符", phase="delivery")
+        retained = sorted(current.keys() - verified.keys())
+        old_tracked = self.entries(baseline)
+        if not retained or set(retained) & old_tracked.keys():
+            raise StateConflict("主目录存在无法归因的源码差异", phase="delivery")
+        # check-ignore rejects Git's literal-pathspec magic. NUL-delimited stdin
+        # supplies exact filenames without shell expansion or option parsing.
+        result = subprocess.run(["git", "-C", str(self.project), "check-ignore", "--no-index", "-z", "--stdin"],
+            input=os.fsencode("\0".join(retained) + "\0"), capture_output=True, env=git_environment(), timeout=120)
+        ignored = set(os.fsdecode(result.stdout).split("\0")) if result.returncode == 0 else set()
+        if not set(retained) <= ignored:
+            raise StateConflict("主目录新增文件未通过保留输入核对", phase="delivery")
+        if snapshot:
+            original = snapshot["entries"]
+            proven = (snapshot.get("version") == 1 and snapshot.get("commit") == baseline
+                      and snapshot.get("source_hash") == baseline_hash and source_manifest_hash(original) == baseline_hash
+                      and all(original.get(path) == current[path] for path in retained))
+            proof = "admission_snapshot"
+        else:
+            # Old runs recorded a full execution hash but no per-path snapshot.
+            # Reconstruct the original baseline from immutable Git objects and
+            # still-preserved inputs. Unsupported symlinks fail closed.
+            self.checkout_policy(self.project, sorted(old_tracked))
+            now_tracked = self.entries(journal["candidate"])
+            original = {path: entry for path, entry in current.items() if path not in now_tracked}
+            for path, entry in old_tracked.items():
+                if entry["mode"] not in {"100644", "100755"}:
+                    raise StateConflict("旧基线包含无法安全重建的输入，保留现场核对", phase="delivery")
+                content = subprocess.run(["git", "-C", str(self.project), "cat-file", "--filters", f"{baseline}:{path}"],
+                    capture_output=True, check=True, env=git_environment(), timeout=120).stdout
+                original[path] = ["file", entry["mode"] == "100755", digest(content)]
+            proven = source_manifest_hash(original) == baseline_hash
+            proof = "reconstructed_admission"
+        if not proven:
+            raise StateConflict("主目录保留输入已变化，或无法证明其与入场记录一致", phase="delivery")
+        binding = {"version": 1, "candidate": journal["candidate"], "source_hash": journal["source_hash"],
+            "source_paths": sorted(verified), "retained_paths": retained,
+            "retained_hash": digest([(path, current[path]) for path in retained]),
+            "baseline": baseline, "baseline_hash": baseline_hash, "proof": proof}
+        binding["digest"] = digest(binding)
+        return binding
+
+    def published_input_hash(self, journal, binding):
+        if (binding.get("version") != 1
+                or binding.get("digest") != digest({key: value for key, value in binding.items() if key != "digest"})
+                or binding.get("candidate") != journal["candidate"] or binding.get("source_hash") != journal["source_hash"]):
+            raise StateConflict("发布输入绑定与已验证候选不符", phase="delivery")
+        current = source_manifest(self.project)
+        source_paths, retained = binding["source_paths"], binding["retained_paths"]
+        if set(current) != set(source_paths) | set(retained) or set(source_paths) & set(retained):
+            raise StateConflict("主目录输入集合发生变化，保留新增或缺失文件的现场", phase="delivery")
+        if source_manifest_hash({path: current[path] for path in source_paths}) != journal["source_hash"]:
+            raise StateConflict("主目录中的已验证源码发生变化", phase="delivery")
+        if digest([(path, current[path]) for path in retained]) != binding["retained_hash"]:
+            raise StateConflict("保留的主目录运行输入已变化，需要核对后重新验证", phase="runtime")
+        return source_manifest_hash(current)
 
     @staticmethod
     def raw_file_hash(path):

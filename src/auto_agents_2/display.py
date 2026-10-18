@@ -154,6 +154,8 @@ class ProgressDisplay:
         elif kind == "evidence.invalidated":
             codes = ", ".join(row["code"] for row in data.get("issues", [])) or data.get("code", "evidence_unavailable")
             self.message(f"证据待复验｜{data['phase']}｜{codes}｜候选及原始证据已保留")
+        elif kind == "delivery.inputs_preserved":
+            self.message(f"发布输入已核对｜保留 {data['retained_inputs']} 个原有输入｜继续主目录运行验收")
         elif kind == "recovery.classified":
             route = {"rule": "控制器恢复", "decision": "自动决策", "human": "需要外部处理"}.get(data["route"], data["route"])
             self.message(f"故障分类｜{data['phase']}｜{data['reason_code']}｜{route}")

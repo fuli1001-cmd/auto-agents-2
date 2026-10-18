@@ -34,6 +34,36 @@ class DeliveryCoordinator:
         return ResourceBoundary(reason, action=f"处理已记录的运行故障，或明确增加 {setting}。",
             condition="控制器核对新的运行输入或增加后的预算；重启和确认不清零历史消耗。", phase="runtime")
 
+    def published_source(self, rid, journal):
+        """Keep candidate identity separate from the actual main-directory execution identity."""
+        current = tree_hash(self.workspaces.project)
+        binding = journal.get("publication_inputs")
+        if binding and binding.get("candidate") == journal["candidate"]:
+            current = self.workspaces.published_input_hash(journal, binding)
+        elif binding and current == journal["source_hash"]:
+            # A newly verified candidate now covers every current execution input.
+            # The previous candidate's preservation proof is history, not authority.
+            journal.setdefault("publication_input_history", []).append(binding)
+            journal.pop("publication_inputs")
+            journal["runtime_source_hash"] = current
+            self.save(rid, journal)
+        elif current != journal["source_hash"]:
+            baseline = self.store.get(rid, "baseline")
+            snapshot = self.store.get(rid, "baseline/source_snapshot")
+            initial = self.store.run(rid)["data"].get("project_source_hash") or (snapshot or {}).get("source_hash")
+            if not baseline or not initial:
+                raise StateConflict("Verified runtime source changed; 主目录源码与验证版本不符，缺少入场输入证明", phase="delivery")
+            new_binding = self.workspaces.bind_published_inputs(journal, baseline, initial, snapshot)
+            current = self.workspaces.published_input_hash(journal, new_binding)
+            if binding:
+                journal.setdefault("publication_input_history", []).append(binding)
+            journal["publication_inputs"] = new_binding
+            journal["runtime_source_hash"] = current
+            self.save(rid, journal)
+            self.store.event(rid, "delivery.inputs_preserved", {"candidate": journal["candidate"],
+                "retained_inputs": len(new_binding["retained_paths"]), "proof": new_binding["proof"]})
+        return current
+
     async def finish(self, rid, *, candidate=None, work=None, environment=None, plan=None, outcome="DELIVERED"):
         if self.store.run(rid)["status"] == "SUCCEEDED":
             self.resources.finish_delivery(rid)
@@ -156,8 +186,7 @@ class DeliveryCoordinator:
             self.workspaces.clean_target(journal["target"])
             if self.workspaces.head(journal["target"]) != journal["candidate"]:
                 raise StateConflict("发布后的目标提交发生变化；保留用户提交，需人工核对后继续完成环境交接")
-            if tree_hash(project) != journal["source_hash"]:
-                raise StateConflict("主目录源码与验证版本不符")
+            runtime_source = self.published_source(rid, journal)
             limit = ConfigStore(project).load().delivery.max_runtime_retries + 1
             if "runtime_budget_used" not in journal:
                 uncertain = journal["phase"] == "runtime" or bool(self.store.get(rid, "delivery/runtime_repaired"))
@@ -169,6 +198,7 @@ class DeliveryCoordinator:
                     raise self.budget_boundary("主目录运行重试预算已耗尽或旧预算无法核实；保留交付现场，明确增加 delivery.max_runtime_retries 可授予有限额外尝试")
                 journal["runtime_budget_used"] += 1
                 journal["runtime_attempt_id"] = identifier("runtime")
+                journal["runtime_source_hash"] = runtime_source
                 self.save(rid, journal, "runtime")
             env = Environment(Path(journal["environment"]["prefix"]), journal["environment"]["fingerprint"])
             plan = journal["plan"] or {}
@@ -199,7 +229,8 @@ class DeliveryCoordinator:
                     raise self.budget_boundary("同一候选和运行输入重复失败，停止自动交付并保留证据") from exc
                 return None
             self.workspaces.clean_target(journal["target"])
-            if self.workspaces.head(journal["target"]) != journal["candidate"] or tree_hash(project) != journal["source_hash"]:
+            if (self.workspaces.head(journal["target"]) != journal["candidate"]
+                    or self.published_source(rid, journal) != journal.get("runtime_source_hash", journal["source_hash"])):
                 raise StateConflict("运行环境准备期间源码或目标提交发生变化，保留现场")
             journal.update(completion_evidence=evidence, completion_inputs=self.runtime_identity(journal))
             self.save(rid, journal, "completion_pending")
@@ -231,7 +262,7 @@ class DeliveryCoordinator:
         self.workspaces.clean_target(journal["target"])
         prefix = Path(journal["environment"]["prefix"])
         if (self.workspaces.head(journal["target"]) != journal["candidate"]
-                or tree_hash(self.workspaces.project) != journal["source_hash"]):
+                or self.published_source(rid, journal) != journal.get("runtime_source_hash", journal["source_hash"])):
             raise StateConflict("Verified runtime source changed before completion; pending evidence retained", phase="completion")
         if (self.runtime_identity(journal) != journal["completion_inputs"]
                 or prefix.is_relative_to(self.store.root / "environments")
@@ -259,6 +290,9 @@ class DeliveryCoordinator:
                        "runtime": {**journal["environment"], "resources": [str(prefix)]
                            if prefix.is_relative_to(self.store.root / "environments") else [], "evidence": evidence},
                        "tokens": self.store.usage_summary(rid), "evidence": self.store.delivery_evidence(rid)}
+            if journal.get("publication_inputs"):
+                receipt.update(publication_inputs=journal["publication_inputs"],
+                               runtime_source_hash=journal["runtime_source_hash"])
             receipt["owned_refs"] = dict(line.split(" ", 1) for line in git(self.workspaces.project, "for-each-ref",
                 "--format=%(refname) %(objectname)", f"refs/aa2/{rid}/").splitlines())
             receipt["digest"] = digest(receipt)
