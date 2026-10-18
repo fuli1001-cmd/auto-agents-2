@@ -180,7 +180,7 @@ def reusable(commands, results, workspace: Path, environment, artifacts):
 
 
 def invocation_identity(stage, context, schema, workspace, config, source_hash=None, execution=None):
-    from .prompts import PROMPT_VERSION
+    from .prompts import INVOCATION_CONTRACT_VERSION
     from .readview import VIEW_VERSION
     settings = config.model_dump(mode="json")
     if stage not in {"decision", "recovery_diagnosis"}:
@@ -188,5 +188,5 @@ def invocation_identity(stage, context, schema, workspace, config, source_hash=N
         settings.pop("automation", None)
         settings["efforts"].pop("decision", None)
         settings["efforts"].pop("recovery_diagnosis", None)
-    return digest(["invocation-v4", PROMPT_VERSION, VIEW_VERSION, stage, context, schema.model_json_schema(),
+    return digest(["invocation-v4", INVOCATION_CONTRACT_VERSION, VIEW_VERSION, stage, context, schema.model_json_schema(),
                    source_hash or tree_hash(workspace), settings, execution])

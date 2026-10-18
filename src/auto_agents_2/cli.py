@@ -12,14 +12,16 @@ from typing import Annotated
 import typer
 from prompt_toolkit import PromptSession
 from rich.console import Console
+from rich.text import Text
 
 from .config import Config, ConfigStore, default_config
-from .display import ProgressDisplay
+from .display import ProgressDisplay, runtime_instructions
 from .engine import WorkflowEngine
 from .errors import AA2Error, BusyProject, IncompleteIteration
-from .interaction import prompt_answer
-from .models import ReviewResult
+from .interaction import choice_spec, prompt_answer
+from .models import PreviewSpec, ReviewResult
 from .providers import ProviderRouter
+from .requirements import validate_requirements_text
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
 from .store import Store
@@ -97,12 +99,15 @@ async def render(store: Store, stop: asyncio.Event, paused: asyncio.Event, last:
         display.close()
 
 
-async def execute(project, requirements=None, provider=None, run_id=None):
+async def execute(project, requirements=None, provider=None, run_id=None, *, requirements_text=None):
+    if requirements_text is not None and (requirements is not None or run_id is not None):
+        raise AA2Error("需求文本不能与需求文件或恢复迭代 ID 同时提供")
     configuration(project)
     store = Store(project)
-    if requirements is not None and store.current(unfinished=True):
+    new_iteration = requirements is not None or requirements_text is not None
+    if new_iteration and store.current(unfinished=True):
         raise IncompleteIteration(f"上一轮迭代尚未完成。请先执行：aa2 run --project {shlex.quote(str(project))}")
-    if requirements is None and run_id is None:
+    if not new_iteration and run_id is None:
         attached = store.current()
         if not attached:
             raise AA2Error("尚无可恢复迭代，请通过 --requirements 提供原始需求")
@@ -143,9 +148,10 @@ async def execute(project, requirements=None, provider=None, run_id=None):
     try:
         engine = WorkflowEngine(project, question_handler=question if session else None)
         try:
-            result = await supervised_start(requirements, provider, run_id)
+            text_input = {"requirements_text": requirements_text} if requirements_text is not None else {}
+            result = await supervised_start(requirements, provider, run_id, **text_input)
         except BusyProject:
-            if requirements is not None:
+            if new_iteration:
                 raise IncompleteIteration(f"项目已有控制进程。请先执行：aa2 run --project {project}")
             if provider:
                 engine.config.resolve("clarify", provider)
@@ -185,14 +191,57 @@ async def execute(project, requirements=None, provider=None, run_id=None):
         qualifier = "" if summary["complete"] else "至少 "
         missing = "" if summary["complete"] else "（部分调用未提供完整用量）"
         console.print(f"[{stamp}] Token：{qualifier}{summary['total_tokens']:,}；输入 {summary['input_tokens']:,}，输出 {summary['output_tokens']:,}，缓存命中 {summary['cached_tokens']:,}{missing}", markup=False)
+        if result["status"] == "SUCCEEDED":
+            plan = store.get(result["id"], "plan") or {}
+            preview = PreviewSpec.model_validate(plan["preview"]) if plan.get("preview") else None
+            instructions = runtime_instructions(project, preview,
+                                               runtime_ready=(project / ".aa2/runtime.sh").is_file())
+            console.print(Text(f"[{stamp}] {instructions}"), soft_wrap=True)
+    return result
+
+
+async def run_session(project, requirements=None, provider=None):
+    """Offer one new iteration only when this interactive command began on a completed run."""
+    if requirements is not None or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return await execute(project, requirements, provider)
+    configuration(project)
+    store = Store(project)
+    initial = store.current()
+    result = await execute(project, provider=provider, run_id=initial["id"] if initial else None)
+    current = store.current()
+    if (not initial or initial["status"] != "SUCCEEDED" or not result or result["status"] != "SUCCEEDED"
+            or result["id"] != initial["id"] or not current or current["id"] != initial["id"]):
+        return result
+    # execute has flushed and stopped its renderer. These prompts belong to the
+    # CLI, not to the completed run's durable question queue.
+    try:
+        session = PromptSession()
+        answer = await prompt_answer(session, {
+            "prompt": "是否开始新的迭代？",
+            "interaction": choice_spec(["开始新的迭代", "退出"], yes_no=True),
+        })
+        if answer.strip() != "y":
+            console.print("已退出，未创建新迭代。")
+            return result
+        while True:
+            text = await prompt_answer(session, {"prompt": "请描述本次迭代的需求："})
+            try:
+                validate_requirements_text(text)
+                break
+            except AA2Error as exc:
+                console.print(Text(str(exc)))
+    except (KeyboardInterrupt, asyncio.CancelledError, EOFError):
+        console.print("已退出，未创建新迭代。")
+        return result
+    return await execute(project, provider=provider, requirements_text=text)
 
 
 @app.command()
 def run(project: Project = Path("."), requirements: Annotated[str | None, typer.Option("--requirements")] = None,
         provider: Annotated[str | None, typer.Option("--provider")] = None):
-    """带 --requirements 开启新迭代；省略时续跑当前迭代。"""
+    """带 --requirements 开启新迭代；省略时续跑，已完成项目可交互输入新需求。"""
     try:
-        asyncio.run(execute(project.resolve(), requirements, provider))
+        asyncio.run(run_session(project.resolve(), requirements, provider))
     except AA2Error as exc:
         fail(exc)
     except (KeyboardInterrupt, asyncio.CancelledError):

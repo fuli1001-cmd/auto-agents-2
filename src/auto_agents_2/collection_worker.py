@@ -84,7 +84,11 @@ def execute(root, request):
         if len(raw) > MAX_REQUIREMENTS_BYTES:
             raise ValueError("Document exceeds acquisition limit")
         kind = request["mime"]
-    text, encoding = extract_document(raw, kind)
+    if action == "research":
+        from .research_sections import extract_sections
+        text, encoding, sections = extract_sections(raw, kind)
+    else:
+        text, encoding = extract_document(raw, kind)
     if action in {"local_requirements", "requirements"}:
         if not text.strip():
             raise ValueError("Requirements document is empty")
@@ -96,7 +100,8 @@ def execute(root, request):
     extracted = artifacts.put(text, "research_extracted")
     metadata = {"source": request["source"], "final_url": request["final_url"], "mime_type": kind,
                 "encoding": encoding, "captured_at": now(), "extractor_version": "structured-text-v3",
-                "raw": raw_ref, "artifact": extracted, "hash": extracted["hash"]}
+                "raw": raw_ref, "artifact": extracted, "hash": extracted["hash"],
+                "section_index": artifacts.put(sections, "research_section_index")}
     return {**metadata, "manifest": artifacts.put(metadata, "research_manifest"), "excerpt": text}
 
 

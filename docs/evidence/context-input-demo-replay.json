@@ -1,0 +1,41 @@
+{
+  "scope": "Frozen demo research snapshots; final prompt compilation with actual selected attachment paths; no network refetch",
+  "original_prompt_characters": 1562609,
+  "prompt_characters": 57130,
+  "schema_characters": 1308,
+  "combined_characters": 58438,
+  "soft_target": 64000,
+  "attachments": 8,
+  "selected_sources": [
+    {
+      "url": "https://drafts.csswg.org/cssom-view/#the-mediaquerylist-interface",
+      "status": "selected",
+      "inline_characters": 13152,
+      "linked_sections": 1
+    },
+    {
+      "url": "https://react.dev/reference/react/useSyncExternalStore",
+      "status": "no_anchor",
+      "inline_characters": 0,
+      "linked_sections": 0
+    },
+    {
+      "url": "https://www.w3.org/WAI/ARIA/apg/patterns/button/",
+      "status": "complete_small_document",
+      "inline_characters": 10241,
+      "linked_sections": 0
+    },
+    {
+      "url": "https://www.w3.org/TR/wai-aria-1.2/#status",
+      "status": "selected",
+      "inline_characters": 2594,
+      "linked_sections": 1
+    },
+    {
+      "url": "https://playwright.dev/docs/api/class-page#page-set-viewport-size",
+      "status": "selected",
+      "inline_characters": 1791,
+      "linked_sections": 0
+    }
+  ]
+}

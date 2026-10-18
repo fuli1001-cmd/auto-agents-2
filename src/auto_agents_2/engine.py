@@ -28,6 +28,7 @@ from .environment import EnvironmentManager
 from .errors import (
     AA2Error,
     DependencyResolutionError,
+    IncompleteIteration,
     InvalidStructuredResponse,
     PatchRepairExhausted,
     PolicyViolation,
@@ -61,7 +62,7 @@ from .patch_repair import PatchRepairService
 from .plan_revision import materialize_plan
 from .planning import ready_batch, validate_plan
 from .profiles import ProjectProfile
-from .progress import observe_activity
+from .progress import observe_activity, safe_event
 from .providers import Agent, ProviderRouter
 from .recovery import (
     ExecutionContract,
@@ -74,7 +75,12 @@ from .recovery_controller import RecoveryController
 from .recovery_identity import invocation_contract
 from .recovery_policy import RecoveryPolicy
 from .replanning import browser_criteria, check_criteria
-from .requirements import capture, validate_coverage
+from .requirements import (
+    capture,
+    save_interactive_requirements,
+    validate_coverage,
+    validate_requirements_text,
+)
 from .research import ResearchService
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
@@ -133,13 +139,21 @@ class WorkflowEngine:
         self.recovery_policy = RecoveryPolicy(self)
         browser_environment(self.store.root / "cache/browsers")
 
-    async def start(self, source: str | None = None, provider: str | None = None, run_id: str | None = None, *, allow_resume: bool = True):
+    async def start(self, source: str | None = None, provider: str | None = None, run_id: str | None = None, *,
+                    allow_resume: bool = True, requirements_text: str | None = None):
+        if requirements_text is not None and (source is not None or run_id is not None):
+            raise AA2Error("需求文本不能与需求文件或恢复迭代 ID 同时提供")
+        new_iteration = source is not None or requirements_text is not None
         # Admission check precedes source reads and provider persistence.
-        if source is not None and self.store.current(unfinished=True):
-            from .errors import IncompleteIteration
+        if new_iteration and self.store.current(unfinished=True):
             raise IncompleteIteration(f"上一轮迭代尚未完成。请先执行：aa2 run --project {self.project}")
+        if requirements_text is not None:
+            validate_requirements_text(requirements_text)
         with file_lock(self.store.root / "controller.lock", blocking=False):
-            if not allow_resume and source is None:
+            # Another controller may have admitted a run since the first check.
+            if new_iteration and self.store.current(unfinished=True):
+                raise IncompleteIteration(f"上一轮迭代尚未完成。请先执行：aa2 run --project {self.project}")
+            if not allow_resume and not new_iteration:
                 attached = self.store.run(run_id) if run_id else self.store.current()
                 if attached and (attached["status"] == "PAUSED" or self.store.get(attached["id"], "control/cancel")):
                     return attached
@@ -149,6 +163,9 @@ class WorkflowEngine:
             self.resources.finish_pending()
             if provider:
                 self.config.resolve("clarify", provider)
+            if requirements_text is not None:
+                source = str(save_interactive_requirements(self.store.root, requirements_text))
+            if provider:
                 old, new = self.config.activate(provider)
                 self.store.event(None, "provider.changed", {"from": old, "to": new, "reason": "explicit"})
             if source is not None:
@@ -768,7 +785,7 @@ class WorkflowEngine:
         except ProviderError as exc:
             if not interactive_retry or stage == "recovery_diagnosis" and isinstance(exc, InvalidStructuredResponse):
                 raise
-            await self._ask(rid, f"provider/{key}", f"可用 provider 暂时无法完成任务：{exc}\n修复配置或认证后回复 retry。", digest(str(exc)))
+            await self._ask(rid, f"provider/{key}", f"可用 provider 暂时无法完成任务：{exc}\n处理上述问题后回复 retry。", digest(str(exc)))
             if isinstance(self.agent, ProviderRouter):
                 self.agent.grant_retry(rid, key)
             result = await self.agent.invoke(stage, context, schema, workspace, rid, key, fresh)
@@ -1332,6 +1349,7 @@ class WorkflowEngine:
             if not verification_only:
                 raise AA2Error("Verification-only plan no longer has verified satisfied coverage")
             self.store.checkpoint(rid, "develop/done", [])
+            safe_event(self.store, rid, "tasks.planned", {"total": 0, "done": 0})
         else:
             await self._develop(rid, work, plan, context)
         if not self.store.get(rid, "readme"):
@@ -1483,6 +1501,8 @@ class WorkflowEngine:
     async def _develop(self, rid, integration, plan, context):
         cfg = self.config.load()
         done = set(self.store.get(rid, "develop/done", []))
+        positions = {task.id: index for index, task in enumerate(plan.tasks, 1)}
+        safe_event(self.store, rid, "tasks.planned", {"total": len(plan.tasks), "done": len(done)})
         while len(done) < len(plan.tasks):
             if context.get("specification", {}).get("frontend"):
                 context["prototype_approval"] = await self._ensure_prototype_approval(rid, integration)
@@ -1496,6 +1516,11 @@ class WorkflowEngine:
                 raise Replan("plan", "Task graph cannot make progress; reconcile accepted task dependencies")
             base = git(integration, "rev-parse", "HEAD")
             from .task_batch import collect_batch
+            for task in batch:
+                safe_event(self.store, rid, "task.started", {
+                    "task": task.id, "title": task.title,
+                    "index": positions[task.id], "total": len(plan.tasks),
+                })
             outcomes = await collect_batch([self._task(rid, task, base, plan, context) for task in batch])
             failures = []
             for task, outcome in zip(batch, outcomes):

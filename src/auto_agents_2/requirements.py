@@ -13,11 +13,37 @@ from .artifacts import ArtifactStore
 from .errors import AA2Error, PolicyViolation
 from .http_body import ACQUISITION_TIMEOUT, acquisition_deadline, read_body
 from .models import IntakeResult
-from .util import contained
+from .safe_files import directory_fd, regular_exists, write_regular
+from .util import contained, identifier
 
 MAX_REQUIREMENTS_BYTES = 4 * 1024 * 1024
 BLOCK_TAGS = {"p", "div", "br", "li", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "tr", "table",
               "section", "article", "header", "footer", "main", "aside", "nav", "ul", "ol", "dl", "dt", "dd", "blockquote"}
+
+
+def validate_requirements_text(text: str) -> None:
+    if not text.strip():
+        raise AA2Error("需求内容不能为空，请继续输入。")
+    try:
+        size = len(text.encode("utf-8"))
+    except UnicodeError as exc:
+        raise AA2Error("需求包含无效的 UTF-8 字符，请重新输入。") from exc
+    if size > MAX_REQUIREMENTS_BYTES:
+        raise AA2Error("需求内容不能超过 4 MiB，请精简后重新输入。")
+
+
+def save_interactive_requirements(root: Path, text: str) -> Path:
+    """Keep a durable source before admission so capture can resume after interruption."""
+    validate_requirements_text(text)
+    path = root / "requirements" / (identifier("request") + ".md")
+    try:
+        with directory_fd(path.parent, create=True) as parent:
+            if regular_exists(parent, path.name):
+                raise AA2Error("需求保存路径已存在，保留原文件，尚未创建新迭代。")
+            write_regular(parent, path.name, text.encode("utf-8"))
+    except (OSError, ValueError) as exc:
+        raise AA2Error("无法保存本次需求，尚未创建新迭代。") from exc
+    return path
 
 
 class TextExtractor(HTMLParser):

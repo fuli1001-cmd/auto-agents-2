@@ -13,10 +13,10 @@ from pydantic import BaseModel
 from .artifacts import ArtifactStore
 from .capabilities import ReadChallengeResult, challenge_files, confirm_read
 from .config import ConfigStore
-from .diagnostics import references
+from .context_plan import CONTEXT_VERSION, ContextPlanner, PreparedContext, remap_references
 from .errors import ConfigurationError, InvalidStructuredResponse, PostCommitError, ProviderError
 from .evidence import invocation_identity
-from .materials import bundle
+from .materials import bundle, prepare_prompt
 from .models import Usage, strict_schema
 from .progress import capture_output
 from .prompts import PROMPT_VERSION, PromptCompiler
@@ -28,11 +28,14 @@ from .transports import BUILTIN_TRANSPORTS, CLITransport
 from .util import atomic_write, digest, identifier, scrub_text, write_json
 from .workspace import file_digest
 
+INPUT_LIMIT_DIAGNOSTIC = "provider 输入超过 CLI 长度上限"
+
 
 def diagnostic_summary(text: str) -> str:
     """Classify diagnostics without logging native configuration or credentials."""
     lower = text.lower()
     for needles, label in (
+        (("input_too_large", "input exceeds the maximum length"), INPUT_LIMIT_DIAGNOSTIC),
         (("429", "rate limit", "capacity", "overloaded"), "provider 限流或容量不足"),
         (("retry", "reconnect"), "provider 正在重试或重连"),
         (("connection", "disconnect", "503"), "provider 连接异常"),
@@ -263,12 +266,13 @@ class ProviderRouter:
             schema_file = root / "schema.json"
             write_json(schema_file, strict_schema(schema))
             original_workspace = workspace
+            prepared = self._prepare_context(stage, context, workspace, run_id, operation, input_identity)
+            context = prepared.payload
             workspace = create_view(workspace, root / "workspace", self.config.load().sensitive_paths)
             read_status = "uncertified"
             # Self-contained input always names the actually mounted public snapshot.
             context = json.loads(json.dumps(context))
             referenced = set(context.get("context_files", []))
-            visited = set()
             released = []
             artifact_store = ArtifactStore(self.store.root)
             def attach(value):
@@ -284,28 +288,11 @@ class ProviderRouter:
                             released.append(dict(value))
                             return
                         try:
-                            raw = artifact_store.bytes(value)
+                            artifact_store.bytes(value)
                         except (OSError, ValueError) as exc:
                             raise ProviderError("Referenced evidence artifact is unavailable") from exc
                         value["location"] = str(path)
                         referenced.add(str(path))
-                        if sha not in visited:
-                            visited.add(sha)
-                            # Exposure follows controller-registered edges, never arbitrary JSON in raw documents.
-                            with self.store.connect() as db:
-                                present = db.execute("SELECT 1 FROM sqlite_master WHERE name='artifact_edges'").fetchone()
-                                children = [row[0] for row in db.execute("SELECT child FROM artifact_edges WHERE parent=?", (sha,))] if present else []
-                            nested = list(references(json.loads(raw))) if children else []
-                            for child in children:
-                                entries = [ref for ref in nested if ref["hash"] == child]
-                                if entries:
-                                    for ref in entries:
-                                        attach(ref)
-                                else:
-                                    child_path = artifact_store.root / child[:2] / child
-                                    if not child_path.is_file():
-                                        raise ProviderError("Referenced evidence dependency is unavailable")
-                                    attach({"hash": child, "kind": "evidence_dependency", "bytes": child_path.stat().st_size})
                     for child in list(value.values()):
                         attach(child)
                 elif isinstance(value, list):
@@ -326,7 +313,9 @@ class ProviderRouter:
                         locate(child)
             locate(context)
             prompt, family = self.compiler.compile(stage, context, eff["model"], eff["prompt_profile"])
-            atomic_write(root / "prompt.txt", prompt)
+            prompt_file = root / "prompt.txt"
+            atomic_write(prompt_file, prompt)
+            delivery = prepare_prompt(prompt, prompt_file, getattr(transport, "max_prompt_characters", None))
             session_key = f"session/{operation}/{eff['provider']}/{VIEW_VERSION}/{PROMPT_VERSION}/{eff['fingerprint']}/{digest(self.config.load().sensitive_paths)}"
             previous = self.store.get(run_id, session_key) if not fresh else None
             assets = []
@@ -346,18 +335,33 @@ class ProviderRouter:
                         images(v)
 
             images(context)
+            assets = list(dict.fromkeys(assets))
             context_files = [Path(p) for p in context.get("context_files", [])]
             if any(not p.is_file() or not p.resolve().is_relative_to(self.store.root / "artifacts") for p in context_files):
                 raise ProviderError("Required context attachment cannot be delivered")
             image_read = eff["kind"] == "antigravity" and bool(assets)
-            if stage != "material_probe" and (context_files or image_read):
+            source_read = isinstance(context.get("project"), dict) and bool(context["project"].get("read_on_demand"))
+            if stage == "material_probe" and delivery.file:
+                raise ProviderError("Material read probe exceeds the native input limit")
+            if stage != "material_probe" and (context_files or image_read or source_read or delivery.file):
                 await self._ensure_material_read(eff, workspace, run_id, image_read)
                 read_status = "observed_read"
             material = bundle(prompt, strict_schema(schema), context_files, assets,
                               {"provider": eff["kind"], "profile": eff["fingerprint"], "view": VIEW_VERSION,
-                               "binary": file_digest(Path(eff["binary"])), "native_read_test": read_status})
+                               "binary": file_digest(Path(eff["binary"])), "native_read_test": read_status},
+                              delivery=delivery)
+            _, _, after_context = prompt.partition("<context>\n")
+            encoded_context, _, _ = after_context.rpartition("\n</context>")
+            material.update(context_version=prepared.version, purpose=prepared.purpose,
+                selections=prepared.selections,
+                context_characters=len(encoded_context),
+                instructions_characters=len(prompt) - len(encoded_context),
+                on_demand_bytes=sum(p.stat().st_size for p in context_files),
+                over_target_reason="Mandatory instructions, constraints or unclassified extension" if material["over_target"] else "",
+                usage_scope="Initial prompt/schema characters and available attachment bytes; actual native tokens are recorded separately")
             self.store.checkpoint(run_id, "materials/" + operation, material)
-            argv = transport.argv(eff, workspace, schema_file, out / "result.json", prompt, previous, assets, context_files)
+            argv = transport.argv(eff, workspace, schema_file, out / "result.json", delivery.text, previous,
+                                  assets, context_files)
             env = dict(eff["environment"])
             overlays = self._session_overlay(eff, run_id, operation + VIEW_VERSION + PROMPT_VERSION + eff["fingerprint"] + digest(self.config.load().sensitive_paths))
             secret_values = [v for k, v in env.items() if any(s in k.upper() for s in ("TOKEN", "SECRET", "API_KEY", "PASSWORD"))]
@@ -366,7 +370,7 @@ class ProviderRouter:
                              "effort": eff["effort"],
                              "repair_kind": ("dependencies" if context.get("feedback", {}).get("environment_error") else
                                              "checks" if any(c.get("exit_code") for c in context.get("feedback", {}).get("checks", [])) else ""),
-                             "task_title": context.get("task", {}).get("title", ""),
+                             "task_title": context["task"].get("title", "") if isinstance(context.get("task"), dict) else "",
                              "config_hash": eff["fingerprint"], "prompt_version": PROMPT_VERSION, "prompt_family": family})
             decoder, errors = self.decoders.get(eff["kind"], EventDecoder)(eff["kind"]), []
             process = None
@@ -442,7 +446,7 @@ class ProviderRouter:
                 readers = [asyncio.create_task(stdout()), asyncio.create_task(stderr())]
                 try:
                     if transport.stdin_prompt:
-                        process.stdin.write(transport.encode_prompt(prompt))
+                        process.stdin.write(transport.encode_prompt(delivery.text))
                         await process.stdin.drain()
                     process.stdin.close()
                     await asyncio.gather(*readers, process.wait())
@@ -451,9 +455,11 @@ class ProviderRouter:
                         reader.cancel()
                     await asyncio.gather(*readers, return_exceptions=True)
                 if process.returncode != 0 or decoder.error or not decoder.finished:
-                    message = decoder.error or "".join(errors)[-2000:]
-                    raise ProviderError(diagnostic_summary(message) + f"；未取得完整结果（退出码 {process.returncode}）",
-                        retryable=any(t in message.lower() for t in ("timeout", "timed out", "429", "503", "connection", "rate limit", "capacity", "overloaded")))
+                    message = decoder.error or "".join(errors)
+                    diagnostic = diagnostic_summary(message)
+                    raise ProviderError(diagnostic + f"；未取得完整结果（退出码 {process.returncode}）",
+                        retryable=diagnostic != INPUT_LIMIT_DIAGNOSTIC and any(t in message.lower() for t in
+                            ("timeout", "timed out", "429", "503", "connection", "rate limit", "capacity", "overloaded")))
                 from .safe_files import read_regular
                 try:
                     response = read_regular(out / "result.json", 32 * 1024 * 1024).decode("utf-8")
@@ -463,7 +469,7 @@ class ProviderRouter:
                     raise ProviderError("Unsafe or invalid structured response file") from exc
                 try:
                     validate(json.loads(response), strict_schema(schema))
-                    result = schema.model_validate_json(response)
+                    result = schema.model_validate(remap_references(json.loads(response), prepared.reference_map))
                 except (ValueError, ValidationError) as exc:
                     raise InvalidStructuredResponse("Invalid structured response: schema validation failed") from exc
                 artifact = ArtifactStore(self.store.root).put(result.model_dump(mode="json"), stage)
@@ -495,6 +501,22 @@ class ProviderRouter:
             if resource_id is not None:
                 from .cleanup import finalize_async
                 await finalize_async(lambda: resource_manager.release(resource_id), resource_manager.collect)
+
+    def _prepare_context(self, stage, context, workspace, run_id, operation, identity):
+        """Freeze presentation independently of semantic invocation/authorization identity."""
+        artifacts = ArtifactStore(self.store.root)
+        key = "presentation/" + operation + "/" + identity
+        saved = self.store.get(run_id, key)
+        if saved:
+            record = artifacts.json(saved["artifact"])
+            if record.get("version") != CONTEXT_VERSION:
+                raise ProviderError("Unsupported frozen input presentation; preserve the pending request")
+            return PreparedContext(**record)
+        prepared = ContextPlanner(artifacts, self.config.load().sensitive_paths).prepare(stage, context, workspace, operation, run_id=run_id)
+        ref = artifacts.put(prepared.record(), "prepared_context")
+        self.store.checkpoint(run_id, key, {"identity": identity, "artifact": ref})
+        # First dispatch and resumed dispatch use the same serialized key order.
+        return PreparedContext(**artifacts.json(ref))
 
     @staticmethod
     def _has_images(value):

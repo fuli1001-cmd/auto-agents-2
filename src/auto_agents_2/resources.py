@@ -142,7 +142,7 @@ class ResourceManager:
                 for key, value in receipt["evidence"].items():
                     if key.startswith("develop/task/"):
                         db.execute("UPDATE checkpoints SET data=? WHERE run_id=? AND key=?", (json.dumps(value), rid, key))
-                for prefix in ("candidate/", "invocation/", "provider-result/", "materials/", "environment/logs/"):
+                for prefix in ("candidate/", "invocation/", "provider-result/", "materials/", "presentation/", "environment/logs/"):
                     db.execute("DELETE FROM checkpoints WHERE run_id=? AND key LIKE ?", (rid, prefix + "%"))
                 for prefix in ("clarify_context", "replan_feedback", "readme", "delivery/journal"):
                     db.execute("DELETE FROM checkpoints WHERE run_id=? AND key=?", (rid, prefix))

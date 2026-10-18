@@ -91,6 +91,85 @@ def test_pause_menu_exits_cleanly_and_does_not_reuse_negative_answer(tmp_path):
         assert db.execute("SELECT COUNT(*) FROM questions WHERE answer='n' AND superseded=1").fetchone()[0] == 2
 
 
+@pytest.mark.parametrize("action", ["decline", "choice_interrupt", "text_interrupt", "submit", "submitted_interrupt"])
+def test_completed_iteration_prompt_in_real_terminal(tmp_path, action):
+    script = '''
+import sys
+from pathlib import Path
+from auto_agents_2 import cli
+from auto_agents_2.config import ConfigStore
+from auto_agents_2.requirements import capture
+from auto_agents_2.store import Store
+project = Path(sys.argv[1])
+ConfigStore(project).initialize()
+store = Store(project)
+previous = store.admit("previous.md", {})
+store.update(previous["id"], status="SUCCEEDED", outcome="DELIVERED")
+async def finish(self, rid):
+    raw = await capture(self.store.run(rid)["data"]["source"], self.artifacts)
+    self.store.checkpoint(rid, "capture", raw)
+    if sys.argv[2] == "submitted_interrupt":
+        await self._ask(rid, "clarify/0", "等待新迭代澄清", "v1")
+    self.store.update(rid, status="SUCCEEDED", outcome="DELIVERED")
+    return self.store.run(rid)
+cli.WorkflowEngine._execute = finish
+cli.run(project=project, requirements=None, provider=None)
+'''
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 160, 0, 0))
+    process = subprocess.Popen([sys.executable, "-c", script, str(tmp_path), action],
+                               stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+    os.close(slave)
+    output = bytearray()
+    step = 0
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if select.select([master], [], [], 0.1)[0]:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output.extend(chunk)
+            text = output.decode(errors="replace")
+            if step == 0 and "请选择 [y/n]" in text:
+                assert text.index("如何运行项目") < text.index("是否开始新的迭代")
+                os.write(master, b"n\r" if action == "decline" else b"\x03" if action == "choice_interrupt" else b"y\r")
+                step = 1
+            elif step == 1 and "Ctrl+D" in text:
+                os.write(master, b"draft\x03" if action == "text_interrupt" else "需求第一行\r需求第二行\x04".encode())
+                step = 2
+            elif step == 2 and action == "submitted_interrupt" and "等待新迭代澄清" in text:
+                os.write(master, b"\x03")
+                step = 3
+            if process.poll() is not None:
+                break
+        process.wait(timeout=3)
+        rendered = output.decode(errors="replace")
+        assert process.returncode == 0 and step, rendered
+        assert rendered.count("是否开始新的迭代") == 1
+        store = Store(tmp_path)
+        if action in {"submit", "submitted_interrupt"}:
+            current = store.current()
+            from pathlib import Path
+            assert Path(current["data"]["source"]).read_text() == "需求第一行\n需求第二行"
+            assert store.get(current["id"], "capture")
+            assert current["status"] == ("PAUSED" if action == "submitted_interrupt" else "SUCCEEDED")
+            assert ("已暂停并保存检查点" in rendered) == (action == "submitted_interrupt")
+            assert "未创建新迭代" not in rendered
+        else:
+            assert "已退出，未创建新迭代" in rendered and "已暂停" not in rendered
+            assert len(store.successful()) == 1
+            assert not (store.root / "requirements").exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        os.close(master)
+
+
 @pytest.mark.parametrize("repetitions", [30, 1000])
 def test_long_chinese_question_and_complete_scope_are_visible_in_a_real_terminal(repetitions):
     script = '''

@@ -40,6 +40,27 @@ async def test_choice_rejects_empty_words_and_out_of_range_then_accepts_number()
             await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.parametrize("answer", ["y", "n"])
+async def test_provider_retry_empty_enter_is_not_an_answer_and_valid_choice_still_works(answer):
+    with create_pipe_input() as pipe:
+        session = PromptSession(input=pipe, output=DummyOutput())
+        question = {"prompt": "provider 输入超过 CLI 长度上限\n处理上述问题后确认重试。",
+                    "interaction": choice_spec(["已处理，继续", "暂停，稍后续跑"], yes_no=True)}
+        task = asyncio.create_task(prompt_answer(session, question))
+        try:
+            await eventually(lambda: session.app.is_running)
+            assert session.default_buffer.validation_error is None
+            pipe.send_text("\r")
+            await eventually(lambda: session.default_buffer.validation_error is not None)
+            assert session.default_buffer.validation_error.message == "请输入 y/n 中的一个选项。"
+            assert not task.done()
+            pipe.send_text(answer + "\r")
+            assert await asyncio.wait_for(task, 3) == answer
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_multiline_editing_paste_and_ctrl_d_submission():
     with create_pipe_input() as pipe:
         session = PromptSession(input=pipe, output=DummyOutput())

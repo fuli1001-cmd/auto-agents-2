@@ -89,7 +89,6 @@ def test_old_config_inherits_roles_and_automation_without_overwriting_profiles(t
 
 
 def test_new_defaults_preserve_existing_worker_invocation_receipts(tmp_path):
-    from auto_agents_2.prompts import PROMPT_VERSION
     from auto_agents_2.readview import VIEW_VERSION
     config, _ = configured(tmp_path)
     cfg = config.load()
@@ -97,7 +96,9 @@ def test_new_defaults_preserve_existing_worker_invocation_receipts(tmp_path):
     original.pop("automation")
     original["efforts"].pop("decision")
     original["efforts"].pop("recovery_diagnosis")
-    old = digest(["invocation-v4", PROMPT_VERSION, VIEW_VERSION, "implement", {"input": 1},
+    # Freeze the pre-presentation-split value: changing rendering must not
+    # invalidate an already committed worker response.
+    old = digest(["invocation-v4", "2026-10-16.2", VIEW_VERSION, "implement", {"input": 1},
                   ImplementationResult.model_json_schema(), "source", original, None])
     assert invocation_identity("implement", {"input": 1}, ImplementationResult, tmp_path, cfg, "source") == old
 

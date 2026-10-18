@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import time
 from dataclasses import dataclass
 
@@ -15,6 +16,26 @@ STAGE_LABELS = {"clarify": "需求澄清", "coverage_review": "需求覆盖审�
                 "prototype": "生成界面原型", "design": "架构设计", "plan": "任务规划", "implement": "开发实现",
                 "review": "独立审查", "verify": "最终验收", "readme": "更新文档",
                 "recovery_diagnosis": "故障独立诊断", "decision": "自动决策"}
+
+
+def runtime_instructions(project, preview=None, *, runtime_ready=True):
+    """Display the delivered environment and preview contract without running commands."""
+    lines = ["如何运行项目（Bash）：", f"cd {shlex.quote(str(project))}"]
+    if runtime_ready:
+        lines.append("source .aa2/runtime.sh")
+        if preview:
+            lines.append("\n启动已验收的应用预览（示例端口 8000，可自行修改）：")
+            if preview.command.cwd != ".":
+                lines.append(f"cd {shlex.quote(preview.command.cwd)}")
+            lines.append(shlex.join([arg.replace("{port}", "8000") for arg in preview.command.argv]))
+            lines.append("启动后访问：http://127.0.0.1:8000" + preview.routes[0])
+            lines.append("按 Ctrl+C 停止预览。预览可能使用临时数据；日常运行和数据保存方式请按 README.md 的说明。")
+        else:
+            lines.append("随后执行 README.md 中的项目启动命令。")
+    else:
+        lines.append("未找到已准备的环境入口，请按 README.md 的安装与启动说明运行项目。")
+    lines.append(f"运行文档：{project / 'README.md'}")
+    return "\n".join(lines)
 
 
 def agent_label(data):
@@ -119,6 +140,10 @@ class ProgressDisplay:
                 for option in data.get("interaction", {}).get("options", []):
                     self.message(f"{option['key']}. {option['label']}")
                 self.message(data["reply_hint"])
+        elif kind == "tasks.planned":
+            self.message(f"任务计划｜共 {data['total']} 个任务｜已验收 {data['done']}/{data['total']}")
+        elif kind == "task.started":
+            self.message(f"正在执行第 {data['index']}/{data['total']} 个任务｜{data['task']}｜{data['title']}")
         elif kind == "task.integrated":
             self.message(f"任务验收 {data['done']}/{data['total']}")
         elif kind == "task.baseline_refreshed":

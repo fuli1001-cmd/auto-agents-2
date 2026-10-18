@@ -1,0 +1,635 @@
+{
+  "scope": "Five paired frozen fixtures; not universal quality equivalence",
+  "passed": true,
+  "project": "/tmp/aa2-context-live-20261018-b",
+  "observations": [
+    {
+      "case": "research",
+      "variant": "before",
+      "correct": true,
+      "model": "gpt-6-astra",
+      "effort": "medium",
+      "profile_identity": "499fdd41e24e804829db98dbb130d11458f234fda5e590c918382c4aa1893117",
+      "fixture_identity": "bbc8d914047b4f649b73fc603af571f61d1e0fc2819e3db906da9a865bdab37c",
+      "prompt_characters": 132115,
+      "seconds": 58.66,
+      "usage_including_probe": {
+        "input_tokens": 93198,
+        "output_tokens": 487,
+        "cached_tokens": 32000,
+        "reasoning_tokens": 49,
+        "total_tokens": 93685
+      },
+      "main_usage": {
+        "input_tokens": 41208,
+        "output_tokens": 224,
+        "cached_tokens": 0,
+        "reasoning_tokens": 21,
+        "total_tokens": 41432,
+        "complete": true
+      },
+      "usage_complete": true,
+      "response": {
+        "approved": false,
+        "summary": "The frozen version 1 fixture contradicts the authorization claim.",
+        "findings": [
+          {
+            "severity": "major",
+            "location": "retrieved_sources[0].claim \u2014 https://docs.example/fixture#exports",
+            "description": "export:read alone does not authorize an export; project:member is also required.",
+            "evidence": "The Exports section states: \u201cExports require export:read. Additional authorization is defined in Membership (#membership).\u201d Membership states: \u201cEvery export also requires project:member. Neither permission alone is sufficient.\u201d The document identifies itself as Fixture API version 1.",
+            "resolution": "Correct the claim to require both export:read and project:member, citing both sections. Describe this as documented behavior from the frozen owner-supplied fixture; no live API test evidence was supplied."
+          }
+        ]
+      }
+    },
+    {
+      "case": "implementation",
+      "variant": "before",
+      "correct": true,
+      "model": "gpt-6-astra",
+      "effort": "high",
+      "profile_identity": "ccac60bab7183a73e740e0cf603239908f1ab094abe190d569f784c6dec1436d",
+      "fixture_identity": "1c25cbaf6865c4fd3fbaa4f405273de144ede1753f49718831fb397b4a1b5034",
+      "prompt_characters": 104022,
+      "seconds": 24.95,
+      "usage_including_probe": {
+        "input_tokens": 32102,
+        "output_tokens": 176,
+        "cached_tokens": 0,
+        "reasoning_tokens": 30,
+        "total_tokens": 32278
+      },
+      "main_usage": {
+        "input_tokens": 32102,
+        "output_tokens": 176,
+        "cached_tokens": 0,
+        "reasoning_tokens": 30,
+        "total_tokens": 32278,
+        "complete": true
+      },
+      "usage_complete": true,
+      "response": {
+        "summary": "T1/R1: Replace subtraction with addition while preserving add(a, b). This yields 5 for (2, 3) and 0 for (-2, 2). Tests were not run; no test files added because only calc.py is in scope.",
+        "changes": [
+          {
+            "path": "calc.py",
+            "operation": "replace",
+            "content": "    return a + b\n",
+            "old_text": "    return a - b\n"
+          }
+        ],
+        "replan_stage": "",
+        "replan_reason": "",
+        "recovery_request": null
+      }
+    },
+    {
+      "case": "task_review",
+      "variant": "before",
+      "correct": true,
+      "model": "gpt-6-astra",
+      "effort": "medium",
+      "profile_identity": "499fdd41e24e804829db98dbb130d11458f234fda5e590c918382c4aa1893117",
+      "fixture_identity": "a687341271645d0392cc75154fefa0d573a4b417868c96a519bfe8aa9317bbbc",
+      "prompt_characters": 185402,
+      "seconds": 30.85,
+      "usage_including_probe": {
+        "input_tokens": 116015,
+        "output_tokens": 245,
+        "cached_tokens": 57728,
+        "reasoning_tokens": 0,
+        "total_tokens": 116260
+      },
+      "main_usage": {
+        "input_tokens": 116015,
+        "output_tokens": 245,
+        "cached_tokens": 57728,
+        "reasoning_tokens": 0,
+        "total_tokens": 116260,
+        "complete": true
+      },
+      "usage_complete": true,
+      "response": {
+        "approved": false,
+        "summary": "T1 fails R1: the actual implementation subtracts instead of adding.",
+        "findings": [
+          {
+            "severity": "major",
+            "location": "calc.py:2",
+            "description": "add(a, b) returns the difference, violating both task acceptance examples.",
+            "evidence": "Actual source contains `return a - b`. The supplied pytest result reports process_exit_code=1 and case-1999 failing: add(2,3) expected 5, actual -1. The implementation also yields -4 for add(-2,2), rather than 0.",
+            "resolution": "Replace `return a - b` with `return a + b`, preserving the public function name, then obtain fresh independently executed passing test evidence."
+          }
+        ]
+      }
+    },
+    {
+      "case": "task_review",
+      "variant": "after",
+      "correct": true,
+      "model": "gpt-6-astra",
+      "effort": "medium",
+      "profile_identity": "499fdd41e24e804829db98dbb130d11458f234fda5e590c918382c4aa1893117",
+      "fixture_identity": "a687341271645d0392cc75154fefa0d573a4b417868c96a519bfe8aa9317bbbc",
+      "prompt_characters": 12336,
+      "seconds": 32.34,
+      "usage_including_probe": {
+        "input_tokens": 34901,
+        "output_tokens": 360,
+        "cached_tokens": 17152,
+        "reasoning_tokens": 65,
+        "total_tokens": 35261
+      },
+      "main_usage": {
+        "input_tokens": 34901,
+        "output_tokens": 360,
+        "cached_tokens": 17152,
+        "reasoning_tokens": 65,
+        "total_tokens": 35261,
+        "complete": true
+      },
+      "usage_complete": true,
+      "response": {
+        "approved": false,
+        "summary": "T1 is incomplete: the actual source subtracts instead of adding. No tests were executed during this review.",
+        "findings": [
+          {
+            "severity": "major",
+            "location": "calc.py:2",
+            "description": "add(a, b) returns a - b, violating R1 and both T1 acceptance examples.",
+            "evidence": "Actual source contains `return a - b`. This yields -1 for add(2,3) and -4 for add(-2,2), instead of 5 and 0. checks[0] independently records case-1999 failing with actual -1 and process_exit_code 1. specification.document requires addition without changing public function names.",
+            "resolution": "Replace the subtraction with `return a + b`, preserving the function name and signature. Obtain fresh independently executed test evidence before approval."
+          }
+        ]
+      }
+    },
+    {
+      "case": "research",
+      "variant": "after",
+      "correct": true,
+      "revision": "inline-short-text",
+      "model": "gpt-6-astra",
+      "effort": "medium",
+      "profile_identity": "bcd9167be8a8f495efd91223093e55f8de0004c267fc94874dd01ee438f8f6ef",
+      "fixture_identity": "bbc8d914047b4f649b73fc603af571f61d1e0fc2819e3db906da9a865bdab37c",
+      "prompt_characters": 6780,
+      "seconds": 63.6,
+      "usage_including_probe": {
+        "input_tokens": 77467,
+        "output_tokens": 591,
+        "cached_tokens": 45184,
+        "reasoning_tokens": 27,
+        "total_tokens": 78058
+      },
+      "main_usage": {
+        "input_tokens": 32791,
+        "output_tokens": 399,
+        "cached_tokens": 15872,
+        "reasoning_tokens": 0,
+        "total_tokens": 33190,
+        "complete": true
+      },
+      "usage_complete": true,
+      "response": {
+        "approved": false,
+        "summary": "The version 1 fixture contradicts the claim. Documentation review only; no live API tests were supplied or executed.",
+        "findings": [
+          {
+            "severity": "major",
+            "location": "retrieved_sources[0].claim",
+            "description": "The claim incorrectly treats export:read as sufficient authorization.",
+            "evidence": "retrieved_sources[0], version 1, #exports requires export:read and explicitly delegates additional authorization to #membership. That section states: \u201cEvery export also requires project:member. Neither permission alone is sufficient.\u201d",
+            "resolution": "Correct the claim to require both export:read and project:member, citing both sections of the frozen fixture."
+          }
+        ]
+      }
+    },
+    {
+      "case": "implementation",
+      "variant": "after",
+      "correct": true,
+      "revision": "inline-short-text",
+      "model": "gpt-6-astra",
+      "effort": "high",
+      "profile_identity": "cdaabc835096d9af999be6dd7619a8856e47d3d1c80a60cb9ad00d48fa795c22",
+      "fixture_identity": "1c25cbaf6865c4fd3fbaa4f405273de144ede1753f49718831fb397b4a1b5034",
+      "prompt_characters": 10779,
+      "seconds": 29.75,
+      "usage_including_probe": {
+        "input_tokens": 16760,
+        "output_tokens": 146,
+        "cached_tokens": 0,
+        "reasoning_tokens": 32,
+        "total_tokens": 16906
+      },
+      "main_usage": {
+        "input_tokens": 16760,
+        "output_tokens": 146,
+        "cached_tokens": 0,
+        "reasoning_tokens": 32,
+        "total_tokens": 16906,
+        "complete": true
+      },
+      "usage_complete": true,
+      "response": {
+        "summary": "Fixes T1/R1 by returning the sum, preserving add(a, b). The proposed expression satisfies add(2,3)==5 and add(-2,2)==0 by inspection. Tests were not executed; no test files are within the allowed scope.",
+        "changes": [
+          {
+            "path": "calc.py",
+            "operation": "replace",
+            "content": "    return a + b\n",
+            "old_text": "    return a - b\n"
+          }
+        ],
+        "replan_stage": "",
+        "replan_reason": "",
+        "recovery_request": null
+      }
+    },
+    {
+      "case": "decision",
+      "variant": "before",
+      "correct": true,
+      "revision": "initial",
+      "model": "gpt-6-astra",
+      "effort": "high",
+      "profile_identity": "516fd21293531d58861a54539b955088194f01d2098d194dc076371c3b30d795",
+      "fixture_identity": "455ea92195d9385bb01b65e26667f8f8854e2cf5fff9fedef8ba3edf999a6cfa",
+      "prompt_characters": 88817,
+      "seconds": 24.05,
+      "new_usage_during_evaluation": {
+        "input_tokens": 26510,
+        "output_tokens": 193,
+        "cached_tokens": 0,
+        "reasoning_tokens": 46,
+        "total_tokens": 26703
+      },
+      "main_usage": {
+        "input_tokens": 52222,
+        "output_tokens": 390,
+        "cached_tokens": 0,
+        "reasoning_tokens": 82,
+        "total_tokens": 52612,
+        "complete": true
+      },
+      "format_corrections": 1,
+      "usage_complete": true,
+      "response": {
+        "action": "approve",
+        "reason": "One recheck directly addresses the missing machine report. The process exited 0 and no product failure was observed, but acceptance remains unverified. The 16 prior actions were diagnoses of unrelated environment issues, not repeated attempts to collect this report.",
+        "evidence_refs": [
+          "failure",
+          "history.by_action",
+          "history.recent"
+        ],
+        "answers": [],
+        "selected_action": "recheck",
+        "expected_result": "The existing command produces a fresh machine report for controller validation, or records a report-collection failure. Exit status alone does not establish acceptance."
+      }
+    },
+    {
+      "case": "visual_review",
+      "variant": "before",
+      "correct": true,
+      "revision": "initial",
+      "model": "gpt-6-astra",
+      "effort": "medium",
+      "profile_identity": "64f3eca4d491aa4ff2fd1a3ae1f390f7be38b6b4ab289605ed18c330c7376d63",
+      "fixture_identity": "5d8e55b0002f87a6a12b1cc763b55383fcad397e24d8a746c38ef5ebe5f6ad7b",
+      "prompt_characters": 9863,
+      "seconds": 24.26,
+      "new_usage_during_evaluation": {
+        "input_tokens": 16826,
+        "output_tokens": 164,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 16990
+      },
+      "main_usage": {
+        "input_tokens": 16826,
+        "output_tokens": 164,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 16990,
+        "complete": true
+      },
+      "format_corrections": 0,
+      "usage_complete": true,
+      "response": {
+        "approved": false,
+        "summary": "The supplied screenshot fails UI1: the primary action is destructive and has the wrong label and color.",
+        "findings": [
+          {
+            "severity": "major",
+            "location": "Route /, primary button beneath \u201cDraft editor\u201d",
+            "description": "The visible primary action is a red \u201cDelete all\u201d button instead of the required blue \u201cSave draft\u201d button.",
+            "evidence": "The supplied screenshot shows a single red button labelled \u201cDelete all\u201d, violating UI1 and its acceptance criterion \u201cNo destructive primary action\u201d.",
+            "resolution": "Replace the destructive primary action with a blue button labelled \u201cSave draft\u201d and provide updated browser evidence."
+          }
+        ]
+      }
+    },
+    {
+      "case": "visual_review",
+      "variant": "after",
+      "correct": true,
+      "revision": "initial",
+      "model": "gpt-6-astra",
+      "effort": "medium",
+      "profile_identity": "64f3eca4d491aa4ff2fd1a3ae1f390f7be38b6b4ab289605ed18c330c7376d63",
+      "fixture_identity": "5d8e55b0002f87a6a12b1cc763b55383fcad397e24d8a746c38ef5ebe5f6ad7b",
+      "prompt_characters": 6115,
+      "seconds": 23.78,
+      "new_usage_during_evaluation": {
+        "input_tokens": 16144,
+        "output_tokens": 142,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 16286
+      },
+      "main_usage": {
+        "input_tokens": 16144,
+        "output_tokens": 142,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 16286,
+        "complete": true
+      },
+      "format_corrections": 0,
+      "usage_complete": true,
+      "response": {
+        "approved": false,
+        "summary": "The supplied prototype screenshot fails UI1.",
+        "findings": [
+          {
+            "severity": "major",
+            "location": "Route / \u2014 primary action below \u201cDraft editor\u201d",
+            "description": "The primary action is a red \u201cDelete all\u201d button instead of the required blue \u201cSave draft\u201d button, violating the acceptance criterion prohibiting a destructive primary action.",
+            "evidence": "The supplied browser screenshot visibly shows a red button labelled \u201cDelete all\u201d; UI1 requires a blue button labelled \u201cSave draft\u201d and \u201cNo destructive primary action.\u201d",
+            "resolution": "Replace the destructive primary action with a blue \u201cSave draft\u201d button and provide fresh browser evidence for review."
+          }
+        ]
+      }
+    },
+    {
+      "case": "decision",
+      "variant": "after",
+      "correct": true,
+      "revision": "shared-history",
+      "model": "gpt-6-astra",
+      "effort": "high",
+      "profile_identity": "3598d48c16d4eb6c2f1759177e7884845354898a4639426d83e524079a50482c",
+      "fixture_identity": "455ea92195d9385bb01b65e26667f8f8854e2cf5fff9fedef8ba3edf999a6cfa",
+      "prompt_characters": 16672,
+      "seconds": 27.54,
+      "new_usage_during_evaluation": {
+        "input_tokens": 17494,
+        "output_tokens": 202,
+        "cached_tokens": 0,
+        "reasoning_tokens": 51,
+        "total_tokens": 17696
+      },
+      "main_usage": {
+        "input_tokens": 17494,
+        "output_tokens": 202,
+        "cached_tokens": 0,
+        "reasoning_tokens": 51,
+        "total_tokens": 17696,
+        "complete": true
+      },
+      "format_corrections": 0,
+      "usage_complete": true,
+      "response": {
+        "action": "approve",
+        "reason": "Recheck directly targets the missing machine report. The previous 16 diagnoses concerned unrelated environment investigation; collecting the report provides new decision evidence. Exit code 0 alone does not establish test success.",
+        "evidence_refs": [
+          "decision_request.evidence.failure",
+          "history.recent[0]",
+          "decision_request.evidence.history.by_action"
+        ],
+        "answers": [],
+        "selected_action": "recheck",
+        "expected_result": "The existing command produces a complete, readable machine report with explicit test outcomes. If the report remains missing, verification remains unresolved; this approval does not establish acceptance."
+      }
+    }
+  ],
+  "errors": [
+    {
+      "type": "AttributeError"
+    },
+    {
+      "type": "DecisionValidationError"
+    },
+    {
+      "type": "DecisionValidationError"
+    }
+  ],
+  "total_usage": {
+    "input_tokens": 856314,
+    "output_tokens": 5651,
+    "cached_tokens": 381696,
+    "reasoning_tokens": 446,
+    "total_tokens": 861965,
+    "complete": true
+  },
+  "superseded_observations": [
+    {
+      "case": "research",
+      "variant": "after",
+      "correct": true,
+      "model": "gpt-6-astra",
+      "effort": "medium",
+      "profile_identity": "499fdd41e24e804829db98dbb130d11458f234fda5e590c918382c4aa1893117",
+      "fixture_identity": "bbc8d914047b4f649b73fc603af571f61d1e0fc2819e3db906da9a865bdab37c",
+      "prompt_characters": 6354,
+      "seconds": 30.16,
+      "usage_including_probe": {
+        "input_tokens": 48985,
+        "output_tokens": 404,
+        "cached_tokens": 32000,
+        "reasoning_tokens": 0,
+        "total_tokens": 49389
+      },
+      "main_usage": {
+        "input_tokens": 48985,
+        "output_tokens": 404,
+        "cached_tokens": 32000,
+        "reasoning_tokens": 0,
+        "total_tokens": 49389,
+        "complete": true
+      },
+      "usage_complete": true,
+      "response": {
+        "approved": false,
+        "summary": "The frozen version 1 documentation contradicts the claim. Exports require both permissions; no live API test evidence was supplied.",
+        "findings": [
+          {
+            "severity": "major",
+            "location": "retrieved_sources[0], claim; #exports and #membership",
+            "description": "The claim that export:read alone authorizes an export omits a mandatory membership permission.",
+            "evidence": "The document identifies itself as Fixture API version 1. Its Exports section explicitly delegates additional authorization to Membership, which states: \u201cEvery export also requires project:member. Neither permission alone is sufficient.\u201d",
+            "resolution": "Correct the claim to require both export:read and project:member, citing both sections of retrieved_sources[0]. Describe this as documented behavior, not live API verification."
+          }
+        ]
+      }
+    },
+    {
+      "case": "implementation",
+      "variant": "after",
+      "correct": true,
+      "model": "gpt-6-astra",
+      "effort": "high",
+      "profile_identity": "ccac60bab7183a73e740e0cf603239908f1ab094abe190d569f784c6dec1436d",
+      "fixture_identity": "1c25cbaf6865c4fd3fbaa4f405273de144ede1753f49718831fb397b4a1b5034",
+      "prompt_characters": 11997,
+      "seconds": 69.87,
+      "usage_including_probe": {
+        "input_tokens": 134442,
+        "output_tokens": 720,
+        "cached_tokens": 82176,
+        "reasoning_tokens": 62,
+        "total_tokens": 135162
+      },
+      "main_usage": {
+        "input_tokens": 71124,
+        "output_tokens": 378,
+        "cached_tokens": 43648,
+        "reasoning_tokens": 19,
+        "total_tokens": 71502,
+        "complete": true
+      },
+      "usage_complete": true,
+      "response": {
+        "summary": "T1: Replace subtraction with addition, preserving the public function name as required by specification.document and R1 (specification.requirements[0]). Only calc.py is in scope. Tests were not executed; controller verification should check add(2,3)==5 and add(-2,2)==0.",
+        "changes": [
+          {
+            "path": "calc.py",
+            "operation": "replace",
+            "content": "    return a + b\n",
+            "old_text": "    return a - b\n"
+          }
+        ],
+        "replan_stage": "",
+        "replan_reason": "",
+        "recovery_request": null
+      }
+    },
+    {
+      "case": "decision",
+      "variant": "after",
+      "revision": "initial",
+      "correct": false,
+      "main_usage": {
+        "input_tokens": 53778,
+        "output_tokens": 595,
+        "cached_tokens": 34176,
+        "reasoning_tokens": 0,
+        "total_tokens": 54373,
+        "complete": true
+      },
+      "response": {
+        "action": "approve",
+        "answers": [],
+        "evidence_refs": [
+          "history.recent",
+          "decision_request.evidence.failure",
+          "decision_request.scope.candidates.recheck"
+        ],
+        "expected_result": "Run the existing command once and collect its machine report. Verify that the report is present, readable, and contains the required check results. If it remains missing, record that evidence failure; do not infer success from the process exit code.",
+        "reason": "The 16 prior diagnoses concern unrelated environment investigation; they do not establish repeated failure of report collection. One recheck using the existing command has useful information value at the bounded cost of one run: it directly targets the missing report. Exit code 0 alone does not establish acceptance.",
+        "selected_action": "recheck"
+      }
+    },
+    {
+      "case": "decision",
+      "variant": "after",
+      "correct": true,
+      "revision": "inline-short-text",
+      "model": "gpt-6-astra",
+      "effort": "high",
+      "profile_identity": "cdaabc835096d9af999be6dd7619a8856e47d3d1c80a60cb9ad00d48fa795c22",
+      "fixture_identity": "455ea92195d9385bb01b65e26667f8f8854e2cf5fff9fedef8ba3edf999a6cfa",
+      "prompt_characters": 11305,
+      "seconds": 64.99,
+      "usage_including_probe": {
+        "input_tokens": 90952,
+        "output_tokens": 782,
+        "cached_tokens": 49280,
+        "reasoning_tokens": 36,
+        "total_tokens": 91734
+      },
+      "main_usage": {
+        "input_tokens": 54729,
+        "output_tokens": 599,
+        "cached_tokens": 34688,
+        "reasoning_tokens": 11,
+        "total_tokens": 55328,
+        "complete": true
+      },
+      "usage_complete": true,
+      "response": {
+        "action": "approve",
+        "reason": "The 16 prior diagnoses concern unrelated environment investigation; they do not establish repeated failure of report collection. The current failure is a missing report despite exit code 0, with no product failure observed. One recheck using the existing command has useful information value and bounded cost; this approves evidence collection only, not acceptance.",
+        "evidence_refs": [
+          "decision_request.evidence.failure",
+          "history.recent"
+        ],
+        "answers": [],
+        "selected_action": "recheck",
+        "expected_result": "Run the existing check once and collect its full machine report and process result. Verify report presence, readability, and reported outcomes; if collection fails again, record that failure explicitly. Exit code 0 alone cannot establish success."
+      }
+    }
+  ],
+  "format_rejections": [
+    {
+      "case": "decision",
+      "variant": "before",
+      "feedback": {
+        "code": "unknown_evidence",
+        "field": "evidence_refs",
+        "message": "Cite only supplied evidence paths, artifact hashes, controller-indexed references or existing unverified proposal paths; a controller root name is also valid.",
+        "unresolved_indexes": [
+          2
+        ],
+        "allowed_roots": [
+          "consumption",
+          "failure",
+          "history"
+        ]
+      },
+      "response": {
+        "action": "approve",
+        "reason": "The process exited 0, but the required report is missing and no product failure was observed. The 16 prior actions were unrelated diagnoses, not failed rechecks. One recheck using the existing command has clear information value without changing product code.",
+        "evidence_refs": [
+          "decision_request.evidence.failure",
+          "decision_request.evidence.history",
+          "decision_request.scope.candidates.recheck"
+        ],
+        "answers": [],
+        "selected_action": "recheck",
+        "expected_result": "Collect and validate a fresh machine-readable test report with the existing command, or record a concrete collection failure. Acceptance remains unresolved until valid test evidence is available."
+      },
+      "usage": {
+        "input_tokens": 25712,
+        "output_tokens": 197,
+        "cached_tokens": 0,
+        "reasoning_tokens": 36,
+        "total_tokens": 25909,
+        "complete": true
+      }
+    }
+  ],
+  "actual_input_tokens": {
+    "before": 258373,
+    "after": 118090
+  },
+  "actual_calls": {
+    "main": 15,
+    "read_probes": 5
+  },
+  "runs": [
+    "run_1062eb647d1d4677",
+    "run_9af131da16194ad4"
+  ]
+}

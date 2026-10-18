@@ -9,6 +9,7 @@ from typing import Protocol
 class CLITransport(Protocol):
     stdin_prompt: bool
     auth_patterns: tuple[str, ...]
+    max_prompt_characters: int | None
 
     def native_home(self, environment: dict) -> Path: ...
     def encode_prompt(self, prompt: str) -> bytes: ...
@@ -19,6 +20,8 @@ class CLITransport(Protocol):
 class CodexTransport:
     stdin_prompt = True
     auth_patterns = ("*.toml", "auth.json", "*.config.toml")
+    # Codex turn/start rejects longer inputs before the model is invoked.
+    max_prompt_characters = 1048576
 
     def native_home(self, environment):
         return Path(environment.get("CODEX_HOME", "~/.codex")).expanduser()
@@ -47,6 +50,7 @@ class CodexTransport:
 class AntigravityTransport:
     stdin_prompt = True
     auth_patterns = ("*.json", "antigravity-cli/settings.json", "antigravity-cli/antigravity-oauth-token", "config/*.json")
+    max_prompt_characters = None
 
     def native_home(self, environment):
         return Path("~/.gemini").expanduser()
