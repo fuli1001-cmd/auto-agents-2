@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import json
 import sys
@@ -111,6 +112,72 @@ async def test_failed_read_probe_never_dispatches_large_request_or_saves_accepta
     assert [s["stage"] for s in starts] == ["material_probe"]
     assert store.get(rid, "invocation/large") is None
     assert store.get(rid, "provider-result/large") is None
+    assert not list((store.root / "processes").glob("*.json"))
+    assert not list((store.root / "attempts" / rid).iterdir())
+
+
+@pytest.mark.parametrize(("feedback", "repair_kind"), [
+    pytest.param({"checks": [{"exit_code": 1}]}, "checks", id="failed"),
+    pytest.param({"checks": [{"exit_code": 0}]}, "", id="passed"),
+    pytest.param({"checks": [{"exit_code": 1}], "environment_error": "fixture dependency failure"},
+                 "dependencies", id="environment"),
+])
+async def test_review_resumes_with_referenced_check_feedback(tmp_path, monkeypatch, feedback, repair_kind):
+    router, project, store, rid = fixture_router(tmp_path)
+    binary = tmp_path / "provider"
+    binary.write_text(f"#!{sys.executable}\n" + f"PRIOR_CHECKS = {feedback['checks']!r}\n" + '''
+import json, pathlib, sys
+args = sys.argv[1:]
+if args == ["--version"]:
+    print("fixture-cli 1")
+    sys.exit(0)
+schema = json.loads(pathlib.Path(args[args.index("--output-schema") + 1]).read_text())
+wire = sys.stdin.read()
+context = json.loads(wire.split("<context>\\n", 1)[1].split("\\n</context>", 1)[0])
+if "text_token" in schema["properties"]:
+    result = {"text_token": pathlib.Path(context["context_files"][0]).read_text(), "image_token": ""}
+else:
+    history = context["feedback"]["checks"]
+    assert history["source_ref"] == "feedback.checks"
+    assert context["feedback"]["observation"].startswith("prior_attempt;")
+    assert json.loads(pathlib.Path(history["artifact"]["location"]).read_text()) == PRIOR_CHECKS
+    assert context["checks"] == [{"exit_code": 0}]
+    result = {"approved": False, "summary": "fixture review rejected", "findings": []}
+pathlib.Path(args[args.index("-o") + 1]).write_text(json.dumps(result))
+print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}))
+''')
+    body = router.config.load().model_dump(mode="json")
+    body["execution"]["infra_retries"] = 1
+    write_json(router.config.path, body)
+    context = {"task": {"id": "T1", "title": "fixture task"},
+               "feedback": feedback, "checks": [{"exit_code": 0}]}
+    original = copy.deepcopy(context)
+    event = store.event
+
+    def interrupt_before_dispatch(run_id, kind, data):
+        if kind == "agent.started" and data["stage"] == "review":
+            raise asyncio.CancelledError()
+        return event(run_id, kind, data)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "event", interrupt_before_dispatch)
+        with pytest.raises(asyncio.CancelledError):
+            await router.invoke("review", context, ReviewResult, project, rid, "review", fresh=True)
+    assert store.get(rid, "provider-result/review") is None
+
+    def forbid_replanning(*args, **kwargs):
+        pytest.fail("A resumed request must reuse its frozen presentation")
+
+    monkeypatch.setattr("auto_agents_2.providers.ContextPlanner.prepare", forbid_replanning)
+    restarted = ProviderRouter(router.config, store, SandboxRunner(store.root))
+    result = await restarted.invoke("review", context, ReviewResult, project, rid, "review", fresh=True)
+    assert not result.approved and context == original
+    starts = [e["data"] for e in store.events(rid) if e["kind"] == "agent.started"]
+    assert [row["stage"] for row in starts] == ["material_probe", "review"]
+    assert starts[-1]["repair_kind"] == repair_kind
+    assert starts[-1]["task_title"] == "fixture task"
+    assert store.get(rid, "invocation/review")["result"]["approved"] is False
+    assert store.get(rid, "infra/review/codex")["failures"] == 1
     assert not list((store.root / "processes").glob("*.json"))
     assert not list((store.root / "attempts" / rid).iterdir())
 

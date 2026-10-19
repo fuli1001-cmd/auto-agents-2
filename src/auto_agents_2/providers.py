@@ -279,6 +279,11 @@ class ProviderRouter:
             schema_file = root / "schema.json"
             write_json(schema_file, strict_schema(schema))
             original_workspace = workspace
+            # Progress describes controller facts; the model view may replace them with references.
+            feedback = context.get("feedback", {})
+            repair_kind = ("dependencies" if feedback.get("environment_error") else
+                           "checks" if any(c.get("exit_code") for c in feedback.get("checks", [])) else "")
+            task_title = context["task"].get("title", "") if isinstance(context.get("task"), dict) else ""
             prepared = self._prepare_context(stage, context, workspace, run_id, operation, input_identity)
             context = prepared.payload
             workspace = create_view(workspace, root / "workspace", self.config.load().sensitive_paths)
@@ -381,9 +386,7 @@ class ProviderRouter:
             self.store.event(run_id, "agent.started", {"attempt": aid, "operation": operation, "stage": stage,
                              "provider": eff["provider"], "level": eff["level"], "model": eff["model"],
                              "effort": eff["effort"],
-                             "repair_kind": ("dependencies" if context.get("feedback", {}).get("environment_error") else
-                                             "checks" if any(c.get("exit_code") for c in context.get("feedback", {}).get("checks", [])) else ""),
-                             "task_title": context["task"].get("title", "") if isinstance(context.get("task"), dict) else "",
+                             "repair_kind": repair_kind, "task_title": task_title,
                              "config_hash": eff["fingerprint"], "prompt_version": PROMPT_VERSION, "prompt_family": family})
             decoder, errors = self.decoders.get(eff["kind"], EventDecoder)(eff["kind"]), []
             process = None
