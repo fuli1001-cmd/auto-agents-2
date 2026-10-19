@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from typing import Literal
 
+from .action_authority import STAGE_REENTRY_ACTIONS, route_action, transition_effects
 from .decisions import DecisionRequest, DecisionResult, decision_request_identity
 from .faults import HumanIntervention, HumanRequirement, StateConflict, route_failure
 from .interaction import choice_spec
-from .models import Record
+from .models import PlanResult, Record
 from .recovery import Diagnosis, RecoveryDecision, check_rows, failure_summary
 from .recovery_identity import authorization_binding, binding_matches_failure, failure_contract
 from .util import digest
@@ -52,7 +53,7 @@ class RecoveryPolicy:
     def candidates(self, failure, plan, suggested, *, include_declared_checks=False):
         """Freeze admissible actions; the model selects, it cannot supply new scopes."""
         choices = {suggested.action: suggested}
-        if suggested.action in {"clarify", "provider_research", "prototype", "design", "blocked"}:
+        if suggested.action in STAGE_REENTRY_ACTIONS | {"blocked"}:
             return choices
         common = dict(failure_id=failure.id, evidence_refs=failure.evidence_refs,
                       budget_owner=failure.origin_id, budget_owners=[failure.origin_id])
@@ -92,7 +93,7 @@ class RecoveryPolicy:
 
     async def authorize(self, rid, failure, active, work, plan, suggested, *, operation,
                         established=False, correction=False, force_decision=False, candidates=None, controller_owned=False,
-                        diagnosis_assessment=False):
+                        diagnosis_assessment=False, prerequisite_resolved=False, supersede_keys=()):
         """Reserve a concrete action and its audit receipt in one CAS transaction."""
         if suggested.action == "blocked" and not route_failure(failure).human_requirement:
             suggested = suggested.model_copy(update={"action": "diagnose"})
@@ -125,16 +126,19 @@ class RecoveryPolicy:
             candidates = {"blocked": legacy_blocked}
         choices = candidates if candidates is not None else self.candidates(failure, plan, suggested,
             include_declared_checks=diagnosis_assessment)
-        hard_boundary = (not controller_owned and
-                         suggested.action in {"clarify", "provider_research", "prototype", "design", "blocked"})
+        transition = suggested.action in STAGE_REENTRY_ACTIONS
         rule_key = "recovery/rules/" + digest([failure.origin_id, failure.step,
             sorted(failure.obligations), suggested.action])
         legacy = self.legacy_questions(rid, failure, active)
-        question_keys = [*legacy, question_key]
+        question_keys = list(dict.fromkeys([*legacy, question_key, *supersede_keys]))
         questions = self.store.decision_questions(rid, question_keys)
+        if any(q["key"] in supersede_keys and q["answer"] is not None for q in questions):
+            raise StateConflict("Additional user input arrived for a technical recovery; preserve it for reassessment")
         answered = [q for q in questions if q["answer"] is not None]
         guards = self.engine.decisions.guards(rid, failure.origin_id,
             [cycle_key, permit_key, rule_key, "plan_revision/current", "automation/engineering/" + failure.origin_id])
+        if transition or suggested.action == "plan_patch":
+            guards["delivery/journal"] = self.store.get(rid, "delivery/journal")
         cfg = self.engine.config.load().automation
         tasks = (plan.tasks if plan else [])
         scoped = [t for t in tasks if not failure.task_id or t.id == failure.task_id
@@ -169,10 +173,17 @@ class RecoveryPolicy:
         guards[binding_key] = bound if bound is not None else binding
         grant = dict(cycle.human_grant)
         slot = "diagnosis" if suggested.action == "diagnose" else "dispatch"
-        human_cycle = (not hard_boundary and grant.get("scope_hash") == scope_hash
+        human_cycle = (not transition and grant.get("scope_hash") == scope_hash
                        and grant.get(slot, 0) > 0)
-        rule = (not hard_boundary and not force_decision and
-                (established or correction or not self.store.get(rid, rule_key)))
+        routing = route_action(failure, suggested.action, enabled=cfg.enabled,
+            rule=established or correction or not self.store.get(rid, rule_key),
+            granted=human_cycle, answered=bool(answered), controller_owned=controller_owned,
+            force_decision=force_decision,
+            published=bool((self.store.get(rid, "delivery/journal") or {}).get("publication_started")),
+            prerequisite_resolved=prerequisite_resolved)
+        if routing.human_requirement:
+            raise HumanIntervention(routing.human_requirement, reason_code=routing.reason_code, phase=failure.phase)
+        rule = routing.route == "rule"
         evidence = {"failure": failure.model_dump(), "progress": self.engine.convergence.state(rid, failure.origin_id),
             "engineering": self.store.get(rid, "automation/engineering/" + failure.origin_id, {}),
             "diagnosis_feedback": active.get("diagnosis_feedback"),
@@ -187,6 +198,12 @@ class RecoveryPolicy:
                 "candidates": {key: value.model_dump() for key, value in choices.items()}},
             evidence=evidence, budget={"count_limits_enforced": False},
             state_identity=digest([guards, source, cfg.model_dump(), operation]))
+        effects_plan = plan
+        if transition and effects_plan is None and guards.get("plan"):
+            effects_plan = PlanResult.model_validate(guards["plan"])
+        effects = {key: transition_effects(key, effects_plan) for key in choices if key in STAGE_REENTRY_ACTIONS}
+        if effects:
+            request.scope["stage_transitions"] = effects
         snapshot_key = "recovery/request-snapshots/" + digest([cid, operation])
         snapshot = self.store.get(rid, snapshot_key)
         basis = decision_request_identity(request.model_copy(update={"state_identity": ""}))
@@ -208,16 +225,14 @@ class RecoveryPolicy:
         actor, selected, result_key = "rule", suggested.action, None
         result = DecisionResult(action="approve", reason=suggested.reason, evidence_refs=["failure"],
                                 selected_action=selected, expected_result="执行后记录实际检查或诊断结果")
-        manual = (hard_boundary or bool(answered) or bool(grant and grant.get("scope_hash") != scope_hash)
-                  or not (rule or human_cycle or cfg.enabled))
-        routing = route_failure(failure, repeated=not rule, diagnosis_inconclusive=diagnosis_assessment)
+        manual = routing.route == "human" and not human_cycle or bool(answered)
         if suggested.action == "blocked" and not answered:
             requirement = routing.human_requirement or HumanRequirement(kind="state_conflict",
                 reason=suggested.reason, action="核对当前门禁或恢复记录所需的外部条件。",
                 resume_condition="控制器能形成可执行动作；确认不能授权 blocked。", evidence_refs=failure.evidence_refs)
             raise HumanIntervention(requirement, reason_code=requirement.kind, phase=failure.phase)
-        self.store.event(rid, "recovery.classified", {"failure": failure.id, "observation": failure.observation_id,
-            **routing.model_dump()})
+        self.store.event(rid, "recovery.routing", {"failure": failure.id, "action": suggested.action,
+            "recorded_authorization": bool(answered) or human_cycle, **routing.model_dump()})
         legacy_answer = None
         answered_cycle = False
         if answered:
@@ -245,7 +260,7 @@ class RecoveryPolicy:
         if manual:
             if not legacy_answer:
                 requirement = routing.human_requirement or HumanRequirement(
-                    kind="authorization" if hard_boundary or not cfg.enabled else "decision_unavailable",
+                    kind="authorization" if not cfg.enabled else "decision_unavailable",
                     reason=result.reason, action=f"决定是否执行 {suggested.action}，范围仅限下列已核对的任务与路径。",
                     resume_condition="取得对应范围的明确授权，且源码、计划及检查依据仍与本请求一致。",
                     evidence_refs=failure.evidence_refs)
@@ -253,13 +268,15 @@ class RecoveryPolicy:
                 self.store.record_fault(rid, {"failure": failure.id, "phase": failure.phase, "route": "human",
                     "reason_code": requirement.kind, "human_requirement": requirement.model_dump()})
                 prompt = ("当前故障：\n" + failure_summary(check_rows(failure.evidence),
+                        candidate_error=failure.evidence.get("candidate_error"),
+                        validation_error=failure.evidence.get("validation_error"),
                         review=failure.evidence.get("review"), environment_error=failure.evidence.get("environment_error"))
                     + "\n恢复需要人工决定：" + requirement.prompt()
                     + ("\n原恢复请求：" + suggested.reason if result.reason != suggested.reason else "")
                     + "\n允许范围：" + ("; ".join(t.id + ": " + ", ".join(t.allowed_paths) for t in scoped)
                                                or ", ".join(paths) or "控制器声明的当前操作")
                     + "\n先执行：" + suggested.action
-                    + ("\n本次仅批准上述门禁或资源核对动作。" if hard_boundary else
+                    + ("\n本次仅批准返回所示阶段；其校验、独立审查及原型人审仍须执行。" if transition else
                        "\n本轮只允许重新执行当前已声明的操作并核验结果。" if candidates is not None else
                        "\n本轮至多一次诊断及一次格式修正、一次局部计划修订或每个所列任务一次范围内修复及验证。")
                     + "\n累计次数只记录，不因本次授权清零。")
@@ -267,7 +284,7 @@ class RecoveryPolicy:
                 interaction["pause_on"] = "n"
                 if not answered_cycle:
                     await self.engine._ask(rid, question_key, prompt, digest([request.model_dump(), prompt]), interaction)
-                grant = {} if hard_boundary else {"scope_hash": scope_hash, "diagnosis": 2, "dispatch": 1}
+                grant = {} if transition else {"scope_hash": scope_hash, "diagnosis": 2, "dispatch": 1}
                 if grant:
                     grant[slot] -= 1
             actor = "human"

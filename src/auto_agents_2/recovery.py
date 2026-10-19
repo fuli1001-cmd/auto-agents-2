@@ -10,7 +10,7 @@ from .evidence_refs import controller_context_catalog, supplied_references
 from .models import Command, Record, RecoveryRequest
 from .util import digest
 
-Action = Literal["diagnose", "recheck", "repair", "plan_patch", "clarify", "provider_research", "prototype", "design", "blocked"]
+Action = Literal["diagnose", "recheck", "repair", "plan_patch", "clarify", "provider_research", "prototype", "design", "readme", "blocked"]
 COLLECTION_FAILURES = {"test_report_missing", "test_report_invalid", "incomplete_log_capture",
                        "source_changed", "execution_inputs_changed", "test_attachments_invalid", "evidence_collection_failed", "unsupported_test_runner"}
 
@@ -221,9 +221,14 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None,
                             repair_targets=diagnosis.repair_targets if diagnosis and action == "repair" else [])
 
 
-def failure_summary(checks, *, review=None, environment_error=None, diagnosis_feedback=None, budget=None):
+def failure_summary(checks, *, review=None, environment_error=None, diagnosis_feedback=None, budget=None,
+                    candidate_error=None, validation_error=None):
     """Describe the current blocker, including a rejected review with green checks."""
     lines = []
+    if candidate_error:
+        lines.append("候选补丁未应用：" + str(candidate_error))
+    if validation_error:
+        lines.append("恢复提案未通过校验：" + str(validation_error))
     if not checks:
         lines.append("当前没有已执行的检查记录；不能据此判断检查通过或失败。")
     for row in checks:

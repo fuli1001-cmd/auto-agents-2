@@ -1,0 +1,44 @@
+{
+  "run_id": "run_d179c491f3384771",
+  "scope": "Read-only replay of controller authorization routing; no model call or demo state mutation.",
+  "completed_diagnosis_permit": "recovery/permits/55ca01b7043a6dc2290111143dce6493954ad25a6e1c439d85e4c665e6c9cf9b",
+  "completed_diagnosis_hash": "e766b2c1f3fdc9df62682430555ff889cca128dc9378c03f207462adbbf42a9d",
+  "diagnosis_action": "design",
+  "diagnosis_round": 2,
+  "route": {
+    "route": "decision",
+    "reason_code": "stage_transition",
+    "phase": "task",
+    "human_requirement": null
+  },
+  "transition_effects": {
+    "restart_stage": "design",
+    "invalidate_stages": [
+      "design",
+      "plan",
+      "develop",
+      "readme",
+      "verify",
+      "deliver"
+    ],
+    "affected_tasks": [
+      "T007",
+      "T008",
+      "T009",
+      "T010"
+    ],
+    "preserve": [
+      "accepted_requirements",
+      "acceptance_obligations",
+      "task_origins",
+      "consumption",
+      "user_changes",
+      "candidates",
+      "approval_history"
+    ],
+    "authority": "Re-enter the owning stage under its existing permissions and gates; no output is approved.",
+    "human_gates": "Product choices and prototype approval still require the original user interaction."
+  },
+  "automatic_decisions_enabled": true,
+  "result": "The stage name no longer forces human authorization; the decision agent must assess the bounded transition."
+}

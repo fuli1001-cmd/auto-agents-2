@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import quote
 
+from .action_authority import GATES
 from .approvals import APPROVAL_CONTEXT_VERSION, PrototypeApprovals, prototype_identity
 from .artifacts import ArtifactStore
 from .builds import BUILD_CONTRACT_VERSION, command_hashes, runtime_commands, verification_commands
@@ -24,6 +25,7 @@ from .design import (
     inspect_application,
     inspect_prototype,
 )
+from .design_documents import DesignDocuments
 from .environment import EnvironmentManager
 from .errors import (
     AA2Error,
@@ -63,6 +65,7 @@ from .plan_revision import materialize_plan
 from .planning import ready_batch, validate_plan
 from .profiles import ProjectProfile
 from .progress import observe_activity, safe_event
+from .proposal_recovery import ProposalRecovery
 from .providers import Agent, ProviderRouter
 from .recovery import (
     ExecutionContract,
@@ -102,12 +105,13 @@ from .workspace import (
     tree_hash,
 )
 
-STAGES = ["clarify", "provider_research", "prototype", "design", "plan", "develop", "readme", "verify", "deliver"]
+STAGES = list(GATES)
 
 
 class Replan(AA2Error):
-    def __init__(self, stage: str, reason: str):
+    def __init__(self, stage: str, reason: str, *, supersede_keys=()):
         self.stage, self.reason = stage, reason
+        self.supersede_keys = list(supersede_keys)
         super().__init__(reason)
 
 
@@ -312,13 +316,27 @@ class WorkflowEngine:
                 evidence_refs=[key, "plan"], evidence={"reason": exc.reason}))
         else:
             pending = self.store.prepare_replan(rid, exc.stage, exc.reason)
-            self.store.checkpoint(rid, "replanning/pending", {**pending, "controller_owned": True})
+            self.store.checkpoint(rid, "replanning/pending", {**pending, "controller_owned": True,
+                "supersede_keys": exc.supersede_keys})
 
     def _replan_contract(self, rid, name, valid):
         saved = self.store.get(rid, "replanning/evidence/contracts", {})
         criteria = {"coverage": False, "prototype_scope": False, "plan": False, **saved.get("criteria", {})}
         criteria[name] = valid
         self._replan_evidence(rid, "contracts", criteria)
+
+    def _coverage_replan(self, rid, context, assessment, question_key, fingerprint, reason):
+        """Missing internal evidence is a controller correction, not a user prerequisite."""
+        questions = [q for q in self.store.decision_questions(rid, [question_key])
+                     if q["artifact_hash"] == fingerprint]
+        answered = [q for q in questions if q["answer"] is not None]
+        if answered:
+            context = {**context, "additional_evidence": self.store.question(answered[-1]["id"])["answer"]}
+        self.store.checkpoints(rid, {
+            "clarify_context": {**context, "controller_feedback": reason},
+            "recovery/coverage-contract/" + digest(assessment): assessment,
+        })
+        raise Replan("clarify", reason, supersede_keys=[question_key] if questions and not answered else [])
 
     def _replan_checks(self, rid, scope, commands, results, work, environment):
         source = tree_hash(work)
@@ -401,7 +419,7 @@ class WorkflowEngine:
         proposed = {"attempt": pending["evaluation"], "failure": failure.model_dump()}
         _, permit = await self.recovery_policy.authorize(rid, failure, proposed, work, None, action,
             operation="controller-replan", established=pending["decision"].get("improved", False),
-            candidates={stage: action}, controller_owned=True)
+            candidates={stage: action}, controller_owned=True, supersede_keys=pending.get("supersede_keys", []))
         self.recovery_policy.start(rid, permit)
         pending = {**pending, "granted": True, "permit": permit}
         self.store.checkpoint(rid, "replanning/pending", pending)
@@ -747,6 +765,13 @@ class WorkflowEngine:
         return answer
 
     async def _invoke(self, stage, context, schema, workspace, rid, key, fresh=False, *, interactive_retry=True):
+        if not interactive_retry or stage in {"decision", "recovery_diagnosis", "material_probe"} or context.get("patch_repair"):
+            return await self._invoke_once(stage, context, schema, workspace, rid, key, fresh,
+                                           interactive_retry=interactive_retry)
+        return await ProposalRecovery(self).invoke(stage, context, schema, workspace, rid, key, fresh)
+
+    async def _invoke_once(self, stage, context, schema, workspace, rid, key, fresh=False, *, interactive_retry=True,
+                           logical_operation=None, logical_context=None):
         invocation_key = "invocation/" + key
         source_before = tree_hash(workspace)
         saved = self.store.get(rid, invocation_key, {})
@@ -770,7 +795,8 @@ class WorkflowEngine:
                 logical = {"source_hash": source_before, "context": context, "previous_invocation": digest(saved)}
                 self.store.checkpoint(rid, logical_key, logical)
         execution = self.agent.execution_identity(stage) if isinstance(self.agent, ProviderRouter) else None
-        identity = invocation_identity(stage, context, schema, workspace, self.config.load(), source_before, execution)
+        invocation_config = self.config.load()
+        identity = invocation_identity(stage, context, schema, workspace, invocation_config, source_before, execution)
         compatible = {identity}
         if stage == "recovery_diagnosis":
             old_execution = self.agent.execution_identity("review") if isinstance(self.agent, ProviderRouter) else None
@@ -783,7 +809,7 @@ class WorkflowEngine:
         try:
             result = await self.agent.invoke(stage, context, schema, workspace, rid, key, fresh)
         except ProviderError as exc:
-            if not interactive_retry or stage == "recovery_diagnosis" and isinstance(exc, InvalidStructuredResponse):
+            if not interactive_retry or isinstance(exc, InvalidStructuredResponse):
                 raise
             await self._ask(rid, f"provider/{key}", f"可用 provider 暂时无法完成任务：{exc}\n处理上述问题后回复 retry。", digest(str(exc)))
             if isinstance(self.agent, ProviderRouter):
@@ -795,11 +821,19 @@ class WorkflowEngine:
             raise PolicyViolation("Workspace changed while generating or reviewing a candidate; preserving user changes")
         artifact = self.artifacts.put(result.model_dump(mode="json"), stage)
         if isinstance(result, ReviewResult):
-            IssueLedger(self.store, self.artifacts).record(rid, key, result, context)
-        self.store.checkpoint(rid, invocation_key, {"identity": identity, "result": result.model_dump(mode="json"),
-                                                  "artifact": artifact,
-                                                  **({"logical_input": logical_key} if logical else {})})
-        self.store.event(rid, "artifact.created", {"stage": stage, "operation": key, "artifact": artifact})
+            IssueLedger(self.store, self.artifacts).record(rid, logical_operation or key, result, context)
+        record = {"identity": identity, "result": result.model_dump(mode="json"), "artifact": artifact,
+                  **({"logical_input": logical_key} if logical else {})}
+        updates = {invocation_key: record}
+        if logical_operation and logical_operation != key:
+            updates["invocation/" + logical_operation] = {**record, "recovered_from": key,
+                "identity": invocation_identity(stage, logical_context, schema, workspace,
+                                                invocation_config, source_before, execution)}
+            self.store.checkpoints(rid, updates)
+        else:
+            self.store.checkpoint(rid, invocation_key, record)
+        self.store.event(rid, "artifact.created", {"stage": stage, "operation": logical_operation or key,
+            **({"attempt_operation": key} if logical_operation and logical_operation != key else {}), "artifact": artifact})
         return result
 
     async def _questions(self, rid, key, questions, fingerprint):
@@ -1036,8 +1070,11 @@ class WorkflowEngine:
                 raise Replan("clarify", "Existing prototypes require explicit prototype_paths; preserve unrelated designs")
             if any(not (p == "DESIGN.md" or p.startswith("design/prototypes/")) for p in specification.prototype_paths):
                 raise Replan("clarify", "prototype_paths must refer only to prototype pages or DESIGN.md")
-            files, prepared = await self.patch_repair.prepare(rid, work, document.files, scopes,
-                stage="prototype", context=context, operation=f"prototype/{identity}", contracts=True)
+            try:
+                files, prepared = await self.patch_repair.prepare(rid, work, document.files, scopes,
+                    stage="prototype", context=context, operation=f"prototype/{identity}", contracts=True)
+            except (PolicyViolation, PatchRepairExhausted) as exc:
+                raise Replan("prototype", str(exc)) from exc
             document = document.model_copy(update={"files": files})
             pending.update(document=document.model_dump(), retrieved=retrieved, prepared=prepared)
             self.store.checkpoint(rid, key, pending)
@@ -1162,17 +1199,21 @@ class WorkflowEngine:
                     self.store.checkpoint(rid, "clarify_context", context)
                     continue
                 if not result.requirements:
-                    raise AA2Error("Requirements assessment returned no acceptance criteria")
+                    self.store.checkpoint(rid, "clarify_context", {**context,
+                        "controller_feedback": "Requirements assessment returned no acceptance criteria"})
+                    raise Replan("clarify", "Restore the original request's acceptance criteria before assessing coverage")
                 review = await self._invoke("coverage_review", {**context, "assessment": result.model_dump()},
                                             ReviewResult, work, rid, f"coverage-review/{turn}", fresh=True)
                 if not review.approved:
                     context["review_feedback"] = review.model_dump()
+                    self.store.checkpoint(rid, "clarify_context", context)
                     continue
                 assessment = result.model_dump()
                 self.store.checkpoint(rid, "clarify", assessment)
                 break
             else:
-                raise AA2Error("需求澄清未能收敛，已保存现场")
+                raise Replan("clarify", "Clarification batch ended without accepted coverage. "
+                             "Assess the persisted answers and review findings before another attempt.")
         result = IntakeResult.model_validate(assessment)
         if ProjectProfile.detect(work, self.config.load().project_profile).has_frontend:
             result.frontend = True
@@ -1198,19 +1239,20 @@ class WorkflowEngine:
                 self._replan_checks(rid, "coverage", result.verification, evidence, work, environment)
                 self.store.checkpoint(rid, "clarify_context", {**context, "coverage_verification": [r.model_dump() for r in evidence]})
                 raise Replan("clarify", "Resolve unknown coverage using the persisted verification evidence before planning changes")
-            answer = await self._ask(rid, "unknown-coverage", "部分需求证据不足，不能确认已实现或直接重复开发。请补充可验证行为或现有实现的位置。", digest(assessment))
-            self.store.checkpoint(rid, "clarify_context", {**context, "additional_evidence": answer})
-            raise Replan("clarify", "Resolve unknown coverage using additional user evidence")
+            self._coverage_replan(rid, context, assessment, "unknown-coverage", digest(assessment),
+                "Inspect the available project and historical specifications to resolve unknown coverage. "
+                "Declare executable checks for existing behaviour. Ask the user only for genuinely missing "
+                "product information, not for code locations or controller-owned evidence.")
         context["specification"] = assessment
         verification_only = False
         retained_verification = self.store.get(rid, "plan", {}).get("mode") == "verification_only"
         if all_satisfied and (retained_verification or not self.store.get(rid, "recovery/implementation_pending")):
             checks = result.verification or self.config.load().verification
             if not checks:
-                await self._ask(rid, "coverage-evidence", "已有实现缺少可执行核验证据。请在 verification 配置中补充检查命令后回复 continue。", source_hash)
-                checks = self.config.load().verification
-                if not checks:
-                    raise AA2Error("不能仅凭语义判断宣称需求已经实现")
+                self._coverage_replan(rid, context, assessment, "coverage-evidence", source_hash,
+                    "Satisfied coverage lacks executable verification. Inspect existing source and test runners "
+                    "and propose verification commands for the current project. Do not claim success or "
+                    "reimplement satisfied behaviour; the controller must execute and validate the checks.")
             environment = await self._environment(work, rid,
                 PlanResult.model_validate(self.store.get(rid, "plan")) if retained_verification else None)
             evidence = await self.verifier.run(checks, work, environment)
@@ -1236,10 +1278,19 @@ class WorkflowEngine:
                 continue
             cached = self.store.get(rid, stage)
             if cached:
+                if stage == "design":
+                    pending = self.store.get(rid, "candidate/design", {})
+                    if "prepared" in pending:
+                        DesignDocuments(self).verify(work, pending)
+                    elif cached.get("files"):
+                        raise Replan("design", "Legacy design files have no application/review receipt. "
+                                     "Reconcile the archived proposal with current documents in the design gate; "
+                                     "retain all accepted obligations and do not delegate these files to implementation.")
                 context[stage] = cached
                 if stage == "prototype":
                     context["prototype_approval"] = await self._ensure_prototype_approval(rid, work, cached)
                 continue
+            context["project"] = self.contexts.build(work)
             if stage == "prototype":
                 reused = None
                 if not result.ui_changes:
@@ -1269,17 +1320,35 @@ class WorkflowEngine:
             else:
                 pending_key = "candidate/" + stage
                 pending = self.store.get(rid, pending_key, {})
+                if stage == "design" and "prepared" not in pending:
+                    if pending.get("document") and "proposal_source_hash" not in pending:
+                        raise Replan("design", "Legacy design candidate has no source binding; preserve it and "
+                                     "regenerate against the current architecture before applying its files.")
+                    if not pending.get("document"):
+                        pending["proposal_source_hash"] = tree_hash(work)
                 document = (schema.model_validate(pending["document"]) if pending.get("document") else
                             await self._invoke(stage, context, schema, work, rid, stage))
-                self.store.checkpoint(rid, pending_key, {"document": document.model_dump()})
+                self.store.checkpoint(rid, pending_key, {**pending, "document": document.model_dump()})
                 if isinstance(document, DocumentResult) and document.questions:
                     answer = await self._questions(rid, stage, document.questions, digest(document.model_dump()))
                     context[stage + "_answer"] = answer
+                    if stage == "design":
+                        context["project"] = self.contexts.build(work)
+                        pending["proposal_source_hash"] = tree_hash(work)
                     document = await self._invoke(stage, context, schema, work, rid, stage)
-                    self.store.checkpoint(rid, pending_key, {"document": document.model_dump()})
+                    self.store.checkpoint(rid, pending_key, {**pending, "document": document.model_dump()})
                     if document.questions:
                         raise AA2Error(f"{stage} still has unresolved questions")
                 retrieved = []
+            if stage == "design":
+                try:
+                    document, review = await DesignDocuments(self).prepare(rid, work, document, context)
+                except (PolicyViolation, PatchRepairExhausted) as exc:
+                    raise Replan("design", str(exc)) from exc
+                if not review.approved:
+                    details = "".join(f"\n[{f.severity}] {f.location}: {f.description}\n{f.resolution}"
+                                      for f in review.findings)
+                    raise Replan("design", review.summary + details)
             if stage == "provider_research" and document.sources:
                 retrieved = await ResearchService(self.artifacts).verify(document.sources)
                 review = await self._invoke("review", {"review_kind": "research", "research": document.model_dump(),
@@ -1333,7 +1402,8 @@ class WorkflowEngine:
                     details = "".join(f"\n\n[{f.severity}] {f.location}\n{f.description}\n证据：{f.evidence}\n修复要求：{f.resolution}"
                                       for f in review.findings)
                     raise Replan("plan", review.summary + details)
-            atomic_write(work / "docs/aa2" / f"{stage}.md", document.document)
+            if stage != "design":
+                atomic_write(work / "docs/aa2" / f"{stage}.md", document.document)
             stage_data = document.model_dump()
             if retrieved:
                 stage_data["verified_sources"] = [{k: v for k, v in source.items() if k != "excerpt"} for source in retrieved]
@@ -1358,12 +1428,13 @@ class WorkflowEngine:
                     await self._invoke("readme", {**context, "project": self.contexts.build(work)}, DocumentResult,
                                        work, rid, "readme"))
             self.store.checkpoint(rid, "candidate/readme", {**pending, "document": docs.model_dump()})
-            if any(c.path.startswith(("docs/requirements/", "docs/aa2/")) for c in docs.files):
-                raise Replan("plan", "Documentation changes cannot overwrite accepted requirements, architecture or controller evidence")
             patch = pending.get("patch")
             if patch is None:
-                files, patch = await self.patch_repair.prepare(rid, work, docs.files,
-                    ["README.md", "docs", ".env.example"], stage="readme", context=context, operation="readme")
+                try:
+                    files, patch = await self.patch_repair.prepare(rid, work, docs.files,
+                        ["README.md", "docs", ".env.example"], stage="readme", context=context, operation="readme")
+                except (PolicyViolation, PatchRepairExhausted) as exc:
+                    raise Replan("readme", str(exc)) from exc
                 docs = docs.model_copy(update={"files": files})
             self.store.checkpoint(rid, "candidate/readme", {"document": docs.model_dump(), "patch": patch})
             apply_prepared(work, patch)

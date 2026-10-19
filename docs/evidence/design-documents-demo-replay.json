@@ -1,0 +1,23 @@
+{
+  "run_id": "run_d179c491f3384771",
+  "baseline": "ecf8dbc1e5e67d5b4990c8d73d17335722bc3882",
+  "design_proposal_hash": "71100e0016cb127075fd8e5c677276362f647f3882bdd1358918ee1595f17e40",
+  "model_called": false,
+  "scope": "Read-only source inspection and controller patch replay in a temporary directory; no semantic design review or product acceptance.",
+  "baseline_entry_anchor_matches": 1,
+  "current_entry_anchor_matches": 0,
+  "partial_application_replayed": true,
+  "files": [
+    {
+      "path": "docs/aa2/design.md",
+      "expected_hash": "be9279cbaf3056e9a68cd40b6a4e6c34e9ec93eb3cbacfa6a90912689b978379",
+      "actual_hash": "be9279cbaf3056e9a68cd40b6a4e6c34e9ec93eb3cbacfa6a90912689b978379"
+    },
+    {
+      "path": "docs/aa2/design-pagination.md",
+      "expected_hash": "ec8be16726768ff5b1585cbaf3c412c41a3ba13a0644d06ecd50372532164f30",
+      "actual_hash": "ec8be16726768ff5b1585cbaf3c412c41a3ba13a0644d06ecd50372532164f30"
+    }
+  ],
+  "planning_rejection": "Task T007 assigns a stage-owned contract to implementation: docs/aa2/design-pagination.md. Materialize it in its owning gate; retain the acceptance obligation as verification."
+}

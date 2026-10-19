@@ -67,7 +67,7 @@ class CodingAgent:
             ])
         if stage == "readme":
             return DocumentResult(summary="documented", document="# Done", files=[Change(path="README.md", content="# Calculator\nRun pytest tests.\n")])
-        if self.interrupt_review and operation.endswith("/review"):
+        if self.interrupt_review and context.get("review_kind", "implementation") == "implementation" and operation.endswith("/review"):
             self.interrupt_review = False
             raise asyncio.CancelledError()
         assert fresh

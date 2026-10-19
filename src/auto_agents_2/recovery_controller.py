@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .action_authority import STAGE_REENTRY_ACTIONS
 from .builds import verification_commands
 from .collection import policy_identity
 from .design import PROTOTYPE_BROWSER_VERSION
@@ -145,6 +146,7 @@ class RecoveryController:
                 decision, permit = await policy.authorize(rid, failure, active, work, None, decision,
                     operation=f"delivery-choose/{count['round']}/{(saved or {}).get('diagnosis_errors', 0)}",
                     candidates=options, correction=(saved or {}).get("diagnosis_errors", 0) == 1,
+                    prerequisite_resolved=capture_retry,
                     force_decision=(saved or {}).get("diagnosis_errors", 0) >= 2
                         or decision.action == "recheck" and already_rechecked)
             else:
@@ -198,7 +200,7 @@ class RecoveryController:
                 options = self._delivery_candidates(failure, decision, diagnosed=True)
                 decision, permit = await policy.authorize(rid, failure, active, work, None, decision,
                     operation=f"delivery-dispatch/{saved['round']}", candidates=options, established=True,
-                    diagnosis_assessment=assess,
+                    diagnosis_assessment=assess, prerequisite_resolved=capture_retry,
                     force_decision=decision.action == "recheck" and already_rechecked)
                 if decision.action == "diagnose":
                     saved.pop("round")
@@ -359,7 +361,7 @@ class RecoveryController:
             decision = RecoveryDecision.model_validate(active["decision"])
             if not active.get("permit"):
                 decision, active["permit"] = await policy.authorize(rid, failure, active, work, plan, decision,
-                    operation="legacy-dispatch", established=True,
+                    operation="legacy-dispatch", established=True, prerequisite_resolved=capture_retry,
                     force_decision=decision.action == "recheck" and repeated_recheck())
         else:
             if active.get("selection"):
@@ -377,7 +379,7 @@ class RecoveryController:
                     suggested = suggested.model_copy(update={"action": "recheck", "reason": "Attachment capture configuration changed"})
                 decision, permit = await policy.authorize(rid, failure, active, work, plan, suggested,
                     operation=f"choose/{budget['round']}/{active.get('diagnosis_errors', 0)}",
-                    correction=active.get("diagnosis_errors", 0) == 1,
+                    correction=active.get("diagnosis_errors", 0) == 1, prerequisite_resolved=capture_retry,
                     force_decision=active.get("diagnosis_errors", 0) >= 2
                         or suggested.action == "recheck" and repeated_recheck())
             if decision.action == "diagnose":
@@ -426,7 +428,7 @@ class RecoveryController:
                 suggested, assess = self._diagnosis_assessment(failure, suggested)
                 decision, permit = await policy.authorize(rid, failure, active, work, plan, suggested,
                     operation=f"dispatch/{active['diagnosis_round']}", established=True,
-                    diagnosis_assessment=assess,
+                    diagnosis_assessment=assess, prerequisite_resolved=capture_retry,
                     force_decision=suggested.action == "recheck" and repeated_recheck())
                 if decision.action == "diagnose":
                     active.pop("diagnosis_round")
@@ -467,7 +469,8 @@ class RecoveryController:
                         budget_owner=failure.origin_id, budget_owners=sorted({t.origin_id or t.id for t in revised.tasks if t.id in targets}),
                         evidence_refs=failure.evidence_refs, reason="按已通过独立审查的局部计划修订实施并复验")
                     _, active["permit"] = await policy.authorize(rid, failure, active, integration, revised, continuation,
-                        operation="patch-followup", established=True, candidates={"repair": continuation})
+                        operation="patch-followup", established=True, candidates={"repair": continuation},
+                        prerequisite_resolved=capture_retry)
                     self.store.checkpoint(rid, "recovery/active", active)
                 updates = {"recovery/implementation_pending": True}
                 for task_id in targets:
@@ -478,7 +481,7 @@ class RecoveryController:
                     updates.update(policy.dispatch_updates(rid, active, targets))
                 self._finish(rid, active, updates)
             return
-        if decision.action in {"clarify", "provider_research", "prototype", "design"}:
+        if decision.action in STAGE_REENTRY_ACTIONS:
             self._finish(rid, active, {}, replan=(decision.action, decision.reason))
             pending = self.store.get(rid, "replanning/pending")
             self.store.checkpoint(rid, "replanning/pending", {**pending, "granted": True})
@@ -557,6 +560,8 @@ class RecoveryController:
         evidence = failure.evidence
         feedback = evidence.get("feedback", {})
         return failure_summary(check_rows(evidence),
+            candidate_error=evidence.get("candidate_error", feedback.get("candidate_error")),
+            validation_error=evidence.get("validation_error", feedback.get("validation_error")),
             review=evidence.get("review", feedback.get("review")),
             environment_error=evidence.get("environment_error", feedback.get("environment_error")),
             diagnosis_feedback=active.get("diagnosis_feedback"))

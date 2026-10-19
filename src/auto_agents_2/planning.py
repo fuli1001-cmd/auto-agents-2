@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import PurePosixPath
+
 from .dependencies import manifest_reference
 from .errors import AA2Error
 from .models import PlanResult, TaskSpec
@@ -18,6 +20,11 @@ def validate_plan(plan: PlanResult, requirement_ids: set[str], *, coverage_verif
     for task in tasks.values():
         if not task.id.replace("-", "").replace("_", "").isalnum():
             raise AA2Error("Invalid task ID")
+        for scope in task.allowed_paths:
+            if path_allowed(PurePosixPath(scope).as_posix(),
+                            ["DESIGN.md", "docs/aa2", "docs/requirements", "design/prototypes"]):
+                raise AA2Error(f"Task {task.id} assigns a stage-owned contract to implementation: {scope}. "
+                               "Materialize it in its owning gate; retain the acceptance obligation as verification.")
         if not set(task.depends_on) <= tasks.keys():
             raise AA2Error(f"Unknown task dependency: {task.id}")
         if not set(task.requirement_ids) <= requirement_ids:

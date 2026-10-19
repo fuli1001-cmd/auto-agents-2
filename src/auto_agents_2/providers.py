@@ -136,6 +136,7 @@ class ProviderRouter:
             key = f"infra/{operation}/{candidate}"
             state = self.store.get(run_id, key, {"failures": 0, "grant": 0, "pending": False})
             state["grant"] += cfg.execution.infra_retries + 1
+            state.pop("error_input", None)
             self.store.checkpoint(run_id, key, state)
 
     def effective(self, stage, candidate):
@@ -179,6 +180,8 @@ class ProviderRouter:
             # decision service, not multiplied by transport retry/failover loops.
             candidates, retries = [cfg.active_provider], 0
         errors = []
+        error_kinds = {}
+        logical_input = invocation_identity(stage, context, schema, workspace, cfg)
         for candidate in candidates:
             for retry in range(retries + 1):
                 key = f"infra/{operation}/{candidate}"
@@ -186,9 +189,15 @@ class ProviderRouter:
                 if state["pending"]:
                     state["failures"] += 1  # An interrupted request consumed its attempt.
                     state["pending"] = False
+                    state["error_kind"] = "incomplete"
                     self.store.checkpoint(run_id, key, state)
+                if state.get("error_kind") == "invalid_structured_response" and state.get("error_input") == logical_input:
+                    errors.append(f"{candidate}: saved response failed schema validation")
+                    error_kinds[candidate] = "invalid_structured_response"
+                    break
                 if state["failures"] >= retries + 1 + state["grant"]:
                     errors.append(f"{candidate}: persisted retry budget exhausted")
+                    error_kinds[candidate] = state.get("error_kind", "unavailable")
                     break
                 previous = self.store.get(run_id, f"provider-result/{operation}")
                 try:
@@ -214,12 +223,15 @@ class ProviderRouter:
                     state["pending"] = False
                     self.store.checkpoint(run_id, key, state)
                     errors.append(f"{candidate}: {exc}")
+                    error_kinds[candidate] = "configuration"
                     break
                 except ProviderError as exc:
                     completed = self.store.get(run_id, f"provider-result/{operation}")
                     if completed and completed != previous:
                         raise PostCommitError("Provider result saved; reconcile completion without failover") from exc
-                    state.update(pending=False, failures=state["failures"] + 1)
+                    kind = "invalid_structured_response" if isinstance(exc, InvalidStructuredResponse) else "unavailable"
+                    state.update(pending=False, failures=state["failures"] + 1, error_kind=kind, error_input=logical_input)
+                    error_kinds[candidate] = kind
                     self.store.checkpoint(run_id, key, state)
                     errors.append(f"{candidate}: {exc}")
                     if stage == "decision" or stage == "recovery_diagnosis" and isinstance(exc, InvalidStructuredResponse):
@@ -229,7 +241,8 @@ class ProviderRouter:
                     self.store.event(run_id, "agent.retrying", {"operation": operation, "provider": candidate,
                                      "retry": retry + 1, "delay": min(2 ** retry, 15)})
                     await asyncio.sleep(min(2 ** retry, 15))
-        raise ProviderError("; ".join(errors)[-3000:])
+        error = InvalidStructuredResponse if set(error_kinds.values()) == {"invalid_structured_response"} else ProviderError
+        raise error("; ".join(errors)[-3000:])
 
     async def _call(self, eff, stage, context, schema, workspace, run_id, operation, fresh):
         previous = self.store.get(run_id, f"provider-result/{operation}")

@@ -182,8 +182,14 @@ class ProgressDisplay:
         elif kind == "delivery.inputs_preserved":
             self.message(f"发布输入已核对｜保留 {data['retained_inputs']} 个原有输入｜继续主目录运行验收")
         elif kind == "recovery.classified":
-            route = {"rule": "控制器恢复", "decision": "自动决策", "human": "需要外部处理"}.get(data["route"], data["route"])
+            route = {"rule": "可按规则评估", "decision": "需决策评估", "human": "需要外部处理"}.get(data["route"], data["route"])
+            if data.get("authorized"):
+                route = {"rule": "规则已授权", "decision": "决策已授权", "human": "用户已授权"}.get(data["route"], route)
             self.message(f"故障分类｜{data['phase']}｜{data['reason_code']}｜{route}")
+        elif kind == "recovery.routing":
+            route = ("复用人工授权" if data.get("recorded_authorization") else
+                     {"rule": "控制器规则", "decision": "交由决策代理", "human": "需要人工授权"}[data["route"]])
+            self.message(f"恢复路由｜{data['phase']}｜{data['action']}｜{route}")
         elif kind == "workflow.internal_error":
             self.message(f"aa2 内部错误｜{data['exception_type']}｜故障编号 {data['incident_id']}｜已保留现场并停止本次执行")
         elif kind == "automation.engineering":

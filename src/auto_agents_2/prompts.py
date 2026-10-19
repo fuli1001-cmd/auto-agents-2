@@ -7,7 +7,7 @@ from .prompt_rules import COMMON, instructions
 from .research import request_documents
 
 INVOCATION_CONTRACT_VERSION = "2026-10-16.2"
-PROMPT_VERSION = "2026-10-18.context-v1"
+PROMPT_VERSION = "2026-10-19.action-authority-v1"
 CORE = COMMON
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
@@ -65,6 +65,13 @@ class PromptCompiler:
             task += (" evidence_refs may cite only records under decision_request.evidence (or their supplied aliases). "
                      "scope, candidates, budget, selected_action and state_identity are decision controls, not evidence references. "
                      "Do not cite those controls in evidence_refs, even when explaining why an action is allowed.")
+            task += (" A stage_transitions entry authorizes re-entering that stage, never approving its output. "
+                     "Assess its invalidation scope and preserved obligations. Technical clarification, research, prototype "
+                     "generation, design and documentation corrections can be approved within the existing requirements. "
+                     "The owning stage still enforces product questions, prototype human approval and independent review. "
+                     "A provider_response failure permits only another read-only model response under its supplied schema; "
+                     "it does not authorize executing tests or applying files. Missing internal evidence or a response-format "
+                     "error alone is not a human prerequisite; consider the supplied repair/observation action first.")
         if stage in {"clarify", "coverage_review"}:
             task += (" Coverage 'changed' includes new unmet requirements with no existing implementation. "
                      "'unknown' means uncertainty about existing behaviour, not the absence of a new feature. "
@@ -82,6 +89,19 @@ class PromptCompiler:
                     "List only changed/new tasks in upsert_tasks. No removal without replacement coverage under the same origin. "
                     "Use null for unchanged delivery contracts. Scope expansion requires explicit justification and independent review. "
                     "Preparation/check-only changes require re-verification, not reimplementation. document is the resulting full plan document.")
+        if stage == "design" or stage == "review" and context.get("review_kind") == "design":
+            task += (" The design gate applies and independently reviews architecture Markdown before planning. "
+                     "Use document for docs/aa2/design.md; optional files may change that entry or companion "
+                     "docs/aa2/design-*.md and docs/aa2/design/**/*.md files. If files explicitly changes design.md, "
+                     "that resulting file is the entry document and is not overwritten by document. "
+                     "Preserve existing architecture when adding an increment and read exact current anchors. "
+                     "Do not modify implementation, requirements, prototype assets or controller plan/environment records.")
+        if stage in {"plan", "implement"} or stage == "review" and context.get("review_kind") in {"plan", "plan_patch"}:
+            task += (" DESIGN.md, docs/aa2, docs/requirements and design/prototypes are stage-owned contracts. "
+                     "Never assign their creation or modification to an implementation task, even in allowed_paths. "
+                     "Design documents must already be materialized by the design gate. Tasks may verify those "
+                     "documents as acceptance obligations; retain those obligations and request the owning gate "
+                     "if material is missing. A plan appendix cannot substitute for a required architecture file.")
         if stage in {"plan", "implement"} or stage == "review" and context.get("review_kind") in {"plan", "plan_patch", "test_changes"}:
             task += (" New npm lockfile creation belongs to EnvironmentManager. When package-lock.json is absent, "
                      "propose package.json and let the controller run real npm install --package-lock-only before npm ci. "

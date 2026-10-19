@@ -56,7 +56,7 @@ def instructions(stage, context, purpose):
             selected += ["commands", "checks"]
         if purpose in {"implement", "implementation", "test_changes", "recovery_diagnosis"}:
             selected.append("dependencies")
-        if purpose in {"prototype", "implement", "implementation", "test_changes", "patch_repair", "readme"}:
+        if purpose in {"prototype", "design", "implement", "implementation", "test_changes", "patch_repair", "readme"}:
             selected.append("patches")
         if purpose == "prototype":
             selected.append("catalogue")
