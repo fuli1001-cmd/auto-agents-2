@@ -59,6 +59,8 @@ def binding_matches_failure(binding, failure):
 def invocation_contract(context):
     value = deepcopy(context)
     value.pop("evidence_reference_contract", None)
+    # This is a derived controller view, revalidated after every diagnosis, not a new logical call.
+    value.pop("allowed_actions", None)
     if isinstance(value.get("failure"), dict):
         value["failure"] = failure_contract(value["failure"])
     return value

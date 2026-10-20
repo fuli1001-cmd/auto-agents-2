@@ -219,6 +219,15 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None,
         if diagnosis.action == "repair" and set(diagnosis.task_ids) - {failure.task_id} and failure.origin_id != "delivery":
             if set(targets) != set(diagnosis.task_ids):
                 raise AA2Error("Cross-task repair requires evidence and owned paths for each existing task")
+        available = (evidence_context or {}).get("allowed_actions")
+        if available is not None:
+            # "blocked" is an inconclusive finding, not authority to stop or execute.
+            selected = "diagnose" if diagnosis.action == "blocked" else diagnosis.action
+            if selected not in available:
+                raise AA2Error("Diagnosis action is unavailable in the current controller state: " + diagnosis.action
+                    + ". Choose from allowed_actions; a recommendation cannot change action prerequisites.")
+            if selected in {"prototype_recheck", "preview_recheck"} and diagnosis.task_ids != [failure.task_id]:
+                raise AA2Error("Evidence refresh must target the current retained task")
         action = diagnosis.action
         tasks, refs, reason = diagnosis.task_ids, diagnosis.evidence_refs, diagnosis.reason
     origins = {t.id: t.origin_id or t.id for t in plan.tasks} if plan else {}

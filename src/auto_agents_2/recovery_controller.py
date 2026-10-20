@@ -174,7 +174,9 @@ class RecoveryController:
                 "failure": failure.model_dump(), "project": project,
                 "diagnosis_feedback": saved.get("diagnosis_feedback"),
                 "specification": self.store.get(rid, "clarify"), "delivery_journal": self.store.get(rid, "delivery/journal"),
-                "constraint": "Delivery may only repair within supplied allowed_paths or recheck. Gate/plan changes require user reconciliation; never invalidate a published journal."}
+                "constraint": "Delivery may only repair within supplied allowed_paths or recheck. Gate/plan changes require user reconciliation; never invalidate a published journal.",
+                "allowed_actions": {name: action.model_dump() for name, action in
+                    self._delivery_candidates(failure, adjudicate(failure), diagnosed=True).items()}}
             diagnosis = policy.completed_diagnosis(rid, permit, failure, active, work, None,
                 authorization_failure=authorization_failure)
             schema_error = None
@@ -192,7 +194,7 @@ class RecoveryController:
                 self.store.checkpoints(rid, {key: {"failure": failure.model_dump(), "evidence_source_hash": evidence_source,
                     "diagnosis_feedback": rejection, "diagnosis_errors": saved.get("diagnosis_errors", 0) + 1},
                     f"recovery/diagnosis-rejections/{failure.id}/{saved['round']}": rejection})
-                policy.complete(rid, permit, {"status": "invalid", "feedback": rejection})
+                self._reject_diagnosis(rid, permit, rejection)
                 return None
             policy.complete(rid, permit, {"status": "validated", "diagnosis": diagnosis.model_dump()})
             if not published:
@@ -400,6 +402,7 @@ class RecoveryController:
                     "diagnosis_feedback": active.get("diagnosis_feedback"),
                     "current_issues": self.store.get(rid, "issues", {}),
                     "observations": self.store.get(rid, "recovery/observations/" + failure.origin_id, []),
+                    "allowed_actions": policy.diagnosis_actions(rid, failure, work, plan),
                 }
                 from .preview_evidence import PreviewEvidence
                 if plan and plan.preview:
@@ -423,7 +426,7 @@ class RecoveryController:
                     active["diagnosis_errors"] = active.get("diagnosis_errors", 0) + 1
                     self.store.checkpoints(rid, {"recovery/active": active,
                         f"recovery/diagnosis-rejections/{failure.id}/{rejected_round}": rejection})
-                    policy.complete(rid, permit, {"status": "invalid", "feedback": rejection})
+                    self._reject_diagnosis(rid, permit, rejection)
                     return
                 policy.complete(rid, permit, {"status": "validated", "diagnosis": diagnosis.model_dump()})
                 active.pop("diagnosis_feedback", None)
@@ -581,6 +584,16 @@ class RecoveryController:
                    if key.startswith("develop/task/") and value.get("recovery_permit") == active.get("permit")]
         updates.update(policy.dispatch_updates(rid, active, targets))
         self._finish(rid, active, updates)
+
+    def _reject_diagnosis(self, rid, permit, rejection):
+        policy = self.engine.recovery_policy
+        if policy.completed_outcome(rid, permit, action="diagnose") is None:
+            policy.complete(rid, permit, {"status": "invalid", "feedback": rejection})
+        else:
+            # Old versions validated schema/citations without checking action eligibility.
+            # Keep that completed receipt immutable; the rejection is a new observation.
+            self.store.event(rid, "recovery.diagnosis_rejected", {"permit": permit,
+                "reason": rejection["validation_error"], "previous_outcome_preserved": True})
 
     async def _diagnose(self, context, work, rid, key):
         try:

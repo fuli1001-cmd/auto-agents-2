@@ -76,6 +76,50 @@ class RecoveryPolicy:
                 reason="提出最小计划修订并经过契约校验及独立审查", **common))
         return choices
 
+    def available_actions(self, rid, failure, work, plan, suggested, *, include_declared_checks=False):
+        """Compute executable choices from controller state before a model recommends one."""
+        choices = self.candidates(failure, plan, suggested, include_declared_checks=include_declared_checks)
+        # A proposal cannot make an evidence-refresh action eligible by naming it.
+        for action in ("prototype_recheck", "preview_recheck"):
+            choices.pop(action, None)
+        prototype_binding = preview_binding = None
+        retained = self.store.get(rid, "develop/task/" + failure.task_id, {})
+        if (plan and failure.task_id in {t.id for t in plan.tasks}
+                and failure.kind in {"review", "evidence"}
+                and retained.get("phase") in {"applied", "tested", "rejected", "reverify"}
+                and implemented_candidate(retained) and not retained.get("commit")
+                and suggested.action not in STAGE_REENTRY_ACTIONS | {"blocked"}
+                and not (self.store.get(rid, "delivery/journal") or {}).get("publication_started")):
+            prototype_binding = self.engine.approvals.recheck_binding(rid, work)
+            if prototype_binding:
+                choices.setdefault("prototype_recheck", RecoveryDecision(action="prototype_recheck",
+                    failure_id=failure.id, task_ids=[failure.task_id], budget_owner=failure.origin_id,
+                    budget_owners=[failure.origin_id], evidence_refs=failure.evidence_refs,
+                    reason="重放已批准原型的既有动作、重新截图并独立复核，再恢复当前候选的任务验收；保留人工批准及计划"))
+            preview_binding = PreviewEvidence(self.engine).binding(rid, work, plan)
+            if preview_binding:
+                choices.setdefault("preview_recheck", RecoveryDecision(action="preview_recheck",
+                    failure_id=failure.id, task_ids=[failure.task_id], budget_owner=failure.origin_id,
+                    budget_owners=[failure.origin_id], evidence_refs=failure.evidence_refs,
+                    reason="读取归档生产预览合同并独立比较完整动作，核验构建后执行完整隔离预览及清理，再审查当前任务候选"))
+        if (self.store.get(rid, "delivery/journal") or {}).get("publication_started"):
+            for action in STAGE_REENTRY_ACTIONS | {"plan_patch"}:
+                choices.pop(action, None)
+        return choices, prototype_binding, preview_binding
+
+    def diagnosis_actions(self, rid, failure, work, plan):
+        suggested = RecoveryDecision(failure_id=failure.id, action="diagnose", task_ids=[failure.task_id] if failure.task_id else [],
+            budget_owner=failure.origin_id, evidence_refs=failure.evidence_refs, reason="Assess current recovery actions")
+        choices, _, _ = self.available_actions(rid, failure, work, plan, suggested, include_declared_checks=True)
+        if not (self.store.get(rid, "delivery/journal") or {}).get("publication_started"):
+            # Re-entry still goes through route_action and its original human gates.
+            for action in sorted(STAGE_REENTRY_ACTIONS):
+                choices[action] = suggested.model_copy(update={"action": action,
+                    "reason": "Return to the owning stage without approving its outputs"})
+        else:
+            choices.pop("plan_patch", None)
+        return {name: action.model_dump() for name, action in choices.items()}
+
     def legacy_questions(self, rid, failure, active):
         progress = self.engine.convergence.state(rid, failure.origin_id)
         count = self.store.get(rid, "recovery/budgets/diagnosis/" + failure.origin_id, {"round": 0})["round"]
@@ -130,25 +174,9 @@ class RecoveryPolicy:
         choices = candidates if candidates is not None else self.candidates(failure, plan, suggested,
             include_declared_checks=diagnosis_assessment)
         prototype_binding = preview_binding = None
-        retained = self.store.get(rid, "develop/task/" + failure.task_id, {})
-        if (candidates is None and plan and failure.task_id in {t.id for t in plan.tasks}
-                and failure.kind in {"review", "evidence"}
-                and retained.get("phase") in {"applied", "tested", "rejected", "reverify"}
-                and implemented_candidate(retained) and not retained.get("commit")
-                and suggested.action not in STAGE_REENTRY_ACTIONS | {"blocked"}
-                and not (self.store.get(rid, "delivery/journal") or {}).get("publication_started")):
-            prototype_binding = self.engine.approvals.recheck_binding(rid, work)
-            if prototype_binding:
-                choices.setdefault("prototype_recheck", RecoveryDecision(action="prototype_recheck",
-                    failure_id=failure.id, task_ids=[failure.task_id], budget_owner=failure.origin_id,
-                    budget_owners=[failure.origin_id], evidence_refs=failure.evidence_refs,
-                    reason="重放已批准原型的既有动作、重新截图并独立复核，再恢复当前候选的任务验收；保留人工批准及计划"))
-            preview_binding = PreviewEvidence(self.engine).binding(rid, work, plan)
-            if preview_binding:
-                choices.setdefault("preview_recheck", RecoveryDecision(action="preview_recheck",
-                    failure_id=failure.id, task_ids=[failure.task_id], budget_owner=failure.origin_id,
-                    budget_owners=[failure.origin_id], evidence_refs=failure.evidence_refs,
-                    reason="读取归档生产预览合同并独立比较完整动作，核验构建后执行完整隔离预览及清理，再审查当前任务候选"))
+        if candidates is None:
+            choices, prototype_binding, preview_binding = self.available_actions(
+                rid, failure, work, plan, suggested, include_declared_checks=diagnosis_assessment)
         if suggested.action == "prototype_recheck" and (
                 not prototype_binding or suggested.task_ids != [failure.task_id]):
             raise StateConflict("Prototype evidence refresh requires matching human consent and the current task")
