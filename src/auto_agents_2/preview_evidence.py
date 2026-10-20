@@ -18,6 +18,7 @@ from .workspace import tree_hash
 
 
 class ActionMapping(Record):
+    source_preview_hash: str = ""
     previous_index: int = Field(ge=0)
     current_indexes: list[int] = Field(min_length=1)
     reason: str = Field(min_length=1)
@@ -53,15 +54,29 @@ class PreviewEvidence:
         # The most recent distinct accepted contract is the predecessor of the
         # current preview, even when subsequent patches changed only task prose.
         previous = next((row for row in reversed(records) if row["preview"] != current), None)
-        return {"current": {"origin": "plan", "plan_hash": digest(plan.model_dump()),
-                            "preview_hash": digest(current), "preview": current},
+        # A gate re-entry archives the accepted contract at the start of the
+        # current planning generation. Preserve it and every later accepted
+        # revision, not only the most recent predecessor. Earlier generations
+        # remain indexed in history; no rejected candidate enters this chain.
+        start = max((i for i, row in enumerate(records) if row["origin"].startswith("recovery/gate-history/")), default=0)
+        chain, seen = [], set()
+        for row in records[start:]:
+            if row["preview_hash"] not in seen and row["preview"] != current:
+                chain.append(row)
+                seen.add(row["preview_hash"])
+        current_record = {"origin": "plan", "plan_hash": digest(plan.model_dump()),
+                          "preview_hash": digest(current), "preview": current}
+        chain.append(current_record)
+        return {"current": current_record, "chain": chain,
                 "previous": previous,
                 "history": [{k: v for k, v in row.items() if k != "preview"} for row in records],
                 "execution_viewports": [{"width": w, "height": h} for w, h in APPLICATION_VIEWPORTS],
                 "browser_version": PROTOTYPE_BROWSER_VERSION,
                 "meaning": "Accepted controller contracts, not execution evidence. Viewports are the controller's "
                            "fixed application execution contract. Compare commands, routes, every operation and "
-                           "assertion, including cleanup; preserve unresolved historical obligations."}
+                           "assertion, including cleanup. The chain contains the archived generation baseline, "
+                           "every distinct accepted successor and the current contract. Preserve all chain obligations; "
+                           "history indexes earlier generations and duplicate snapshots without replacing the chain."}
 
     def binding(self, rid, work, plan):
         contracts = self.contracts(rid, plan)
@@ -74,13 +89,24 @@ class PreviewEvidence:
         return {"contracts_hash": digest(contracts), "approval": approval}
 
     @staticmethod
-    def comparison_valid(comparison, contracts):
-        previous = contracts.get("previous")
-        old = previous["preview"]["actions"] if previous else contracts["current"]["preview"]["actions"]
+    def comparison_sources(contracts):
+        chain = contracts.get("chain")
+        if chain:
+            return chain[:-1] or [contracts["current"]]
+        # Existing single-predecessor evidence remains readable. A new chain
+        # with multiple sources requires explicit source-bound mappings.
+        return [contracts.get("previous") or contracts["current"]]
+
+    @classmethod
+    def comparison_valid(cls, comparison, contracts):
+        sources = cls.comparison_sources(contracts)
+        expected = {(source["preview_hash"], i) for source in sources
+                    for i in range(len(source["preview"]["actions"]))}
         current = contracts["current"]["preview"]["actions"]
         rows = comparison.mappings
-        return (comparison.review.approved and len(rows) == len(old)
-                and {row.previous_index for row in rows} == set(range(len(old)))
+        keys = [(row.source_preview_hash or (sources[0]["preview_hash"] if len(sources) == 1 else ""),
+                 row.previous_index) for row in rows]
+        return (comparison.review.approved and len(keys) == len(expected) and set(keys) == expected
                 and all(len(set(row.current_indexes)) == len(row.current_indexes)
                         and all(0 <= i < len(current) for i in row.current_indexes) for row in rows))
 
@@ -154,10 +180,12 @@ class PreviewEvidence:
             comparison = await engine._invoke("review", {"review_kind": "preview_contract",
                 "preview_contracts": contracts, "task": task.model_dump(),
                 "feedback": failure.model_dump(), "project": engine.contexts.build(work),
-                "instruction": "Independently compare the complete previous and current preview contracts. "
-                    "If previous is absent, inspect the current baseline; reject if the task requires a missing original. "
-                    "Return one mapping for EVERY previous "
-                    "action (zero-based indexes), including setup, assertions and cleanup. Explain changes. "
+                "instruction": "Independently compare every complete historical contract in chain against current. "
+                    "The final chain entry is current; if it is the only entry, inspect that baseline. "
+                    "Reject if the task requires an original not supplied by the controller. "
+                    "Return one mapping for EVERY action of EVERY historical chain source (or current for a "
+                    "single-entry chain), with its source_preview_hash, zero-based previous_index and current_indexes. "
+                    "Cover setup, assertions and cleanup; explain changes and preserve obligations across all versions. "
                     "Check commands, routes, viewport coverage and isolation against the task. Approve only "
                     "when all original obligations are preserved; an execution or delivery is not yet approved."},
                 PreviewComparison, work, rid, key + "/comparison", fresh=True)
