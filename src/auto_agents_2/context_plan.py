@@ -18,8 +18,9 @@ from .research_sections import extract_sections, select_section
 from .util import digest
 from .workspace import git_environment, path_allowed
 
-CONTEXT_VERSION = "context-v1"
+CONTEXT_VERSION = "context-v2"
 TEXT_INLINE = 12000
+REFERENCE_INLINE = 2000
 RESEARCH_INLINE = 16000
 LINKED_INLINE = 4000
 
@@ -147,7 +148,10 @@ class _Selection:
         out = {}
         for key, child in value.items():
             target = f"{path}.{key}"
-            if key in {"test_ids", "passed_test_ids", "observations", "diagnostic_evidence"} and child:
+            if key == "evidence_refs" and isinstance(child, list) and len(json.dumps(child, ensure_ascii=False)) > REFERENCE_INLINE:
+                out[key] = self.reference(child, target,
+                    "Citation index, not additional evidence or obligations; cite supplied source paths directly")
+            elif key in {"test_ids", "passed_test_ids", "observations", "diagnostic_evidence"} and isinstance(child, (list, dict)) and child:
                 out[key] = self.reference(child, target, "Detailed evidence history; current observation is supplied")
             elif key == "output" and child and value.get("logs"):
                 out[key] = {"availability": "in_logs", "reason": "Read the referenced logs when diagnostic detail is needed"}
@@ -191,6 +195,28 @@ class _Selection:
                             for i, row in enumerate(child)]
             else:
                 out[key] = self.compact(child, path + "." + key)
+        return out
+
+    def progress(self, value, path):
+        """Keep measured progress visible without repeating every per-test ledger ID."""
+        out = copy.deepcopy(value)
+        tracked = out.get("tracked")
+        if isinstance(tracked, dict) and isinstance(tracked.get("obligations"), dict):
+            obligations = tracked["obligations"]
+            if len(json.dumps(obligations, ensure_ascii=False)) > REFERENCE_INLINE:
+                tracked["obligations"] = {"total": len(obligations),
+                    "satisfied": sum(v is True for v in obligations.values()),
+                    "unsatisfied": sum(v is False for v in obligations.values()),
+                    "unknown": sum(v is not True and v is not False for v in obligations.values()),
+                    "details": self.reference(obligations, path + ".tracked.obligations",
+                        "Historical per-test progress ledger; current failure evidence is supplied separately")}
+        last = out.get("last")
+        if isinstance(last, dict):
+            for key in ("gains", "regressions", "deferred"):
+                rows = last.get(key)
+                if isinstance(rows, list) and len(json.dumps(rows, ensure_ascii=False)) > REFERENCE_INLINE:
+                    last[key] = {"count": len(rows), "details": self.reference(rows, path + ".last." + key,
+                        "Historical progress identities; inspect when comparing previous methods and outcomes")}
         return out
 
     def plan(self, value, path):
@@ -396,6 +422,9 @@ class _Selection:
                 self.result.payload[key] = [self.research(row, f"{key}[{i}]") for i, row in enumerate(value)]
             elif key in {"unresolved_issues", "current_issues"} and isinstance(value, (list, dict)):
                 self.result.payload[key] = self.issues(value, key)
+            elif key == "observations" and isinstance(value, (list, dict)) and value:
+                self.result.payload[key] = self.reference(value, key,
+                    "Historical observations; current failure evidence is supplied separately")
             elif key in {"specification", "assessment"}:
                 self.result.payload[key] = self.specification(value, key)
             elif key in {"design_candidates", "retained_candidates"}:
@@ -417,6 +446,8 @@ class _Selection:
             elif key == "decision_request":
                 request = copy.deepcopy(value)
                 evidence = request.get("evidence", {})
+                if isinstance(evidence.get("progress"), dict):
+                    evidence["progress"] = self.progress(evidence["progress"], "decision_request.evidence.progress")
                 history = evidence.get("history", {})
                 if isinstance(history, dict) and history.get("recent"):
                     recent = history["recent"]
@@ -430,7 +461,7 @@ class _Selection:
                             outcomes[identity] = i
                             presented = outcome
                         projected.append({"source_ref": f"history.recent[{i}]", "action": row.get("action"),
-                                          "status": row.get("status"), "outcome": presented})
+                                          "status": row.get("status", row.get("phase")), "outcome": presented})
                     history["recent"] = projected
                     if any(set(row) - {"action", "status", "outcome"} for row in recent):
                         history["details"] = self.reference(recent, "history.recent", "Complete recovery permit identities and bindings")
@@ -473,8 +504,9 @@ class _Selection:
     def evidence_dependencies(self):
         """Expose report/log dependencies of selected records, not their entire archive graph."""
         dependencies, visited = {}, set()
-        queue = [(ref, self.result.reference_map.get(ref["hash"], "")) for ref in references(self.result.payload)
-                 if {"kind", "bytes"} <= ref.keys()]
+        selected = [ref for ref in references(self.result.payload) if {"kind", "bytes"} <= ref.keys()]
+        inline = {ref["hash"] for ref in selected}
+        queue = [(ref, self.result.reference_map.get(ref["hash"], "")) for ref in selected]
         while queue:
             ref, source = queue.pop()
             sha = ref["hash"]
@@ -498,7 +530,8 @@ class _Selection:
                             for dependency in references(child):
                                 if (dependency["hash"] in edges and {"kind", "bytes"} <= dependency.keys()
                                         and not dependency["kind"].startswith("research_")):
-                                    dependencies[dependency["hash"]] = copy.deepcopy(dependency)
+                                    if dependency["hash"] not in inline:
+                                        dependencies[dependency["hash"]] = copy.deepcopy(dependency)
                                     queue.append((dependency, source))
                                     if source:
                                         previous = self.result.reference_map.get(dependency["hash"], source)

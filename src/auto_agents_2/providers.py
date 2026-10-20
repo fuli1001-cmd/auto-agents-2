@@ -334,7 +334,7 @@ class ProviderRouter:
             prompt_file = root / "prompt.txt"
             atomic_write(prompt_file, prompt)
             delivery = prepare_prompt(prompt, prompt_file, getattr(transport, "max_prompt_characters", None))
-            session_key = f"session/{operation}/{eff['provider']}/{VIEW_VERSION}/{PROMPT_VERSION}/{eff['fingerprint']}/{digest(self.config.load().sensitive_paths)}"
+            session_key = f"session/{operation}/{eff['provider']}/{VIEW_VERSION}/{PROMPT_VERSION}/{CONTEXT_VERSION}/{eff['fingerprint']}/{digest(self.config.load().sensitive_paths)}"
             previous = self.store.get(run_id, session_key) if not fresh else None
             assets = []
 
@@ -381,7 +381,7 @@ class ProviderRouter:
             argv = transport.argv(eff, workspace, schema_file, out / "result.json", delivery.text, previous,
                                   assets, context_files)
             env = dict(eff["environment"])
-            overlays = self._session_overlay(eff, run_id, operation + VIEW_VERSION + PROMPT_VERSION + eff["fingerprint"] + digest(self.config.load().sensitive_paths))
+            overlays = self._session_overlay(eff, run_id, operation + VIEW_VERSION + PROMPT_VERSION + CONTEXT_VERSION + eff["fingerprint"] + digest(self.config.load().sensitive_paths))
             secret_values = [v for k, v in env.items() if any(s in k.upper() for s in ("TOKEN", "SECRET", "API_KEY", "PASSWORD"))]
             self.store.event(run_id, "agent.started", {"attempt": aid, "operation": operation, "stage": stage,
                              "provider": eff["provider"], "level": eff["level"], "model": eff["model"],
@@ -525,9 +525,21 @@ class ProviderRouter:
         saved = self.store.get(run_id, key)
         if saved:
             record = artifacts.json(saved["artifact"])
+            if record.get("version") == "context-v1":
+                # A pending call can use the new view of its frozen controller
+                # input. Keep the old presentation, completed results, permits
+                # and counters; rendering is not a new logical invocation.
+                key += "/" + CONTEXT_VERSION
+                saved = self.store.get(run_id, key)
+                record = artifacts.json(saved["artifact"]) if saved else None
+            if record is None:
+                return self._freeze_context(artifacts, key, stage, context, workspace, run_id, operation, identity)
             if record.get("version") != CONTEXT_VERSION:
                 raise ProviderError("Unsupported frozen input presentation; preserve the pending request")
             return PreparedContext(**record)
+        return self._freeze_context(artifacts, key, stage, context, workspace, run_id, operation, identity)
+
+    def _freeze_context(self, artifacts, key, stage, context, workspace, run_id, operation, identity):
         prepared = ContextPlanner(artifacts, self.config.load().sensitive_paths).prepare(stage, context, workspace, operation, run_id=run_id)
         ref = artifacts.put(prepared.record(), "prepared_context")
         self.store.checkpoint(run_id, key, {"identity": identity, "artifact": ref})

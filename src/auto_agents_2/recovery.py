@@ -142,11 +142,19 @@ def observation_identity(checks, review=None, environment_error=None):
 
 def evidence_references(failure, project=None, *, context=None):
     """Index supplied controller data, never endorse a model's requested citations."""
-    refs = set(failure.evidence_refs) | supplied_references(failure.evidence, prefixes=("", "failure.evidence."))
+    refs = set(evidence_aliases(failure, project)) | supplied_references(failure.evidence, prefixes=("", "failure.evidence."))
     if context is not None:
         refs.update(supplied_references(context))
-    refs.update((project or {}).get("inventory", []))
     return sorted(refs)
+
+
+def evidence_aliases(failure, project=None):
+    """Persist only explicit aliases; derive structural paths when validating citations.
+
+    Existing records may contain an expanded legacy catalog. Keep those aliases
+    intact so saved requests, permits and citations retain their original meaning.
+    """
+    return sorted(set(failure.evidence_refs) | set((project or {}).get("inventory", [])))
 
 
 def implemented_candidate(saved, accepted=False):

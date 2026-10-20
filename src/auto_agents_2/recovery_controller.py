@@ -20,7 +20,7 @@ from .recovery import (
     adjudicate,
     check_kind,
     check_rows,
-    evidence_references,
+    evidence_aliases,
     failure_summary,
     implemented_candidate,
 )
@@ -155,7 +155,7 @@ class RecoveryController:
         if decision.action == "diagnose":
             authorization_failure = failure
             project = self.engine.contexts.build(work)
-            failure = failure.model_copy(update={"evidence_refs": evidence_references(failure, project)})
+            failure = failure.model_copy(update={"evidence_refs": evidence_aliases(failure, project)})
             saved = {**(saved or {}), "failure": failure.model_dump(), "evidence_source_hash": evidence_source}
             self.store.checkpoint(rid, key, saved)
             if not saved or not saved.get("round"):
@@ -337,7 +337,7 @@ class RecoveryController:
         from .recovery import RecoveryDecision
         policy = engine.recovery_policy
         project = engine.contexts.build(work)
-        failure = failure.model_copy(update={"evidence_refs": evidence_references(failure, project)})
+        failure = failure.model_copy(update={"evidence_refs": evidence_aliases(failure, project)})
         failure_data = failure.model_dump() if failure.reason_code else failure.model_dump(exclude={"reason_code"})
         active["failure"] = failure_data
         active.setdefault("evidence_source_hash", tree_hash(work))
