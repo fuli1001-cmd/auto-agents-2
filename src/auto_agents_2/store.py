@@ -282,6 +282,8 @@ class Store:
             done = set(rows.get("develop/done", [])) - set(journal["affected"])
             done &= {t["id"] for t in journal["plan"]["tasks"]}
             self._put(db, rid, "develop/done", sorted(done))
+            for task_id in set(journal["affected"]) | set(journal.get("patch", {}).get("remove_tasks", [])):
+                db.execute("DELETE FROM checkpoints WHERE run_id=? AND key=?", (rid, "develop/review-evidence/" + task_id))
             for task_id in journal["affected"]:
                 predecessor = task_id
                 if task_id not in journal["reopen"] and task_id not in {t["id"] for t in journal["previous_plan"]["tasks"]}:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from .diagnostics import LOG_KINDS, references
+from .review_evidence import is_review_consumer
 from .util import digest, file_lock, now
 
 
@@ -102,7 +103,9 @@ def collect_artifacts(store):
                         continue  # Its entire owned dependency closure is quarantined.
                     raise
                 active = row["status"] not in {"SUCCEEDED", "CANCELLED"}
-                if row["key"] == "issues":
+                if is_review_consumer(row["key"]):
+                    mark(value, active and value.get("phase") == "pending", True)
+                elif row["key"] == "issues":
                     for issue in value.values():
                         mark(issue, issue.get("status") in {"open", "stale"}, True)
                 else:

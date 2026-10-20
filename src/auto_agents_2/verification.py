@@ -26,6 +26,7 @@ from .models import CheckResult, Command
 from .progress import Activity
 from .readview import sensitive_values
 from .resources import ResourceManager
+from .review_evidence import ReviewEvidence, review_consumer
 from .safe_files import read_regular
 from .sandbox import SandboxRunner
 from .store import Store
@@ -79,6 +80,9 @@ class VerificationService:
                 if (batch.get("commands") != [command.model_dump() for command in commands]
                         or batch.get("environment_hash") != (environment.fingerprint if environment else "host")):
                     raise VerificationRefreshNeeded(batch["checks"], "execution_inputs_changed")
+                if review_consumer.get() and not ReviewEvidence(store).retain(
+                        run["id"], review_consumer.get(), batch["checks"]):
+                    raise VerificationRefreshNeeded(batch["checks"], "review_evidence_released")
                 store.event(run["id"], "verification.result_reused", {"batch": batch_key})
                 return [CheckResult.model_validate(row) for row in batch["checks"]]
             if batch["phase"] == "interrupted":
@@ -108,6 +112,10 @@ class VerificationService:
                 with self.resources.temporary("check") as scratch, self.resources.temporary("check-log") as log_root:
                     result = await self._check(command, workspace, environment, baseline, scratch, activity, log_root)
                     results.append(result)
+                    # Capture recovery can publish/adopt this result before batch completion.
+                    # Transfer ownership before that publisher or scratch cleanup can collect it.
+                    if batch_key and review_consumer.get():
+                        self._publish_batch(run["id"], batch_key, {**batch, "checks": [r.model_dump() for r in results]})
                     if result.exit_code == 0 and run:
                         self._release_resolved_capture(run["id"], result)
                 activity.progress(len(results), len(commands))
@@ -117,15 +125,23 @@ class VerificationService:
         except asyncio.CancelledError:
             activity.finish("interrupted")
             if batch_key:
-                store.checkpoint(run["id"], batch_key, {**batch, "phase": "interrupted", "checks": [r.model_dump() for r in results]})
+                self._publish_batch(run["id"], batch_key, {**batch, "phase": "interrupted", "checks": [r.model_dump() for r in results]})
             raise
         except Exception:
             activity.finish("error")
             raise
         activity.finish("success" if passed(results) else "error")
         if batch_key:
-            store.checkpoint(run["id"], batch_key, {**batch, "phase": "completed", "checks": [r.model_dump() for r in results]})
+            self._publish_batch(run["id"], batch_key, {**batch, "phase": "completed", "checks": [r.model_dump() for r in results]})
         return results
+
+    def _publish_batch(self, rid, key, batch):
+        store, consumer = self.resources.store, review_consumer.get()
+        if consumer:
+            if not ReviewEvidence(store).retain(rid, consumer, batch["checks"], updates={key: batch}):
+                raise VerificationRefreshNeeded(batch["checks"], "review_evidence_released")
+        else:
+            store.checkpoint(rid, key, batch)
 
     async def _check(self, command, workspace, environment, baseline, scratch, activity=None, log_root=None):
         from .collection import capture_policy, run_collection

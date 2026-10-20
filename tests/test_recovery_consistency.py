@@ -120,20 +120,33 @@ async def test_completed_verification_survives_failure_before_consumer_checkpoin
     workflow, rid, work, _, task, contract = await task_fixture(tmp_path)
     environment = await workflow._environment(work, rid, contract)
     commands = workflow._task_commands(rid, task, work, contract)
-    checkpoint = workflow.store.checkpoint
-    def after_result(run_id, key, value):
-        checkpoint(run_id, key, value)
-        if key.startswith("verification/batches/") and value.get("phase") == "completed":
+    checkpoints = workflow.store.checkpoints
+    native_check = workflow.verifier._check
+    images = []
+    async def with_attachment(*args, **kwargs):
+        result = await native_check(*args, **kwargs)
+        image = workflow.artifacts.put("synthetic durable handoff screenshot", "test_diagnostic")
+        images.append(image)
+        return result.model_copy(update={"attachments": [{"path": "view.png", "artifact": image}]})
+    monkeypatch.setattr(workflow.verifier, "_check", with_attachment)
+    def after_result(run_id, values, **kwargs):
+        checkpoints(run_id, values, **kwargs)
+        if any(key.startswith("verification/batches/") and value.get("phase") == "completed"
+               for key, value in values.items()):
             raise RuntimeError("Injected after durable verification")
-    monkeypatch.setattr(workflow.store, "checkpoint", after_result)
-    with pytest.raises(RuntimeError):
+    monkeypatch.setattr(workflow.store, "checkpoints", after_result)
+    with pytest.raises(RuntimeError, match="Injected after durable verification"):
         await workflow._checks(rid, commands, work, environment, task)
-    monkeypatch.setattr(workflow.store, "checkpoint", checkpoint)
+    monkeypatch.setattr(workflow.store, "checkpoints", checkpoints)
+    workflow.resources.collect_artifacts()
+    assert images and all(workflow.artifacts.bytes(image) for image in images)
+    assert workflow.store.get(rid, "develop/review-evidence/" + task.id)["phase"] == "pending"
     async def forbidden(*args, **kwargs):
         pytest.fail("A completed native check cannot execute again")
     monkeypatch.setattr(workflow.verifier, "_check", forbidden)
     rows = await workflow._checks(rid, commands, work, environment, task)
     assert rows and all(row.exit_code == 0 for row in rows)
+    assert [attachment["artifact"] for row in rows for attachment in row.attachments] == images
 
 
 async def test_started_verification_without_result_preserves_occupied_reservation(tmp_path, monkeypatch):

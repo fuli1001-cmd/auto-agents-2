@@ -87,6 +87,7 @@ from .requirements import (
 )
 from .research import ResearchService
 from .resources import ResourceManager
+from .review_evidence import ReviewEvidence, consumer_key, review_consumer
 from .sandbox import SandboxRunner
 from .source_history import SourceHistory
 from .store import Store
@@ -608,6 +609,7 @@ class WorkflowEngine:
     async def _checks(self, rid, commands, work, environment, task=None, *, phase="final", operation=None):
         identity = self._verification_operation(rid, commands, work, environment, task, phase=phase, operation=operation)
         token = verification_operation.set(identity)
+        consumer_token = review_consumer.set(consumer_key(task, phase))
         try:
             return await self.verifier.run(commands, work, environment)
         except VerificationRefreshNeeded as exc:
@@ -630,6 +632,7 @@ class WorkflowEngine:
             raise self._preparation_failure(rid, commands, work, exc, task) from exc
         finally:
             verification_operation.reset(token)
+            review_consumer.reset(consumer_token)
 
     async def _refresh_legacy_approval_context(self, rid):
         """Let an old, unapplied task reassess its exact replan with proven consent.
@@ -1476,7 +1479,8 @@ class WorkflowEngine:
         evidence = [CheckResult.model_validate(c) for c in previous_checks]
         commands = self._candidate_checks(plan, work)
         context["verification_contract"] = self._verification_contract(commands)
-        if not reusable(commands, evidence, work, environment, self.artifacts).allowed:
+        if (not reusable(commands, evidence, work, environment, self.artifacts).allowed
+                or not ReviewEvidence(self.store).retain(rid, consumer_key(), [c.model_dump() for c in evidence])):
             observation_round = self.store.get(rid, "automation/final-round", 0) + 1
             self.store.checkpoint(rid, "automation/final-round", observation_round)
             evidence = await self._checks(rid, commands, work, environment)
@@ -1525,13 +1529,14 @@ class WorkflowEngine:
                                                "prototype_approval": context.get("prototype_approval", {})},
                                     ReviewResult, work, rid, "final-review", fresh=True)
         if not review.approved:
-            self.store.checkpoint(rid, "verify/review", review.model_dump())
+            ReviewEvidence(self.store).complete(rid, consumer_key(), [r.model_dump() for r in evidence],
+                updates={"verify/review": review.model_dump()})
             self._final_progress(rid, plan, observation_round, frontend=result.frontend, visuals=visuals)
             raise RecoveryNeeded(FailureRecord.create(kind="review", component="final_review", origin_id="final",
                 step="final_review", obligations=[r.id for r in result.requirements], evidence_refs=["verify/review", "verify/checks"],
                 evidence={"review": review.model_dump(), "checks": [r.model_dump() for r in evidence]}))
-        self.store.checkpoint(rid, "verify/review", review.model_dump())
-        self.store.checkpoint(rid, "verify/review_identity", review_key)
+        ReviewEvidence(self.store).complete(rid, consumer_key(), [r.model_dump() for r in evidence],
+            updates={"verify/review": review.model_dump(), "verify/review_identity": review_key})
         self._task_design_context(rid, work)
         if (git(work, "rev-parse", "HEAD") != candidate or tree_hash(work) != candidate_hash
                 or git(work, "diff", "--name-only", "HEAD")):
@@ -1887,7 +1892,8 @@ class WorkflowEngine:
             commands = self._task_commands(rid, task, work, plan)
             task_context["verification_contract"] = self._verification_contract(commands)
             reuse = reusable(commands, prior_checks, work, environment, self.artifacts)
-            if saved.get("phase") == "tested" and reuse.allowed:
+            if (saved.get("phase") == "tested" and reuse.allowed
+                    and ReviewEvidence(self.store).retain(rid, consumer_key(task), [c.model_dump() for c in prior_checks])):
                 checks = prior_checks
             else:
                 if any(row.checker_version != CHECKER_VERSION for row in prior_checks):
@@ -1932,14 +1938,14 @@ class WorkflowEngine:
                     self._task_progress(rid, task, saved, checked=True, approved=True)
                     recovery_ref = f"refs/aa2/{rid}/tasks/{task.id}/r{state['revision']}/{base[:8]}"
                     commit = self.workspaces.checkpoint(work, recovery_ref, f"aa2: {task.title}")
-                    self.store.checkpoints(rid, {key: {**saved, "commit": commit, "workspace": str(work), "recovery_ref": recovery_ref},
+                    ReviewEvidence(self.store).complete(rid, consumer_key(task), [c.model_dump() for c in checks], updates={key: {**saved, "commit": commit, "workspace": str(work), "recovery_ref": recovery_ref},
                         state_key: {**state, "implementation": "accepted", "evidence": "valid"}})
                     self.recovery_policy.task_outcome(rid, saved, task.id, {"status": "verified", "commit": commit,
                         "source_hash": saved["source_hash"], "evidence": key})
                     return commit
             self._task_progress(rid, task, saved, checked=True)
             saved["phase"] = "rejected"
-            self.store.checkpoint(rid, key, saved)
+            ReviewEvidence(self.store).complete(rid, consumer_key(task), [c.model_dump() for c in checks], updates={key: saved})
             raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="review", step="review"))
     async def _ensure_browser(self, rid, workspace):
         cache = self.store.root / "cache/browsers"
@@ -2096,8 +2102,8 @@ class WorkflowEngine:
                                     "evidence": [c.model_dump() for c in evidence], "implemented_visuals": visuals},
                                     ReviewResult, work, rid, "no-change-review", fresh=True)
         if not review.approved:
-            self.store.checkpoints(rid, {"verify/review": review.model_dump(),
-                                         "verify/checks": [row.model_dump() for row in evidence]})
+            ReviewEvidence(self.store).complete(rid, consumer_key(), [row.model_dump() for row in evidence],
+                updates={"verify/review": review.model_dump(), "verify/checks": [row.model_dump() for row in evidence]})
             raise RecoveryNeeded(FailureRecord.create(kind="review", component="reuse_review", origin_id="final",
                 step="reuse_review", phase="reuse", obligations=[digest(c.model_dump()) for c in checks],
                 evidence_refs=["verify/review", "verify/checks"],
@@ -2108,8 +2114,8 @@ class WorkflowEngine:
             raise StateConflict("Reused candidate changed during verification")
         self._require_candidate_evidence(rid, checks, evidence, work, environment,
                                          phase="reuse", expected_source=candidate_hash)
-        self.store.checkpoint(rid, "verify/checks", [c.model_dump() for c in evidence])
-        self.store.checkpoint(rid, "verify/review", review.model_dump())
+        ReviewEvidence(self.store).complete(rid, consumer_key(), [c.model_dump() for c in evidence],
+            updates={"verify/checks": [c.model_dump() for c in evidence], "verify/review": review.model_dump()})
         self.store.checkpoint(rid, "verify/identity", digest([tree_hash(work), environment.fingerprint,
                               [c.model_dump() for c in evidence], review.model_dump()]))
         self.store.update(rid, coverage_evidence=evidence_run, external_dependencies=inherited.get("external_dependencies", False))
@@ -2271,6 +2277,8 @@ class WorkflowEngine:
                 ReviewResult, work, rid, f"reintegration-review/{journal['reintegrations']}", fresh=True)
             if not review.approved:
                 self.recovery.complete_delivery_recheck(rid, {"review": review.model_dump()})
+                ReviewEvidence(self.store).complete(rid, consumer_key(phase="reintegration"),
+                    [c.model_dump() for c in evidence])
                 await self._delivery_repair(rid, work, {"review": review.model_dump()},
                                             [p for p in git(work, "ls-files", "-z").split("\0") if p], observation=observation)
                 continue
@@ -2282,8 +2290,8 @@ class WorkflowEngine:
             self._task_approval_context(rid, work, {"specification": self.store.get(rid, "clarify", {})})
             identity = digest([candidate, before, environment.fingerprint, [c.model_dump() for c in evidence], review.model_dump()])
             self.store.checkpoint(rid, "verify/identity", identity)
-            self.store.checkpoint(rid, "verify/checks", [c.model_dump() for c in evidence])
-            self.store.checkpoint(rid, "verify/review", review.model_dump())
+            ReviewEvidence(self.store).complete(rid, consumer_key(phase="reintegration"), [c.model_dump() for c in evidence],
+                updates={"verify/checks": [c.model_dump() for c in evidence], "verify/review": review.model_dump()})
             visuals = self._archive_visuals(visuals)
             self.store.checkpoint(rid, "verify/visuals", visuals)
             self.recovery.complete_delivery_recheck(rid, {"checks": [c.model_dump() for c in evidence],
