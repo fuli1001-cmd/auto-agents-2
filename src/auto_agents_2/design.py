@@ -26,6 +26,7 @@ from .sandbox import SandboxRunner
 from .util import atomic_write, digest, scrub_text
 
 PROTOTYPE_BROWSER_VERSION = 6
+APPLICATION_VIEWPORTS = ((1440, 900), (390, 844))
 
 
 class DesignCatalog:
@@ -462,9 +463,10 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
                 for index, route in enumerate(spec.routes):
                     if not route.startswith("/") or route.startswith("//"):
                         raise AA2Error("Preview routes must be local paths")
-                    for width, height in ((1440, 900), (390, 844)):
+                    for width, height in APPLICATION_VIEWPORTS:
                         errors, completed = [], []
-                        row = {"route": route, "viewport": width, "errors": errors, "status": 0, "actions": completed}
+                        row = {"route": route, "viewport": width, "viewport_height": height,
+                               "errors": errors, "status": 0, "actions": completed}
                         results.append(row)
                         context = await preview_context(browser, f"http://127.0.0.1:{port}", errors, width, height)
                         try:
@@ -537,6 +539,9 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
             finally:
                 if process.cleanup_confirmed:
                     shutil.rmtree(scratch, ignore_errors=True)
+                for row in results:
+                    row["cleanup"] = {"process_stopped": process.cleanup_confirmed,
+                                      "scratch_removed": not scratch.exists()}
         if cleanup_errors:
             if original is None:
                 raise cleanup_errors[0]

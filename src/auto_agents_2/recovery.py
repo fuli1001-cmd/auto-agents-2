@@ -10,7 +10,7 @@ from .evidence_refs import controller_context_catalog, supplied_references
 from .models import Command, Record, RecoveryRequest
 from .util import digest
 
-Action = Literal["diagnose", "recheck", "prototype_recheck", "repair", "plan_patch", "clarify", "provider_research", "prototype", "design", "readme", "blocked"]
+Action = Literal["diagnose", "recheck", "prototype_recheck", "preview_recheck", "repair", "plan_patch", "clarify", "provider_research", "prototype", "design", "readme", "blocked"]
 COLLECTION_FAILURES = {"test_report_missing", "test_report_invalid", "incomplete_log_capture",
                        "source_changed", "execution_inputs_changed", "test_attachments_invalid", "evidence_collection_failed", "unsupported_test_runner"}
 

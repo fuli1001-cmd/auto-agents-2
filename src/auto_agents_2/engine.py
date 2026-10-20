@@ -63,6 +63,7 @@ from .models import (
 from .patch_repair import PatchRepairService
 from .plan_revision import materialize_plan
 from .planning import ready_batch, validate_plan
+from .preview_evidence import PreviewEvidence
 from .profiles import ProjectProfile
 from .progress import observe_activity, safe_event
 from .proposal_recovery import ProposalRecovery
@@ -1513,8 +1514,9 @@ class WorkflowEngine:
                                          phase="final", expected_source=candidate_hash)
         context.update(self._task_design_context(rid, work))
         context["source_history"] = SourceHistory(self).collect(rid, work)
+        context["preview_contracts"] = PreviewEvidence(self).contracts(rid, plan)
         review_key = digest([verify_key, [r.model_dump() for r in evidence], visuals,
-                             context["design_review"], context["source_history"]])
+                             context["design_review"], context["source_history"], context["preview_contracts"]])
         cached_review = self.store.get(rid, "verify/review") if self.store.get(rid, "verify/review_identity") == review_key else None
         review = ReviewResult.model_validate(cached_review) if cached_review else await self._invoke("verify", {**context, "project": self.contexts.build(work),
                                                "evidence": [r.model_dump() for r in evidence],
@@ -1791,6 +1793,7 @@ class WorkflowEngine:
                         raise RecoveryNeeded(self._task_failure(rid, task, saved))
                 counters["round"] += 1
                 saved = {"phase": "implementing", "workspace": str(work), "source_hash": tree_hash(work),
+                    "preview_permit": saved.get("preview_permit"),
                     "recovery_permit": saved.get("recovery_permit"),
                     "observation_id": ["implementation", task.origin_id or task.id, counters["round"]], "feedback": {
                     **saved.get("feedback", {}), **{k: v for k, v in saved.items() if k in {
@@ -1805,6 +1808,8 @@ class WorkflowEngine:
                             "design": context.get("design"), "feedback": feedback, "unresolved_issues": IssueLedger(self.store, self.artifacts).unresolved(rid),
                             "project": self.contexts.build(work, scopes=task.allowed_paths)}
             task_context["source_history"] = SourceHistory(self).collect(rid, work, task.allowed_paths)
+            if plan.preview:
+                task_context["preview_contracts"] = PreviewEvidence(self).contracts(rid, plan)
             retained = feedback.get("baseline_refresh", {}).get("retained_candidate")
             if retained:
                 task_context["context_files"] = [str(self.artifacts.root / retained["hash"][:2] / retained["hash"])]
@@ -1908,6 +1913,11 @@ class WorkflowEngine:
                 task_context.update(self._task_approval_context(rid, work, context))
                 task_context["source_history"] = SourceHistory(self).collect(rid, work, task.allowed_paths)
                 task_context.update(self._task_design_context(rid, work))
+                preview_context = PreviewEvidence(self).context(rid, work, plan, environment, task_id=task.id)
+                preview_required = bool(saved.get("preview_permit"))
+                if preview_required and not preview_context:
+                    raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="evidence", step="preview_stale"))
+                task_context.update(preview_context)
                 review = await self._invoke("review", {**task_context, "implementation": change.model_dump(),
                                                        "project": self.contexts.build(work, scopes=task.allowed_paths),
                                                        "checks": [c.model_dump() for c in checks],
@@ -1917,6 +1927,8 @@ class WorkflowEngine:
                     self._task_approval_context(rid, work, context)
                     self._task_design_context(rid, work)
                     self._require_task_evidence(rid, task, saved, commands, checks, work, environment)
+                    if preview_required and not PreviewEvidence(self).context(rid, work, plan, environment, task_id=task.id):
+                        raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="evidence", step="preview_stale"))
                     self._task_progress(rid, task, saved, checked=True, approved=True)
                     recovery_ref = f"refs/aa2/{rid}/tasks/{task.id}/r{state['revision']}/{base[:8]}"
                     commit = self.workspaces.checkpoint(work, recovery_ref, f"aa2: {task.title}")
@@ -2077,6 +2089,7 @@ class WorkflowEngine:
                                          phase="reuse", expected_source=candidate_hash)
         review = await self._invoke("verify", {**approval_context, "project": self.contexts.build(work),
                                     "source_history": SourceHistory(self).collect(rid, work),
+                                    "preview_contracts": PreviewEvidence(self).contracts(source_run or rid, plan),
                                     "verification_contract": self._verification_contract(checks),
                                     "specification": self.store.get(rid, "clarify"),
                                     "approved_prototype_visuals": self.store.get(rid, "prototype_approval", {}).get("visuals", []),
@@ -2250,6 +2263,7 @@ class WorkflowEngine:
                 continue
             review = await self._invoke("verify", {**approval_context, "project": self.contexts.build(work), "specification": self.store.get(rid, "clarify"),
                 "design_review": DesignDocuments(self).context(rid, work),
+                "preview_contracts": PreviewEvidence(self).contracts(rid, plan),
                 "source_history": SourceHistory(self).collect(rid, work),
                 "verification_contract": self._verification_contract(checks),
                 "approved_prototype_visuals": self.store.get(rid, "prototype_approval", {}).get("visuals", []),

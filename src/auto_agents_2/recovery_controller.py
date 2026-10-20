@@ -380,7 +380,7 @@ class RecoveryController:
                 decision, permit = await policy.authorize(rid, failure, active, work, plan, suggested,
                     operation=f"choose/{budget['round']}/{active.get('diagnosis_errors', 0)}",
                     correction=active.get("diagnosis_errors", 0) == 1, prerequisite_resolved=capture_retry,
-                    force_decision=active.get("diagnosis_errors", 0) >= 2
+                    force_decision=failure.component == "preview_verification" or active.get("diagnosis_errors", 0) >= 2
                         or suggested.action == "recheck" and repeated_recheck())
             if decision.action == "diagnose":
                 if not active.get("diagnosis_round"):
@@ -401,6 +401,9 @@ class RecoveryController:
                     "current_issues": self.store.get(rid, "issues", {}),
                     "observations": self.store.get(rid, "recovery/observations/" + failure.origin_id, []),
                 }
+                from .preview_evidence import PreviewEvidence
+                if plan and plan.preview:
+                    diagnosis_context["preview_contracts"] = PreviewEvidence(engine).contracts(rid, plan)
                 diagnosis = policy.completed_diagnosis(rid, permit, failure, active, work, plan)
                 schema_error = None
                 if diagnosis is None:
@@ -467,6 +470,28 @@ class RecoveryController:
                 "implementation": ImplementationResult(summary="Retained candidate after prototype evidence refresh").model_dump(),
                 "feedback": {**saved.get("feedback", {}), "controller_recovery": {**decision.model_dump(),
                     "prototype_browser_report": refreshed["report"], "independent_review": refreshed["review"]}}},
+                "verify/identity": None}
+            updates.update(policy.dispatch_updates(rid, active, [failure.task_id]))
+            self._finish(rid, active, updates)
+            return
+        if decision.action == "preview_recheck":
+            from .preview_evidence import PreviewEvidence
+            successor = await PreviewEvidence(engine).recheck(rid, work, plan, active["permit"], failure)
+            if successor:
+                self._finish(rid, active, {}, successor=successor.model_dump())
+                return
+            key = "develop/task/" + failure.task_id
+            saved = self.store.get(rid, key, {})
+            refreshed = self.store.get(rid, "recovery/preview-rechecks/" + digest(active["permit"]))
+            task = next(t for t in plan.tasks if t.id == failure.task_id)
+            commands = {digest(c.model_dump()) for c in engine._task_commands(rid, task, work, plan)}
+            updates = {key: {**saved, "phase": "tested", "recovery_permit": active["permit"],
+                "implementation": ImplementationResult(summary="Retained candidate after production preview evidence collection").model_dump(),
+                "preview_permit": active["permit"],
+                "source_hash": refreshed["execution"]["source_hash"],
+                "checks": [row for row in refreshed["checks"] if row["command_hash"] in commands],
+                "feedback": {**saved.get("feedback", {}), "controller_recovery": {**decision.model_dump(),
+                    "preview_report": refreshed["report"], "contract_comparison": refreshed["comparison"]}}},
                 "verify/identity": None}
             updates.update(policy.dispatch_updates(rid, active, [failure.task_id]))
             self._finish(rid, active, updates)

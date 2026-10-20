@@ -7,7 +7,7 @@ from .prompt_rules import COMMON, instructions
 from .research import request_documents
 
 INVOCATION_CONTRACT_VERSION = "2026-10-16.2"
-PROMPT_VERSION = "2026-10-19.review-evidence-v1"
+PROMPT_VERSION = "2026-10-20.preview-evidence-v1"
 CORE = COMMON
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
@@ -24,6 +24,8 @@ DIAGNOSIS_ACTIONS = (
     "Use prototype_recheck when offered to replay the unchanged, human-approved prototype actions, "
     "recapture browser images and independently review them before resuming the retained task's acceptance. "
     "This controller action preserves human consent, task code and the plan; production checks cannot replace it. "
+    "Use preview_recheck when offered to compare archived production preview contracts, verify build inputs, "
+    "and execute the full isolated production preview with cleanup before task review. "
     "Use repair for justified changes within accepted task scopes, or plan_patch for changes to those contracts. "
     "diagnose requests another read-only model analysis; it does not execute commands or modify files. "
     "If inconclusive, identify the missing observation and the useful next action so the decision service can assess it. "
@@ -68,6 +70,10 @@ class PromptCompiler:
             task += (" When scope.candidates offers prototype_recheck, the controller can recapture and independently "
                      "review the existing approved prototype without regenerating it or reapproving its design. "
                      "Use it for missing or disputed prototype evidence; recheck only executes production checks.")
+            task += (" When preview_recheck is offered, the controller supplies the original archived preview contract, "
+                     "independently compares every action against the current contract, and then executes the full "
+                     "production preview and cleanup with verified build inputs. It preserves the task candidate and "
+                     "requires task review afterward. Do not ask the user for an internal archive already supplied here.")
             task += (" evidence_refs may cite only records under decision_request.evidence (or their supplied aliases). "
                      "scope, candidates, budget, selected_action and state_identity are decision controls, not evidence references. "
                      "Do not cite those controls in evidence_refs, even when explaining why an action is allowed.")
@@ -147,6 +153,7 @@ class PromptCompiler:
             task += {
                 "recovery_diagnosis": " Diagnose the supplied FailureRecord, not implementation acceptance. Return Diagnosis. Inspect source and actual machine reports; model rollback text is a proposal, not fact. Distinguish collection/build/approval transmission from product defects. A design/test mismatch requires explaining approved behaviour before proposing any test changes; protected tests remain independently reviewed. Actual human approval is required, but an old pending label does not invalidate a matching controller receipt. Genuine requirements/design/prototype changes use their corresponding gate." + DIAGNOSIS_ACTIONS,
                 "plan_patch": " Review this local plan amendment against the previous plan and verified failure. Check that task scopes and dependencies suffice, all requirements/acceptance/checks survive, expected_tests never decreases, budgets keep their origins, no origin merge occurs, and affected tasks/reopen choices are conservative. Test target substitutions or deletions cannot conceal failures. Reject unnecessary changes or scope expansion without evidence. Product implementation need not exist for new repair tasks.",
+                "preview_contract": " This gate compares the archived and current PRODUCTION PREVIEW CONTRACTS before execution. Return PreviewComparison with a complete zero-based mapping for every original action, explaining changed operations and assertions. Check commands, routes, full viewport dimensions, data isolation and cleanup. Reject missing original contracts required by the task, lost assertions or weaker obligations; action counts alone do not prove preservation. Passing this gate permits controller execution only. Browser results and task acceptance are reviewed afterward.",
                 "plan": " This is a PRE-IMPLEMENTATION planning gate. Assess coverage, task granularity, DAG, allowed paths, dependency declarations and executable future acceptance checks. Product files and passing task tests are not expected to exist yet. Their absence is not a defect in the plan. Do not evaluate the plan as a completed implementation.",
                 "test_changes": " This is a PRE-APPLICATION candidate gate. Evaluate the proposed test/config diff against requirements and existing expectations. New tests may be added; existing cases/assertions must not be deleted or weakened to fit an implementation. The candidate is not applied yet, so missing files or unexecuted new tests are expected.",
                 "prototype": " This gate checks only the static interactive prototype and its browser evidence. Production features, database integration and final application tests are not expected at this stage. For capture_mode=viewport_tiles, the main screenshot is the immediate final-state viewport and tiles are additional intact images at recorded scroll positions, with the same viewport dimensions. Inspect the relevant images together and the terminal assertions; never infer offscreen content from image paths or counts.",

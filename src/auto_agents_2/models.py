@@ -136,7 +136,7 @@ class PlanResult(Record):
 
 class RecoveryRequest(Record):
     reason: str
-    suggested_action: Literal["diagnose", "recheck", "prototype_recheck", "repair", "plan_patch", "clarify", "provider_research", "prototype", "design", "readme"] = "diagnose"
+    suggested_action: Literal["diagnose", "recheck", "prototype_recheck", "preview_recheck", "repair", "plan_patch", "clarify", "provider_research", "prototype", "design", "readme"] = "diagnose"
     evidence_refs: list[str] = []
 
 

@@ -41,6 +41,8 @@ async def test_static_interaction_and_implemented_preview(browser_cache, tmp_pat
                        routes=["/index.html"], actions=actions)
     actual = await inspect_application(spec, directory, tmp_path / "actual-images", Environment(Path(sys.prefix), "fixture"), runner, root)
     assert len(actual) == 2 and all(r["status"] == 200 and len(r["actions"]) == 2 for r in actual)
+    assert {(r["viewport"], r["viewport_height"]) for r in actual} == {(1440, 900), (390, 844)}
+    assert all(r["cleanup"] == {"process_stopped": True, "scratch_removed": True} for r in actual)
     assert not list((root / "processes").glob("*.json"))
     assert not list((root / "tmp").glob("preview-*"))
 
