@@ -251,7 +251,7 @@ class Store:
                 if (not value or value.get("phase") != "completed" or value.get("outcome") != previous.get("outcome")
                         or action_contract(value.get("action", {})) != action_contract(previous.get("action", {}))
                         or any(value.get(name) != previous.get(name) for name in
-                               ("source_hash", "plan_hash", "task_scopes", "cycle_id", "owner"))):
+                               ("source_hash", "plan_hash", "task_scopes", "prototype_binding", "cycle_id", "owner"))):
                     raise StateConflict("Completed action outcome cannot be overwritten")
             if value and value.get("phase") == "completed":
                 value = {**value, "outcome_hash": digest(value.get("outcome", {}))}
@@ -554,6 +554,24 @@ class Store:
                        (rid, f"replan-stalled/{pending['evaluation']}"))
             self._event(db, rid, event, {"task": task_key, "recovery": recovery_key})
 
+    def refresh_design_questions(self, rid, previous, updated, keys, questions, history_key, record):
+        """Publish a reconciled design proposal without losing concurrent human answers."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key='candidate/design'", (rid,)).fetchone()
+            current = self._decision_questions(db, rid, keys)
+            fingerprint = digest(previous["document"])
+            if (not row or json.loads(row[0]) != previous or current != questions
+                    or any(q["answer"] is not None and q["artifact_hash"] == fingerprint for q in current)):
+                from .faults import StateConflict
+                raise StateConflict("Design questions changed during evidence refresh; preserve the proposal and human answers")
+            self._put(db, rid, history_key, record)
+            self._put(db, rid, "candidate/design", updated)
+            for key in keys:
+                db.execute("UPDATE questions SET superseded=1 WHERE run_id=? AND key=? AND artifact_hash=? AND answer IS NULL",
+                           (rid, key, fingerprint))
+            self._event(db, rid, "design.questions_refreshed", {"history": history_key})
+
     @staticmethod
     def _question(row):
         values = dict(row)
@@ -704,7 +722,7 @@ class Store:
                 key, value = row["key"], json.loads(row["data"])
                 if key.startswith("develop/task/"):
                     result[key] = {k: value[k] for k in ("commit", "checks", "review", "source_hash") if k in value}
-                elif key in {"capture", "clarify", "provider_research", "prototype", "prototype_approval", "design", "plan", "issues",
+                elif key in {"capture", "clarify", "provider_research", "prototype", "prototype_approval", "design", "design/review-receipt", "plan", "issues",
                              "coverage_checks", "verify/identity", "verify/checks", "verify/review", "verify/visuals"} or key.startswith(
                                  ("rounds/", "budget_grants/", "plan_revision/", "task_state/", "recovery/", "migration/", "automation/", "decisions/")):
                     result[key] = value

@@ -26,7 +26,7 @@ LINKED_INLINE = 4000
 
 # Known workflow slots must be explicitly admitted for each purpose. Unknown
 # extension fields remain mandatory; a new purpose must always be registered.
-SHARED = {"task", "mandatory", "constraints", "global_constraints", "prototype_approval", "feedback",
+SHARED = {"task", "mandatory", "constraints", "global_constraints", "prototype_approval", "design_review", "source_history", "feedback",
           "controller_feedback", "evidence_reference_contract", "validation_feedback"}
 CONTRACTS = {
     "clarify": {"raw_requirements", "raw_requirements_truncated", "history", "project", "decisions",
@@ -36,8 +36,10 @@ CONTRACTS = {
     "provider_research": {"specification", "project", "provider_research_answer"},
     "research": {"research", "retrieved_sources"},
     "prototype": {"specification", "project", "design_baseline", "design_candidates", "prototype_answer",
-                  "controller_browser_report", "previous_prototype", "prototype", "design_evidence", "browser_evidence"},
-    "design": {"specification", "project", "provider_research", "prototype", "design_answer", "design"},
+                  "controller_browser_report", "previous_prototype", "prototype", "design_evidence", "browser_evidence",
+                  "unresolved_issues"},
+    "design": {"specification", "project", "provider_research", "prototype", "design_answer", "design",
+               "design_review_evidence", "design_documents"},
     "plan": {"specification", "project", "design", "provider_research", "prototype", "plan",
              "planning_mode", "coverage_verification", "task_origins", "task_budgets", "task_origin_validation",
              "unresolved_issues", "plan_answer"},
@@ -510,7 +512,8 @@ class _Selection:
         while queue:
             ref, source = queue.pop()
             sha = ref["hash"]
-            if sha in visited or ref["kind"].startswith("research_") or self.artifacts.released(ref):
+            if (sha in visited or ref["kind"].startswith("research_")
+                    or ref["kind"] in {"source_snapshot", "source_diff"} or self.artifacts.released(ref)):
                 continue
             visited.add(sha)
             with self.artifacts.store.connect() as db:
@@ -526,9 +529,11 @@ class _Selection:
             def visit(value):
                 if isinstance(value, dict):
                     for key, child in value.items():
-                        if key in {"logs", "report", "attachments", "image_artifact", "diagnostic_evidence"}:
+                        source_file = ref["kind"] == "source_history" and key in {"content", "diff"}
+                        if source_file or key in {"logs", "report", "attachments", "image_artifact", "diagnostic_evidence"}:
                             for dependency in references(child):
                                 if (dependency["hash"] in edges and {"kind", "bytes"} <= dependency.keys()
+                                        and (not source_file or dependency["kind"] in {"source_snapshot", "source_diff"})
                                         and not dependency["kind"].startswith("research_")):
                                     if dependency["hash"] not in inline:
                                         dependencies[dependency["hash"]] = copy.deepcopy(dependency)

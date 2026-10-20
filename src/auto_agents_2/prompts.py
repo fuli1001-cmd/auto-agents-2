@@ -7,7 +7,7 @@ from .prompt_rules import COMMON, instructions
 from .research import request_documents
 
 INVOCATION_CONTRACT_VERSION = "2026-10-16.2"
-PROMPT_VERSION = "2026-10-19.action-authority-v1"
+PROMPT_VERSION = "2026-10-19.review-evidence-v1"
 CORE = COMMON
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
@@ -21,6 +21,9 @@ DIAGNOSIS_ACTIONS = (
     "or controller-indexed failure.evidence_refs. Existing proposal paths may describe unverified suggestions "
     "alongside controller evidence; proposal contents cannot create evidence IDs or prove checks passed. "
     "Use recheck to execute the existing check contract and gather missing evidence. "
+    "Use prototype_recheck when offered to replay the unchanged, human-approved prototype actions, "
+    "recapture browser images and independently review them before resuming the retained task's acceptance. "
+    "This controller action preserves human consent, task code and the plan; production checks cannot replace it. "
     "Use repair for justified changes within accepted task scopes, or plan_patch for changes to those contracts. "
     "diagnose requests another read-only model analysis; it does not execute commands or modify files. "
     "If inconclusive, identify the missing observation and the useful next action so the decision service can assess it. "
@@ -62,6 +65,9 @@ class PromptCompiler:
         data = json.dumps(request_documents(context), ensure_ascii=False, indent=2)
         task = ROLES[stage]
         if stage == "decision":
+            task += (" When scope.candidates offers prototype_recheck, the controller can recapture and independently "
+                     "review the existing approved prototype without regenerating it or reapproving its design. "
+                     "Use it for missing or disputed prototype evidence; recheck only executes production checks.")
             task += (" evidence_refs may cite only records under decision_request.evidence (or their supplied aliases). "
                      "scope, candidates, budget, selected_action and state_identity are decision controls, not evidence references. "
                      "Do not cite those controls in evidence_refs, even when explaining why an action is allowed.")
@@ -96,6 +102,19 @@ class PromptCompiler:
                      "that resulting file is the entry document and is not overwritten by document. "
                      "Preserve existing architecture when adding an increment and read exact current anchors. "
                      "Do not modify implementation, requirements, prototype assets or controller plan/environment records.")
+        if stage == "design":
+            task += (" Submit the design candidate before its independent review; the controller applies and reviews it next. "
+                     "Never ask the user to provide controller review decisions, hashes, internal reports or historical test "
+                     "baselines. Use design_review_evidence and source_history when supplied. If a matching architecture "
+                     "decision is missing, submit the unchanged current documents for review without claiming approval. "
+                     "Keep actual product questions and missing user information; preserve every unresolved audit obligation.")
+        if stage in {"implement", "review", "verify"}:
+            task += (" design_review contains the controller's document-bound architecture decision, distinct from prototype "
+                     "approval and task acceptance. Historical pending-review prose does not override a matching receipt. "
+                     "source_history provides exact public files and diffs from recorded "
+                     "baselines and recovery snapshots. The mounted Git repository is only a filtered current snapshot: "
+                     "read those history artifacts for test-change audits. A no-op implementation.changes does not prove "
+                     "historical tests were unchanged. Missing comparison evidence still blocks an audit that requires it.")
         if stage in {"plan", "implement"} or stage == "review" and context.get("review_kind") in {"plan", "plan_patch"}:
             task += (" DESIGN.md, docs/aa2, docs/requirements and design/prototypes are stage-owned contracts. "
                      "Never assign their creation or modification to an implementation task, even in allowed_paths. "
@@ -130,7 +149,7 @@ class PromptCompiler:
                 "plan_patch": " Review this local plan amendment against the previous plan and verified failure. Check that task scopes and dependencies suffice, all requirements/acceptance/checks survive, expected_tests never decreases, budgets keep their origins, no origin merge occurs, and affected tasks/reopen choices are conservative. Test target substitutions or deletions cannot conceal failures. Reject unnecessary changes or scope expansion without evidence. Product implementation need not exist for new repair tasks.",
                 "plan": " This is a PRE-IMPLEMENTATION planning gate. Assess coverage, task granularity, DAG, allowed paths, dependency declarations and executable future acceptance checks. Product files and passing task tests are not expected to exist yet. Their absence is not a defect in the plan. Do not evaluate the plan as a completed implementation.",
                 "test_changes": " This is a PRE-APPLICATION candidate gate. Evaluate the proposed test/config diff against requirements and existing expectations. New tests may be added; existing cases/assertions must not be deleted or weakened to fit an implementation. The candidate is not applied yet, so missing files or unexecuted new tests are expected.",
-                "prototype": " This gate checks only the static interactive prototype and its browser evidence. Production features, database integration and final application tests are not expected at this stage.",
+                "prototype": " This gate checks only the static interactive prototype and its browser evidence. Production features, database integration and final application tests are not expected at this stage. For capture_mode=viewport_tiles, the main screenshot is the immediate final-state viewport and tiles are additional intact images at recorded scroll positions, with the same viewport dimensions. Inspect the relevant images together and the terminal assertions; never infer offscreen content from image paths or counts.",
                 "design": " This is a PRE-IMPLEMENTATION architecture gate. Assess boundaries, contracts, data invariants and verification strategy against the specification. Implementation files are not expected yet.",
                 "research": " This gate assesses external-service claims only. Use the controller's retrieved documents to check that URLs are first-party, versions and claims match the cited text, and documented capabilities are distinguished from actual live API tests. Implementation files are not expected yet.",
             }.get(kind, " This is a completed implementation gate. Require the actual code and independently executed task evidence.")

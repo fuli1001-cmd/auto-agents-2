@@ -12,7 +12,7 @@ from .evidence import assess_observation
 from .evidence_refs import controller_context_catalog
 from .faults import HumanRequirement, ResourceBoundary, StateConflict, route_failure
 from .interaction import choice_spec
-from .models import CheckResult, PlanResult, ReviewResult
+from .models import CheckResult, ImplementationResult, PlanResult, ReviewResult
 from .plan_revision import PlanPatch, apply_patch, descendants, materialize_plan
 from .recovery import (
     Diagnosis,
@@ -451,6 +451,25 @@ class RecoveryController:
         self.store.event(rid, "recovery.decided", {**decision.model_dump(), "actor": active["actor"]})
         if decision.action == "blocked":
             self._finish(rid, active, {}, successor=failure.model_dump())
+            return
+        if decision.action == "prototype_recheck":
+            from .prototype_recheck import recheck_prototype
+            successor = await recheck_prototype(engine, rid, work, active["permit"], failure)
+            if successor:
+                self._finish(rid, active, {}, successor=successor.model_dump())
+                return
+            # Resume acceptance of the same candidate. Reuse production checks
+            # only through the normal source/environment/report validity gate.
+            key = "develop/task/" + failure.task_id
+            saved = self.store.get(rid, key, {})
+            refreshed = self.store.get(rid, "recovery/prototype-rechecks/" + digest(active["permit"]))
+            updates = {key: {**saved, "phase": "tested", "recovery_permit": active["permit"],
+                "implementation": ImplementationResult(summary="Retained candidate after prototype evidence refresh").model_dump(),
+                "feedback": {**saved.get("feedback", {}), "controller_recovery": {**decision.model_dump(),
+                    "prototype_browser_report": refreshed["report"], "independent_review": refreshed["review"]}}},
+                "verify/identity": None}
+            updates.update(policy.dispatch_updates(rid, active, [failure.task_id]))
+            self._finish(rid, active, updates)
             return
         if decision.action == "plan_patch":
             if not plan:

@@ -87,6 +87,7 @@ from .requirements import (
 from .research import ResearchService
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
+from .source_history import SourceHistory
 from .store import Store
 from .task_baselines import refresh_task_baseline
 from .test_reports import test_runner
@@ -972,6 +973,14 @@ class WorkflowEngine:
             raise ApprovalBoundary("当前任务缺少与原型内容及交互动作匹配的人工审批证据，已暂停派发")
         return {"prototype_approval": self.approvals.context(record)}
 
+    def _task_design_context(self, rid, work):
+        receipt = DesignDocuments(self).context(rid, work)
+        pending = self.store.get(rid, "candidate/design", {})
+        if (self.store.get(rid, "design") and "review_documents" in pending
+                and receipt["status"] != "approved"):
+            raise StateConflict("Architecture documents or their review receipt changed; preserve the task candidate")
+        return {"design_review": receipt}
+
     async def _prepare_prototype(self, rid, work, specification, assessment, context, original):
         key = "prototype/pending"
         identity = digest([assessment, self.store.get(rid, "baseline"), self.store.get(rid, "replan_feedback")])
@@ -1286,6 +1295,11 @@ class WorkflowEngine:
                         raise Replan("design", "Legacy design files have no application/review receipt. "
                                      "Reconcile the archived proposal with current documents in the design gate; "
                                      "retain all accepted obligations and do not delegate these files to implementation.")
+                    if "prepared" in pending:
+                        context["design_review"] = DesignDocuments(self).context(rid, work)
+                        if context["design_review"]["status"] != "approved":
+                            raise Replan("design", "Current architecture needs a document-bound independent review receipt; "
+                                         "retain the documents and review them in the design gate.")
                 context[stage] = cached
                 if stage == "prototype":
                     context["prototype_approval"] = await self._ensure_prototype_approval(rid, work, cached)
@@ -1329,6 +1343,9 @@ class WorkflowEngine:
                 document = (schema.model_validate(pending["document"]) if pending.get("document") else
                             await self._invoke(stage, context, schema, work, rid, stage))
                 self.store.checkpoint(rid, pending_key, {**pending, "document": document.model_dump()})
+                if stage == "design" and document.questions:
+                    document = await DesignDocuments(self).refresh_questions(rid, work, document, context)
+                    pending = self.store.get(rid, pending_key, {})
                 if isinstance(document, DocumentResult) and document.questions:
                     answer = await self._questions(rid, stage, document.questions, digest(document.model_dump()))
                     context[stage + "_answer"] = answer
@@ -1349,6 +1366,7 @@ class WorkflowEngine:
                     details = "".join(f"\n[{f.severity}] {f.location}: {f.description}\n{f.resolution}"
                                       for f in review.findings)
                     raise Replan("design", review.summary + details)
+                context["design_review"] = DesignDocuments(self).context(rid, work)
             if stage == "provider_research" and document.sources:
                 retrieved = await ResearchService(self.artifacts).verify(document.sources)
                 review = await self._invoke("review", {"review_kind": "research", "research": document.model_dump(),
@@ -1493,7 +1511,10 @@ class WorkflowEngine:
                                   source_hash=tree_hash(work))
         self._require_candidate_evidence(rid, commands, evidence, work, environment,
                                          phase="final", expected_source=candidate_hash)
-        review_key = digest([verify_key, [r.model_dump() for r in evidence], visuals])
+        context.update(self._task_design_context(rid, work))
+        context["source_history"] = SourceHistory(self).collect(rid, work)
+        review_key = digest([verify_key, [r.model_dump() for r in evidence], visuals,
+                             context["design_review"], context["source_history"]])
         cached_review = self.store.get(rid, "verify/review") if self.store.get(rid, "verify/review_identity") == review_key else None
         review = ReviewResult.model_validate(cached_review) if cached_review else await self._invoke("verify", {**context, "project": self.contexts.build(work),
                                                "evidence": [r.model_dump() for r in evidence],
@@ -1509,6 +1530,7 @@ class WorkflowEngine:
                 evidence={"review": review.model_dump(), "checks": [r.model_dump() for r in evidence]}))
         self.store.checkpoint(rid, "verify/review", review.model_dump())
         self.store.checkpoint(rid, "verify/review_identity", review_key)
+        self._task_design_context(rid, work)
         if (git(work, "rev-parse", "HEAD") != candidate or tree_hash(work) != candidate_hash
                 or git(work, "diff", "--name-only", "HEAD")):
             raise StateConflict("Candidate changed during verification")
@@ -1754,6 +1776,7 @@ class WorkflowEngine:
         counters = self.store.get(rid, counter_key, {"round": 0, "stalled": 0, "failure": ""})
         while True:
             approval_context = self._task_approval_context(rid, work, context)
+            design_context = self._task_design_context(rid, work)
             self.store.checkpoint(rid, key, saved)
             commands = self._task_commands(rid, task, work, plan)
             if saved.get("phase") == "reverify":
@@ -1777,10 +1800,11 @@ class WorkflowEngine:
             previous_feedback = saved.get("feedback", saved)
             feedback = {k: previous_feedback[k] for k in ("phase", "checks", "review", "environment_error", "candidate_error", "controller_recheck", "controller_approval_recheck", "controller_recovery", "upstream_recovery", "failure", "baseline_refresh") if k in previous_feedback}
             feedback = json.loads(json.dumps(feedback))
-            task_context = {**approval_context, "task": task.model_dump(), "specification": context["specification"],
+            task_context = {**approval_context, **design_context, "task": task.model_dump(), "specification": context["specification"],
                             "verification_contract": self._verification_contract(commands),
                             "design": context.get("design"), "feedback": feedback, "unresolved_issues": IssueLedger(self.store, self.artifacts).unresolved(rid),
                             "project": self.contexts.build(work, scopes=task.allowed_paths)}
+            task_context["source_history"] = SourceHistory(self).collect(rid, work, task.allowed_paths)
             retained = feedback.get("baseline_refresh", {}).get("retained_candidate")
             if retained:
                 task_context["context_files"] = [str(self.artifacts.root / retained["hash"][:2] / retained["hash"])]
@@ -1882,6 +1906,8 @@ class WorkflowEngine:
             if passed(checks):
                 self._require_task_evidence(rid, task, saved, commands, checks, work, environment)
                 task_context.update(self._task_approval_context(rid, work, context))
+                task_context["source_history"] = SourceHistory(self).collect(rid, work, task.allowed_paths)
+                task_context.update(self._task_design_context(rid, work))
                 review = await self._invoke("review", {**task_context, "implementation": change.model_dump(),
                                                        "project": self.contexts.build(work, scopes=task.allowed_paths),
                                                        "checks": [c.model_dump() for c in checks],
@@ -1889,6 +1915,7 @@ class WorkflowEngine:
                 saved["review"] = review.model_dump()
                 if review.approved:
                     self._task_approval_context(rid, work, context)
+                    self._task_design_context(rid, work)
                     self._require_task_evidence(rid, task, saved, commands, checks, work, environment)
                     self._task_progress(rid, task, saved, checked=True, approved=True)
                     recovery_ref = f"refs/aa2/{rid}/tasks/{task.id}/r{state['revision']}/{base[:8]}"
@@ -2049,6 +2076,7 @@ class WorkflowEngine:
         self._require_candidate_evidence(rid, checks, evidence, work, environment,
                                          phase="reuse", expected_source=candidate_hash)
         review = await self._invoke("verify", {**approval_context, "project": self.contexts.build(work),
+                                    "source_history": SourceHistory(self).collect(rid, work),
                                     "verification_contract": self._verification_contract(checks),
                                     "specification": self.store.get(rid, "clarify"),
                                     "approved_prototype_visuals": self.store.get(rid, "prototype_approval", {}).get("visuals", []),
@@ -2119,6 +2147,7 @@ class WorkflowEngine:
                 ref = self.artifacts.put_file(path, "screenshot")
                 row["image_artifact"] = ref
                 row["screenshot"] = str(self.artifacts.root / ref["hash"][:2] / ref["hash"])
+            self._archive_visuals(row.get("tiles", []))
         return rows
 
     def _runtime_instructions(self, work):
@@ -2220,6 +2249,8 @@ class WorkflowEngine:
             if await self._recover_delivery_evidence(rid, checks, evidence, work, environment, before, observation):
                 continue
             review = await self._invoke("verify", {**approval_context, "project": self.contexts.build(work), "specification": self.store.get(rid, "clarify"),
+                "design_review": DesignDocuments(self).context(rid, work),
+                "source_history": SourceHistory(self).collect(rid, work),
                 "verification_contract": self._verification_contract(checks),
                 "approved_prototype_visuals": self.store.get(rid, "prototype_approval", {}).get("visuals", []),
                 "evidence": [c.model_dump() for c in evidence], "implemented_visuals": visuals, "incoming": incoming},

@@ -130,7 +130,8 @@ class PrototypeApprovals:
         try:
             if not ReviewResult.model_validate(record["review"]).approved:
                 return False
-            for row in record["visuals"]:
+            images = [image for row in record["visuals"] for image in [row, *row.get("tiles", [])]]
+            for row in images:
                 ref = row.get("image_artifact")
                 if (not isinstance(ref, dict) or ref.get("kind") != "screenshot"
                         or not isinstance(ref.get("hash"), str) or not isinstance(ref.get("bytes"), int)):
@@ -150,6 +151,15 @@ class PrototypeApprovals:
                 and self.automation_current(record, binding, actions, browser_version, expected_routes=self.routes(work, actions))):
             return {**record, "human": human}
         return None
+
+    def recheck_binding(self, rid, work):
+        """Evidence refresh may reuse consent, but cannot request or manufacture it."""
+        prototype = self.store.get(rid, "prototype")
+        if not prototype:
+            return None
+        actions = prototype.get("browser_actions", [])
+        human = self.human(rid, work, actions)
+        return {**prototype_identity(work, actions), "human": human} if human else None
 
     def publish(self, rid, work, actions, human, review, visuals, browser_version):
         binding = prototype_identity(work, actions)

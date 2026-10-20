@@ -25,7 +25,7 @@ from .safe_files import directory_fd, regular_file
 from .sandbox import SandboxRunner
 from .util import atomic_write, digest, scrub_text
 
-PROTOTYPE_BROWSER_VERSION = 5
+PROTOTYPE_BROWSER_VERSION = 6
 
 
 class DesignCatalog:
@@ -155,6 +155,59 @@ async def exercise(page, actions, route, completed=None):
             await getattr(locator, step.action)(timeout=10000)
         completed.append(step.model_dump())
     return completed
+
+
+async def capture_page(page, image, row, actions=()):
+    """Capture intact viewport images; Chromium's beyond-viewport capture can resize to 1x1.
+
+    Preserve the immediate final-state image and record additional scroll positions
+    for content below/outside it. Never resize, navigate, crop or stitch the evidence.
+    """
+    async def geometry():
+        return await page.evaluate("""() => ({x: scrollX, y: scrollY, width: innerWidth, height: innerHeight,
+            content_width: Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth || 0),
+            content_height: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0)})""")
+
+    initial = await geometry()
+    await page.screenshot(path=str(image), full_page=False)
+    row.update(screenshot=str(image), viewport_height=initial["height"], capture_mode="viewport_tiles",
+               capture_origin=initial, tiles=[])
+    if row["errors"]:
+        return
+    terminal = []
+    for action in reversed([a for a in actions if a.route == row["route"]]):
+        if not action.action.startswith("expect_"):
+            break
+        terminal.insert(0, action)
+    width, height = initial["width"], initial["height"]
+    if width <= 0 or height <= 0:
+        raise AA2Error("Screenshot viewport has no area")
+    xs = sorted({min(x, max(0, initial["content_width"] - width))
+                 for x in range(0, initial["content_width"], width)})
+    ys = sorted({min(y, max(0, initial["content_height"] - height))
+                 for y in range(0, initial["content_height"], height)})
+    if len(xs) * len(ys) > 64:
+        raise AA2Error("Page exceeds the 64 viewport screenshot capture limit")
+    try:
+        await exercise(page, terminal, row["route"])
+        for y in ys:
+            for x in xs:
+                if (x, y) == (initial["x"], initial["y"]):
+                    continue
+                await page.evaluate("p => scrollTo({left: p.x, top: p.y, behavior: 'instant'})", {"x": x, "y": y})
+                current = await geometry()
+                if (any(current[k] != initial[k] for k in ("width", "height", "content_width", "content_height"))
+                        or abs(current["x"] - x) > 1 or abs(current["y"] - y) > 1):
+                    raise AA2Error("Page geometry changed during screenshot capture")
+                await exercise(page, terminal, row["route"])
+                tile = image.with_name(image.stem + f"-tile-{len(row['tiles'])}.png")
+                await page.screenshot(path=str(tile), full_page=False)
+                row["tiles"].append({"screenshot": str(tile), **current})
+                await exercise(page, terminal, row["route"])
+    finally:
+        await finalize_async(lambda: page.evaluate(
+            "p => scrollTo({left: p.x, top: p.y, behavior: 'instant'})", initial), original=sys.exception())
+    await exercise(page, terminal, row["route"])
 
 
 def prototype_routes(directory: Path, actions) -> list[tuple[str, str]]:
@@ -301,7 +354,7 @@ async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[d
                             image = output / f"route-{digest(route)[:16]}-{width}.png"
                             try:
                                 if page is not None:
-                                    await page.screenshot(path=str(image), full_page=True)
+                                    await capture_page(page, image, row, actions)
                                 else:
                                     raise AA2Error("Prototype page creation failed")
                                 row["screenshot"] = str(image)
@@ -428,7 +481,7 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
                                     row["failed_action"] = sequence[len(completed)].model_dump()
                             try:
                                 screenshot = output / f"route-{index}-{width}.png"
-                                await page.screenshot(path=str(screenshot), full_page=True)
+                                await capture_page(page, screenshot, row, spec.actions)
                                 row["screenshot"] = str(screenshot)
                             except Exception as exc:
                                 errors.append(scrub_text(str(exc)))

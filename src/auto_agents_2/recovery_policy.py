@@ -8,7 +8,7 @@ from .decisions import DecisionRequest, DecisionResult, decision_request_identit
 from .faults import HumanIntervention, HumanRequirement, StateConflict, route_failure
 from .interaction import choice_spec
 from .models import PlanResult, Record
-from .recovery import Diagnosis, RecoveryDecision, check_rows, failure_summary
+from .recovery import Diagnosis, RecoveryDecision, check_rows, failure_summary, implemented_candidate
 from .recovery_identity import authorization_binding, binding_matches_failure, failure_contract
 from .util import digest
 from .workspace import tree_hash
@@ -25,6 +25,7 @@ class ActionPermit(Record):
     reason: str = ""
     expected_result: str = ""
     task_scopes: dict[str, list[str]] = {}
+    prototype_binding: dict = {}
     phase: Literal["reserved", "started", "completed"] = "reserved"
     outcome: dict = {}
     outcome_hash: str = ""
@@ -126,6 +127,23 @@ class RecoveryPolicy:
             candidates = {"blocked": legacy_blocked}
         choices = candidates if candidates is not None else self.candidates(failure, plan, suggested,
             include_declared_checks=diagnosis_assessment)
+        prototype_binding = None
+        retained = self.store.get(rid, "develop/task/" + failure.task_id, {})
+        if (candidates is None and plan and failure.task_id in {t.id for t in plan.tasks}
+                and failure.kind in {"review", "evidence"}
+                and retained.get("phase") in {"applied", "tested", "rejected", "reverify"}
+                and implemented_candidate(retained) and not retained.get("commit")
+                and suggested.action not in STAGE_REENTRY_ACTIONS | {"blocked"}
+                and not (self.store.get(rid, "delivery/journal") or {}).get("publication_started")):
+            prototype_binding = self.engine.approvals.recheck_binding(rid, work)
+            if prototype_binding:
+                choices.setdefault("prototype_recheck", RecoveryDecision(action="prototype_recheck",
+                    failure_id=failure.id, task_ids=[failure.task_id], budget_owner=failure.origin_id,
+                    budget_owners=[failure.origin_id], evidence_refs=failure.evidence_refs,
+                    reason="重放已批准原型的既有动作、重新截图并独立复核，再恢复当前候选的任务验收；保留人工批准及计划"))
+        if suggested.action == "prototype_recheck" and (
+                not prototype_binding or suggested.task_ids != [failure.task_id]):
+            raise StateConflict("Prototype evidence refresh requires matching human consent and the current task")
         transition = suggested.action in STAGE_REENTRY_ACTIONS
         rule_key = "recovery/rules/" + digest([failure.origin_id, failure.step,
             sorted(failure.obligations), suggested.action])
@@ -137,8 +155,10 @@ class RecoveryPolicy:
         answered = [q for q in questions if q["answer"] is not None]
         guards = self.engine.decisions.guards(rid, failure.origin_id,
             [cycle_key, permit_key, rule_key, "plan_revision/current", "automation/engineering/" + failure.origin_id])
-        if transition or suggested.action == "plan_patch":
+        if transition or suggested.action == "plan_patch" or prototype_binding:
             guards["delivery/journal"] = self.store.get(rid, "delivery/journal")
+        if prototype_binding:
+            guards["prototype"] = self.store.get(rid, "prototype")
         cfg = self.engine.config.load().automation
         tasks = (plan.tasks if plan else [])
         scoped = [t for t in tasks if not failure.task_id or t.id == failure.task_id
@@ -147,6 +167,19 @@ class RecoveryPolicy:
         scope_hash = digest([[t.model_dump() for t in scoped], paths])
         binding = authorization_binding(failure, choices, source, plan_hash, scope_hash)
         binding_updates = {}
+        expanded = False
+        if bound and "prototype_recheck" in choices and suggested.action != "prototype_recheck":
+            previous_choices = {k: v for k, v in choices.items() if k != "prototype_recheck"}
+            previous_binding = authorization_binding(failure, previous_choices, source, plan_hash, scope_hash)
+            if bound == previous_binding:
+                if prior or answered:
+                    # Recorded answers and issued actions retain their original authority.
+                    choices, binding, prototype_binding = previous_choices, previous_binding, None
+                else:
+                    expanded = True
+                    binding_updates = {binding_key: binding,
+                        "recovery/authorization-upgrades/" + digest([cid, operation, bound]): {
+                            "previous": bound, "reason": "Offer controller-owned prototype evidence refresh"}}
         legacy_match = (bound is not None and bound.get("version", 1) == 1
             and all(bound.get(name) == binding[name] for name in ("source_hash", "plan_hash", "scope_hash"))
             and binding_matches_failure(bound, failure.model_dump())
@@ -160,20 +193,21 @@ class RecoveryPolicy:
                 raise StateConflict("Completed or reserved recovery inputs changed; preserve its receipt")
             return RecoveryDecision.model_validate(permit.action), permit_key
         if bound is not None and bound != binding:
-            if not legacy_match:
+            if not legacy_match and not expanded:
                 raise StateConflict("Pending recovery authorization no longer matches its original inputs")
             # A consumed/answered legacy grant keeps its exact old binding.
             if answered:
                 binding = bound
-            binding_updates = {binding_key: binding,
-                "recovery/authorization-upgrades/" + digest([cid, operation, bound]): {
-                    "previous": bound, "reason": "Upgrade the verified observation/action contract without changing authority"}}
+            if not expanded:
+                binding_updates = {binding_key: binding,
+                    "recovery/authorization-upgrades/" + digest([cid, operation, bound]): {
+                        "previous": bound, "reason": "Upgrade the verified observation/action contract without changing authority"}}
         if bound is None:
             self.store.checkpoint(rid, binding_key, binding)
         guards[binding_key] = bound if bound is not None else binding
         grant = dict(cycle.human_grant)
         slot = "diagnosis" if suggested.action == "diagnose" else "dispatch"
-        human_cycle = (not transition and grant.get("scope_hash") == scope_hash
+        human_cycle = (not transition and suggested.action != "prototype_recheck" and grant.get("scope_hash") == scope_hash
                        and grant.get(slot, 0) > 0)
         routing = route_action(failure, suggested.action, enabled=cfg.enabled,
             rule=established or correction or not self.store.get(rid, rule_key),
@@ -191,6 +225,10 @@ class RecoveryPolicy:
             "consumption": {"implementation": self.store.get(rid, "rounds/" + failure.origin_id, {}),
                 "diagnosis": self.store.get(rid, "recovery/budgets/diagnosis/" + failure.origin_id, {}),
                 "tokens": self.store.usage_summary(rid)}}
+        if prototype_binding:
+            evidence["prototype_recheck"] = {"binding": prototype_binding,
+                "previous_review": self.store.get(rid, "prototype_approval", {}).get("review"),
+                "action": "Replay approved prototype actions and independently review fresh images; retain task candidate"}
         request = DecisionRequest(kind="recovery_action", owner=failure.origin_id,
             allowed_choices=["approve", "ask_user"], scope={"one_action": True, "cycle_id": cid,
                 "tasks": [t.model_dump() for t in scoped],
@@ -276,7 +314,9 @@ class RecoveryPolicy:
                     + "\n允许范围：" + ("; ".join(t.id + ": " + ", ".join(t.allowed_paths) for t in scoped)
                                                or ", ".join(paths) or "控制器声明的当前操作")
                     + "\n先执行：" + suggested.action
-                    + ("\n本次仅批准返回所示阶段；其校验、独立审查及原型人审仍须执行。" if transition else
+                    + ("\n本次仅重采已批准原型并独立复核，随后核验当前任务候选；不修改原型或重新批准设计。"
+                       if suggested.action == "prototype_recheck" else
+                       "\n本次仅批准返回所示阶段；其校验、独立审查及原型人审仍须执行。" if transition else
                        "\n本轮只允许重新执行当前已声明的操作并核验结果。" if candidates is not None else
                        "\n本轮至多一次诊断及一次格式修正、一次局部计划修订或每个所列任务一次范围内修复及验证。")
                     + "\n累计次数只记录，不因本次授权清零。")
@@ -284,7 +324,7 @@ class RecoveryPolicy:
                 interaction["pause_on"] = "n"
                 if not answered_cycle:
                     await self.engine._ask(rid, question_key, prompt, digest([request.model_dump(), prompt]), interaction)
-                grant = {} if transition else {"scope_hash": scope_hash, "diagnosis": 2, "dispatch": 1}
+                grant = {} if transition or suggested.action == "prototype_recheck" else {"scope_hash": scope_hash, "diagnosis": 2, "dispatch": 1}
                 if grant:
                     grant[slot] -= 1
             actor = "human"
@@ -293,10 +333,14 @@ class RecoveryPolicy:
         if tree_hash(work) != source or self.engine.config.load().automation != cfg:
             raise StateConflict("Recovery evidence or policy changed while authorizing; preserved candidate requires reassessment")
         choice = choices[selected]
+        if choice.action == "prototype_recheck" and (
+                not prototype_binding or self.engine.approvals.recheck_binding(rid, work) != prototype_binding):
+            raise StateConflict("Prototype consent changed during recovery authorization")
         permit = ActionPermit(cycle_id=cid, owner=failure.origin_id, action=choice.model_dump(),
                               actor=actor, source_hash=source, plan_hash=plan_hash,
                               reason=result.reason, expected_result=result.expected_result,
-                              task_scopes={task.id: task.allowed_paths for task in scoped})
+                              task_scopes={task.id: task.allowed_paths for task in scoped},
+                              prototype_binding=prototype_binding if choice.action == "prototype_recheck" else {})
         cycle.phase = "diagnosis" if choice.action == "diagnose" else "reserved"
         cycle.permits.append(permit_key)
         cycle.human_grant = grant

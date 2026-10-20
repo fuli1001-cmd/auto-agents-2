@@ -1,4 +1,6 @@
+import base64
 import os
+import struct
 import sys
 from pathlib import Path
 
@@ -125,3 +127,41 @@ async def test_failed_interaction_keeps_completed_prefix_and_failure(browser_cac
     assert row["actions"] == [actions[0].model_dump()]
     assert row["failed_action"] == actions[1].model_dump()
     assert row["errors"] and Path(row["screenshot"]).exists()
+
+
+async def test_capture_preserves_responsive_end_state_and_collects_content_below_fold(browser_cache, tmp_path, monkeypatch):
+    from auto_agents_2.design import capture_page
+    (tmp_path / "index.html").write_text('''<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>body {margin:0; height:2100px; background:lime}
+        #bottom {position:absolute; top:1850px; left:0; width:100%; height:100px; background:blue}</style>
+        <button id="next" onclick="state.textContent='page 2'; window.armed=true">Next</button>
+        <p id="state">page 1</p><div id="bottom"></div>
+        <script>window.resizes=0;
+        addEventListener('resize', () => {if(window.armed) {resizes++; state.textContent='wrong page'}});
+        matchMedia('(max-width:600px)').addEventListener('change', () => {
+            if(window.armed) state.textContent='wrong page';
+        });</script>''')
+
+    async def checked(page, path, row, actions):
+        await capture_page(page, path, row, actions)
+        assert await page.locator("#state").inner_text() == "page 2"
+        assert await page.evaluate("resizes") == 0
+        assert await page.evaluate("scrollY") == row["capture_origin"]["y"]
+        tile = row["tiles"][-1]
+        raw = Path(tile["screenshot"]).read_bytes()
+        assert struct.unpack(">II", raw[16:24]) == (row["viewport"], row["viewport_height"])
+        # Prove that the unmodified image actually renders content below the first
+        # viewport, rather than padding an incomplete capture to full-page size.
+        pixel = await page.evaluate('''async ({data,y}) => {
+            const image = new Image(); image.src = 'data:image/png;base64,' + data; await image.decode();
+            const canvas = document.createElement('canvas'); canvas.width=image.width; canvas.height=image.height;
+            const ctx=canvas.getContext('2d'); ctx.drawImage(image,0,0);
+            return [...ctx.getImageData(20,y,1,1).data];
+        }''', {"data": base64.b64encode(raw).decode(), "y": 1900 - tile["y"]})
+        assert pixel == [0, 0, 255, 255]
+
+    monkeypatch.setattr("auto_agents_2.design.capture_page", checked)
+    actions = [BrowserAction(route="/index.html", action="click", selector="#next"),
+               BrowserAction(route="/index.html", action="expect_text", selector="#state", value="page 2")]
+    rows = await inspect_prototype(tmp_path, tmp_path / "images", actions)
+    assert len(rows) == 2 and all(row["tiles"] and not row["errors"] for row in rows)
