@@ -359,3 +359,13 @@ async def test_preview_is_not_offered_without_accepted_plan_preview(tmp_path, mo
     workflow.agent.invoke = choose
     await workflow.recovery_policy.authorize(rid, failure, workflow.store.get(rid, "recovery/active"), work, plan,
                                              adjudicate(failure), operation="eligibility", force_decision=True)
+
+
+@pytest.mark.parametrize("stage", ["implement", "review", "recovery_diagnosis", "verify"])
+async def test_preview_contracts_reach_all_controller_consumers(tmp_path, monkeypatch, stage):
+    workflow, rid, work, plan, _, _, _, _, _ = await ready(tmp_path, monkeypatch)
+    contracts = PreviewEvidence(workflow).contracts(rid, plan)
+    view = ContextPlanner(workflow.artifacts).prepare(stage, {"preview_contracts": contracts}, work)
+    assert view.payload["preview_contracts"] == contracts
+    assert not any(row["source_ref"] == "preview_contracts" and row["presentation"] == "not_selected"
+                   for row in view.selections)
