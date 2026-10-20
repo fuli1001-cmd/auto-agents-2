@@ -33,9 +33,11 @@ def route_action(failure, action, *, enabled, rule, granted=False, answered=Fals
                 action="核对已保留的发布记录和目标状态；在交付恢复允许的范围内处理故障。",
                 resume_condition="发布状态与恢复日志一致；确认本身不授权回退已发布门禁。",
                 evidence_refs=failure.evidence_refs))
-    # An old answer keeps its exact authority. A grant for a different scope does
-    # not authorize this action, but does not veto a new independent decision.
-    if answered or granted:
+    # A recorded answer may be a pause. Consume it before describing it as a
+    # grant; an already issued grant has a separately verified scope.
+    if answered:
+        route, reason = "human", "recorded_answer"
+    elif granted:
         route, reason = "human", "recorded_authorization"
     elif rule and not force_decision and (controller_owned or action not in STAGE_REENTRY_ACTIONS):
         route, reason = "rule", "established_recovery"

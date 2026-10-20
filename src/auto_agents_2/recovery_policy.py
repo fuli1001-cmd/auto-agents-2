@@ -270,7 +270,7 @@ class RecoveryPolicy:
                 resume_condition="控制器能形成可执行动作；确认不能授权 blocked。", evidence_refs=failure.evidence_refs)
             raise HumanIntervention(requirement, reason_code=requirement.kind, phase=failure.phase)
         self.store.event(rid, "recovery.routing", {"failure": failure.id, "action": suggested.action,
-            "recorded_authorization": bool(answered) or human_cycle, **routing.model_dump()})
+            **routing.model_dump()})
         legacy_answer = None
         answered_cycle = False
         if answered:

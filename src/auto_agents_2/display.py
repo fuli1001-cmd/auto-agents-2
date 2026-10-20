@@ -183,13 +183,22 @@ class ProgressDisplay:
             self.message(f"发布输入已核对｜保留 {data['retained_inputs']} 个原有输入｜继续主目录运行验收")
         elif kind == "recovery.classified":
             route = {"rule": "可按规则评估", "decision": "需决策评估", "human": "需要外部处理"}.get(data["route"], data["route"])
-            if data.get("authorized"):
+            if data.get("authorized") is True:
                 route = {"rule": "规则已授权", "decision": "决策已授权", "human": "用户已授权"}.get(data["route"], route)
             self.message(f"故障分类｜{data['phase']}｜{data['reason_code']}｜{route}")
         elif kind == "recovery.routing":
-            route = ("复用人工授权" if data.get("recorded_authorization") else
+            # Legacy recorded_authorization flags were redacted into a nonempty
+            # string even when false. The controller's route and reason are the
+            # authority; presentation must never infer consent from truthiness.
+            reused = data["route"] == "human" and data.get("reason_code") == "recorded_authorization"
+            route = ("复用人工授权" if reused else
+                     "核对已保存的人工回答" if data["route"] == "human" and data.get("reason_code") == "recorded_answer" else
                      {"rule": "控制器规则", "decision": "交由决策代理", "human": "需要人工授权"}[data["route"]])
             self.message(f"恢复路由｜{data['phase']}｜{data['action']}｜{route}")
+        elif kind == "decision.reused":
+            outcome = {"approve": "待核验并应用原决定", "answer": "复用技术事实回答",
+                       "ask_user": "等待用户确认"}[data["action"]]
+            self.message(f"复用已保存的决策｜{data['owner']}｜{outcome}")
         elif kind == "workflow.internal_error":
             self.message(f"aa2 内部错误｜{data['exception_type']}｜故障编号 {data['incident_id']}｜已保留现场并停止本次执行")
         elif kind == "automation.engineering":

@@ -9,6 +9,7 @@ from .errors import AA2Error, InvalidStructuredResponse, PostCommitError
 from .evidence_refs import controller_context_catalog
 from .interaction import choice_spec, is_prototype_approval
 from .models import Record
+from .progress import safe_event
 from .recovery_identity import action_contract, failure_contract
 from .util import digest
 from .workspace import tree_hash
@@ -97,7 +98,10 @@ class DecisionService:
             saved = {"request": request.model_dump(), "attempts": 0}
         if saved.get("result"):
             self._revalidate_legacy(rid, key, saved, request)
-            return key, DecisionResult.model_validate(saved["result"])
+            result = DecisionResult.model_validate(saved["result"])
+            safe_event(self.store, rid, "decision.reused", {"owner": request.owner, "kind": request.kind,
+                "action": result.action, "request_key": key})
+            return key, result
         while (saved.get("pending") or saved["attempts"] < 2) and not saved.get("failed"):
             # Reserve before calling. An interrupted request never gets an unbounded retry.
             if not saved.get("pending"):
