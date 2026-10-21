@@ -446,7 +446,7 @@ class RecoveryController:
                         assessment_context = {**diagnosis_context, "allowed_actions": {
                             **diagnosis_context["allowed_actions"], "diagnose": self.store.get(rid, permit)["action"]}}
                     suggested = adjudicate(failure, attempts=active["attempt"] - 1, diagnosis=diagnosis,
-                        plan=plan, evidence_context=assessment_context)
+                        plan=plan, evidence_context=assessment_context, workspace=work)
                 except AA2Error as exc:
                     rejection = {"diagnosis": diagnosis.model_dump() if diagnosis else None, "validation_error": str(exc)}
                     rejected_round = active.pop("diagnosis_round")

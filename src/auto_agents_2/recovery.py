@@ -170,10 +170,11 @@ def check_failure(commands, results, *, task=None, step="checks", evidence_ref="
         task_id=task.id if task else "", step=step,
         obligations=task.requirement_ids if task else [digest([c.cwd, c.argv]) for c in commands],
         evidence_refs=[evidence_ref] if evidence_ref else [],
-        evidence={"commands": [c.model_dump() for c in commands], "checks": [r.model_dump() for r in results]})
+        evidence={"commands": [c.model_dump() for c in commands], "checks": [r.model_dump() for r in results],
+                  **({"task": task.model_dump()} if task else {})})
 
 
-def _planned_repair_inputs(failure, task, plan, context, references):
+def _planned_repair_inputs(failure, task, plan, context, references, workspace):
     """Accepted future inputs are candidate scope, never evidence of existing files.
 
     Only the current responsible task has a controller-bound failure contract.
@@ -188,7 +189,12 @@ def _planned_repair_inputs(failure, task, plan, context, references):
     if not any(ref == root or ref == root + ".checks" or ref.startswith(root + ".checks[")
                for ref in references if ref is not None for root in roots):
         return []
-    return [path for check in task.checks for path in check.inputs]
+    # Use exactly the dependency closure that execution selects, never every
+    # preparation in the plan or commands claimed in a failure/proposal.
+    from .builds import verification_commands
+    commands = (verification_commands(task.checks, workspace, plan.runtime_prepare)
+                if workspace is not None else task.checks)
+    return [path for check in commands for path in check.inputs]
 
 
 def _candidate_repair_path(value, *, existing=False):
@@ -207,7 +213,7 @@ def _candidate_repair_path(value, *, existing=False):
     return name
 
 
-def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None, evidence_context=None):
+def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None, evidence_context=None, workspace=None):
     """Facts first; ambiguous or repeated collection failures require independent diagnosis."""
     action, reason = "diagnose", "需要独立诊断故障归属和最小修复范围"
     tasks = [failure.task_id] if failure.task_id else []
@@ -251,7 +257,7 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None,
             if not target_refs <= known_refs or not supplied.intersection(target_refs):
                 raise AA2Error(error + task_id + " requires supplied factual evidence_refs; proposals or protocols alone are insufficient")
             task = known[task_id]
-            planned_inputs = _planned_repair_inputs(failure, task, plan, evidence_context or {}, target_refs)
+            planned_inputs = _planned_repair_inputs(failure, task, plan, evidence_context or {}, target_refs, workspace)
             existing = set(evidence_references(failure))
             for index, path in enumerate(target.paths):
                 name = _candidate_repair_path(path, existing=path in existing)
@@ -262,7 +268,8 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None,
                                                  and path_allowed(name, planned_inputs)):
                     raise AA2Error(error + location + " has no current-file evidence. A planned input requires the current "
                         "failure's exact accepted task contract, a citation to that task or its checks, and coverage by its "
-                        "declared check inputs. allowed_paths alone is insufficient; do not amend the plan merely because "
+                        "declared check inputs, including only controller-selected build prerequisites. "
+                        "allowed_paths alone is insufficient; do not amend the plan merely because "
                         "the candidate does not exist yet.")
         if diagnosis.action == "repair" and set(diagnosis.task_ids) - {failure.task_id} and failure.origin_id != "delivery":
             if set(targets) != set(diagnosis.task_ids):
