@@ -570,7 +570,7 @@ class ProviderRouter:
         saved = self.store.get(run_id, key)
         if saved:
             record = artifacts.json(saved["artifact"])
-            if record.get("version") in {"context-v1", "context-v2", "context-v3", "context-v4"}:
+            if record.get("version") in {"context-v1", "context-v2", "context-v3", "context-v4", "context-v5"}:
                 # A pending call can use the new view of its frozen controller
                 # input. Keep the old presentation, completed results, permits
                 # and counters; rendering is not a new logical invocation.

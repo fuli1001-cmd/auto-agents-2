@@ -10,11 +10,20 @@ from pathlib import Path
 
 from .errors import PolicyViolation
 from .util import SECRET
-from .workspace import EXCLUDED, git
+from .workspace import EXCLUDED, GENERATED_DIRECTORIES, git
 
-VIEW_VERSION = "public-v5-paths"
+VIEW_VERSION = "public-v6-execution-boundary"
 SENSITIVE_DIRS = {".aws", ".ssh", ".codex", ".gemini", ".credentials"}
 SENSITIVE_FILES = {".netrc", ".npmrc", ".pypirc", ".git-credentials"}
+
+
+def view_contract() -> dict:
+    """Describe the actual public_files/create_view boundary, not host existence."""
+    return {"version": VIEW_VERSION, "kind": "filtered_source_snapshot",
+            "excluded_generated_names": sorted(EXCLUDED & GENERATED_DIRECTORIES),
+            "original_execution_workspace_mounted": False,
+            "absence_semantics": "An excluded or unmounted path is not evidence of absence in the execution workspace. "
+                                 "Absolute execution paths in logs are provenance, not model access paths."}
 
 
 def sensitive(path: Path, extra=()) -> bool:

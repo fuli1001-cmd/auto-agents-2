@@ -1521,13 +1521,14 @@ class WorkflowEngine:
             self.store.checkpoint(rid, "verify/visuals", visuals)
             self._replan_evidence(rid, "application-browser", browser_criteria(plan.preview.actions, visuals),
                                   source_hash=tree_hash(work))
-        self._require_candidate_evidence(rid, commands, evidence, work, environment,
-                                         phase="final", expected_source=candidate_hash)
+        context["verification_observation"] = self._require_candidate_evidence(
+            rid, commands, evidence, work, environment, phase="final", expected_source=candidate_hash)
         context.update(self._task_design_context(rid, work))
         context["source_history"] = SourceHistory(self).collect(rid, work)
         context["preview_contracts"] = PreviewEvidence(self).contracts(rid, plan)
         review_key = digest([verify_key, [r.model_dump() for r in evidence], visuals,
-                             context["design_review"], context["source_history"], context["preview_contracts"]])
+                             context["design_review"], context["source_history"], context["preview_contracts"],
+                             context["verification_observation"]])
         cached_review = self.store.get(rid, "verify/review") if self.store.get(rid, "verify/review_identity") == review_key else None
         review = ReviewResult.model_validate(cached_review) if cached_review else await self._invoke("verify", {**context, "project": self.contexts.build(work),
                                                "evidence": [r.model_dump() for r in evidence],
@@ -1687,7 +1688,7 @@ class WorkflowEngine:
         failure = self._verification_problem(rid, commands, checks, work, environment, phase="task",
                                              task=task, expected_source=saved.get("source_hash"))
         if failure is None:
-            return
+            return self._verification_observation(commands, checks, environment)
         # Verification drift is a new evidence observation, not an implementation
         # defect or implicit permission to accept a stale review.
         saved["phase"] = "reverify"
@@ -1737,6 +1738,26 @@ class WorkflowEngine:
                                              phase=phase, expected_source=expected_source)
         if failure:
             raise RecoveryNeeded(failure)
+        return self._verification_observation(commands, checks, environment)
+
+    @staticmethod
+    def _verification_observation(commands, checks, environment):
+        """Present only the successful gate assessment just performed by the caller.
+
+        This is an observation, not a reusable permit or an independent approval.
+        Gate entry and post-review checks still use reusable() against real inputs.
+        """
+        return {"version": 1, "status": "valid_at_gate_entry",
+                "source_hash": checks[0].source_hash,
+                "environment_hash": environment.fingerprint,
+                "commands_hash": digest([command.model_dump() for command in commands]),
+                "checks_hash": digest([check.model_dump() for check in checks]),
+                "generated_outputs": [{"command_index": index, "command_hash": check.command_hash,
+                                       "outputs": dict(check.generated_outputs)}
+                                      for index, check in enumerate(checks) if check.generated_outputs],
+                "scope": "Controller validated the supplied checks against current execution inputs, environment, "
+                         "reports and generated outputs. This does not approve implementation semantics or "
+                         "replace required browser evidence. All acceptance gates revalidate before advancing."}
 
     def _final_progress(self, rid, plan, token, *, frontend=False, visuals=(), approved=False):
         observation = self.store.get(rid, "replanning/evidence/final-checks", {})
@@ -1923,7 +1944,8 @@ class WorkflowEngine:
                     "kind": failure_record.kind, "evidence": key, "observation": digest(failure_record.evidence)})
                 raise RecoveryNeeded(failure_record)
             if passed(checks):
-                self._require_task_evidence(rid, task, saved, commands, checks, work, environment)
+                task_context["verification_observation"] = self._require_task_evidence(
+                    rid, task, saved, commands, checks, work, environment)
                 task_context.update(self._task_approval_context(rid, work, context))
                 task_context["source_history"] = SourceHistory(self).collect(rid, work, task.allowed_paths)
                 task_context.update(self._task_design_context(rid, work))
@@ -2099,12 +2121,13 @@ class WorkflowEngine:
                     evidence_refs=["verify/visuals"], evidence={"results": visuals, "error": str(exc)})) from exc
             visuals = self._archive_visuals(visuals)
             self.store.checkpoint(rid, "verify/visuals", visuals)
-        self._require_candidate_evidence(rid, checks, evidence, work, environment,
-                                         phase="reuse", expected_source=candidate_hash)
+        verification_observation = self._require_candidate_evidence(
+            rid, checks, evidence, work, environment, phase="reuse", expected_source=candidate_hash)
         review = await self._invoke("verify", {**approval_context, "project": self.contexts.build(work),
                                     "source_history": SourceHistory(self).collect(rid, work),
                                     "preview_contracts": PreviewEvidence(self).contracts(source_run or rid, plan),
                                     "verification_contract": self._verification_contract(checks),
+                                    "verification_observation": verification_observation,
                                     "specification": self.store.get(rid, "clarify"),
                                     "approved_prototype_visuals": self.store.get(rid, "prototype_approval", {}).get("visuals", []),
                                     "evidence": [c.model_dump() for c in evidence], "implemented_visuals": visuals},

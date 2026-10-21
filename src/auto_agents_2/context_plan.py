@@ -19,7 +19,7 @@ from .research_sections import extract_sections, select_section
 from .util import digest
 from .workspace import git_environment, path_allowed
 
-CONTEXT_VERSION = "context-v5"
+CONTEXT_VERSION = "context-v6"
 TEXT_INLINE = 12000
 REFERENCE_INLINE = 2000
 RESEARCH_INLINE = 16000
@@ -49,13 +49,15 @@ CONTRACTS = {
     "implement": {"specification", "project", "design", "verification_contract", "execution_contract",
                   "unresolved_issues", "preview_contracts"},
     "implementation": {"specification", "project", "design", "verification_contract", "execution_contract",
-                       "unresolved_issues", "implementation", "checks", "source_hash", "preview_contracts", "preview_evidence"},
+                       "unresolved_issues", "implementation", "checks", "source_hash", "preview_contracts", "preview_evidence",
+                       "verification_observation"},
     "preview_contract": {"preview_contracts", "project", "instruction"},
     "test_changes": {"specification", "project", "design", "execution_contract", "verification_contract",
                      "unresolved_issues", "candidate_changes", "purpose"},
     "readme": {"specification", "project", "plan"},
     "verify": {"specification", "project", "plan", "design", "evidence", "verification_contract",
-               "implemented_visuals", "approved_prototype_visuals", "incoming", "unresolved_issues", "preview_contracts"},
+               "implemented_visuals", "approved_prototype_visuals", "incoming", "unresolved_issues", "preview_contracts",
+               "verification_observation"},
     "recovery_diagnosis": {"failure", "plan", "project", "specification", "design", "task_budgets",
                            "diagnosis_feedback", "current_issues", "observations", "delivery_journal", "constraint", "preview_contracts",
                            "allowed_actions"},

@@ -4,7 +4,7 @@ import ast
 import re
 from pathlib import Path
 
-from .readview import public_files
+from .readview import public_files, view_contract
 from .util import digest
 from .workspace import path_allowed
 
@@ -138,6 +138,7 @@ class ContextBuilder:
                 raw = files[name].read_bytes()
                 selected.insert(0, {"path": name, "content": raw.decode("utf-8"), "source_hash": digest(raw),
                                     "reason": "applicable project instructions"})
-        return {"workspace": str(workspace), "files": selected, "read_on_demand": available,
+        return {"workspace": str(workspace), "view_contract": view_contract(),
+                "files": selected, "read_on_demand": available,
                 "roots": sorted({Path(p).parts[0] for p in files}), "public_file_count": len(files),
                 "discovery": "Search the mounted public workspace for additional relevant files; read scopes do not grant writes."}
