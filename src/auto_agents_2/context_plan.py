@@ -18,7 +18,7 @@ from .research_sections import extract_sections, select_section
 from .util import digest
 from .workspace import git_environment, path_allowed
 
-CONTEXT_VERSION = "context-v3"
+CONTEXT_VERSION = "context-v4"
 TEXT_INLINE = 12000
 REFERENCE_INLINE = 2000
 RESEARCH_INLINE = 16000
@@ -106,6 +106,7 @@ class _Selection:
         self.purpose = purpose_for(stage, context, operation)
         self.result = PreparedContext({}, self.purpose)
         self.linked_remaining = LINKED_INLINE
+        self.check_observations = {}
         self.task = context.get("task") if isinstance(context.get("task"), dict) else {}
         if not self.task and isinstance(context.get("failure"), dict):
             failure = context["failure"]
@@ -165,12 +166,26 @@ class _Selection:
         return out
 
     def check(self, value, path):
+        # One failed observation can own many issue rows. Preserve each origin,
+        # but do not expand the same complete check once per failed test case.
+        identity = digest(value)
+        observation = self.reference(value, path, "Complete immutable check observation")
+        if identity in self.check_observations:
+            return {"source_ref": path, "same_observation_as": self.check_observations[identity],
+                    "observation": observation}
+        self.check_observations[identity] = path
         detailed = {"output", "test_ids", "passed_test_ids", "attachment_capture"}
+        attachments = value.get("attachments")
+        if isinstance(attachments, list) and len(json.dumps(attachments, ensure_ascii=False)) > REFERENCE_INLINE:
+            detailed.add("attachments")
         out = {k: self.compact(v, f"{path}.{k}") for k, v in value.items() if k not in detailed}
+        if "attachments" in detailed:
+            out["attachments"] = self.reference(attachments, path + ".attachments",
+                "Complete captured attachment index; inspect relevant entries and their mounted evidence")
         all_ids, passed = value.get("test_ids", []), set(value.get("passed_test_ids", []))
         failed = [case for case in all_ids if case not in passed]
         out.update(total_tests=len(all_ids), unpassed_test_ids=failed,
-                   source_ref=path, observation=self.reference(value, path, "Complete immutable check observation"))
+                   source_ref=path, observation=observation)
         if len(json.dumps(failed, ensure_ascii=False)) > TEXT_INLINE:
             out["unpassed_test_ids"] = self.reference(failed, path + ".unpassed_test_ids", "All unpassed cases", required=True)
             # This list is derived; its evidence source is the original observation.

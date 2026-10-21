@@ -16,7 +16,7 @@ from .config import ConfigStore
 from .context_plan import CONTEXT_VERSION, ContextPlanner, PreparedContext, remap_references
 from .errors import ConfigurationError, InvalidStructuredResponse, PostCommitError, ProviderError
 from .evidence import invocation_identity
-from .materials import bundle, prepare_prompt
+from .materials import bundle, prepare_prompt, present_materials
 from .models import Usage, strict_schema
 from .progress import capture_output
 from .prompts import PROMPT_VERSION, PromptCompiler
@@ -318,7 +318,8 @@ class ProviderRouter:
             read_status = "uncertified"
             # Self-contained input always names the actually mounted public snapshot.
             context = json.loads(json.dumps(context))
-            referenced = set(context.get("context_files", []))
+            explicit_files = set(context.get("context_files", []))
+            referenced = set(explicit_files)
             released = []
             artifact_store = ArtifactStore(self.store.root)
             def attach(value):
@@ -358,7 +359,11 @@ class ProviderRouter:
                     for child in value:
                         locate(child)
             locate(context)
-            prompt, family = self.compiler.compile(stage, context, eff["model"], eff["prompt_profile"])
+            prompt_context = present_materials(context, artifact_store, explicit_files=explicit_files)
+            if prompt_context.get("evidence_materials") is not context.get("evidence_materials"):
+                attach(prompt_context["evidence_materials"])
+            context["context_files"] = sorted(referenced)
+            prompt, family = self.compiler.compile(stage, prompt_context, eff["model"], eff["prompt_profile"])
             prompt_file = root / "prompt.txt"
             atomic_write(prompt_file, prompt)
             delivery = prepare_prompt(prompt, prompt_file, getattr(transport, "max_prompt_characters", None))
@@ -565,7 +570,7 @@ class ProviderRouter:
         saved = self.store.get(run_id, key)
         if saved:
             record = artifacts.json(saved["artifact"])
-            if record.get("version") in {"context-v1", "context-v2"}:
+            if record.get("version") in {"context-v1", "context-v2", "context-v3"}:
                 # A pending call can use the new view of its frozen controller
                 # input. Keep the old presentation, completed results, permits
                 # and counters; rendering is not a new logical invocation.

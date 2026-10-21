@@ -286,7 +286,11 @@ async def test_model_view_marks_retired_nested_logs_and_rejects_accidental_loss(
             assert context["released_diagnostics"][0]["availability"] == "released"
             assert "location" not in context["released_diagnostics"][0]
             assert not any(path.endswith(log["hash"]) for path in context["context_files"])
-            assert any(path.endswith(report["hash"]) for path in context["context_files"])
+            # Generated mount paths are now exposed once through evidence locations.
+            assert any(ref["hash"] == report["hash"] and ref["location"].endswith(report["hash"])
+                       for ref in context["evidence_materials"])
+            assert not any(ref.get("location", "").endswith(log["hash"])
+                           for ref in context["evidence_materials"])
             raise Inspected()
 
     router.compiler = InspectCompiler()

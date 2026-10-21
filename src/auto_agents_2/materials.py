@@ -10,6 +10,7 @@ from .util import digest
 
 DEFAULT_PROMPT_TARGET = 64000
 DEFAULT_FEEDBACK_TARGET = 8000
+MATERIAL_INDEX_INLINE = 8000
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,28 @@ class PromptDelivery:
     text: str
     file: Path | None = None
     max_characters: int | None = None
+
+
+def present_materials(context: dict, artifacts, *, explicit_files: set[str]) -> dict:
+    """Render verified location metadata without repeating the mount list.
+
+    The caller still mounts and validates every selected file. Only the generated
+    dependency catalogue moves out of line; original explicit files stay visible.
+    The catalogue supplies locations, not another source of evidence authority.
+    """
+    rendered = {**context, "context_files": sorted(explicit_files)}
+    dependencies = context.get("evidence_materials")
+    if (isinstance(dependencies, list) and dependencies
+            and all(isinstance(ref, dict) and {"hash", "kind", "bytes", "location"} <= ref.keys()
+                    for ref in dependencies)
+            and len(json.dumps(dependencies, ensure_ascii=False)) > MATERIAL_INDEX_INLINE):
+        rendered["evidence_materials"] = {
+            "artifact": artifacts.put(dependencies, "context_material"), "entries": len(dependencies),
+            "required_read": False,
+            "instruction": "Complete location index for already supplied evidence; search it for relevant hashes. "
+                           "Cite the original source_ref/material_id or an admitted evidence hash, not this index. "
+                           "All listed files remain mounted; the index itself grants no authority or permissions."}
+    return rendered
 
 
 def prepare_prompt(prompt: str, file: Path, max_characters: int | None) -> PromptDelivery:
