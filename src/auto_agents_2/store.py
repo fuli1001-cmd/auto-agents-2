@@ -271,6 +271,8 @@ class Store:
             revision = rows.get("plan_revision/current", {}).get("revision", 1)
             if revision != journal["base_revision"] or rows["plan"] != journal["previous_plan"]:
                 raise AA2Error("Plan activation CAS failed; preserving proposal and recovery snapshots")
+            from .plan_revision import validate_timing_journal
+            validate_timing_journal(journal)
             self._put(db, rid, f"plan_revision/history/{revision}", {
                 "plan": rows["plan"], "tasks": {k: v for k, v in rows.items() if k.startswith(("develop/", "task_state/"))}})
             origins = dict(rows.get("task_origins", {}))

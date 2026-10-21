@@ -13,7 +13,16 @@ from .evidence_refs import controller_context_catalog
 from .faults import HumanRequirement, ResourceBoundary, StateConflict, route_failure
 from .interaction import choice_spec
 from .models import CheckResult, ImplementationResult, PlanResult, ReviewResult
-from .plan_revision import PlanPatch, apply_patch, descendants, materialize_plan
+from .plan_revision import (
+    PlanPatch,
+    TimingPlanReview,
+    apply_patch,
+    descendants,
+    materialize_plan,
+    timing_review_binding,
+    validate_timing_references,
+    validate_timing_review,
+)
 from .recovery import (
     Diagnosis,
     FailureRecord,
@@ -412,7 +421,14 @@ class RecoveryController:
                 from .preview_evidence import PreviewEvidence
                 if plan and plan.preview:
                     diagnosis_context["preview_contracts"] = PreviewEvidence(engine).contracts(rid, plan)
+                progress_operation = f"recovery/diagnose/{failure.id}/{active['diagnosis_round']}"
+                progress_key = "recovery/diagnosis-progress-basis/" + progress_operation
+                progress_basis = self.store.get(rid, progress_key)
+                if progress_basis is None:
+                    progress_basis = policy.progress.basis(diagnosis_context, tree_hash(work), "diagnose")
+                    self.store.checkpoint(rid, progress_key, progress_basis)
                 diagnosis = policy.completed_diagnosis(rid, permit, failure, active, work, plan)
+                completed_diagnosis = diagnosis is not None
                 schema_error = None
                 if diagnosis is None:
                     diagnosis, schema_error = await self._diagnose(diagnosis_context,
@@ -422,8 +438,13 @@ class RecoveryController:
                 try:
                     if schema_error:
                         raise AA2Error(schema_error)
+                    assessment_context = diagnosis_context
+                    if completed_diagnosis and diagnosis.action in {"diagnose", "blocked"}:
+                        # A validated inconclusive outcome remains a fact; it does not authorize another call.
+                        assessment_context = {**diagnosis_context, "allowed_actions": {
+                            **diagnosis_context["allowed_actions"], "diagnose": self.store.get(rid, permit)["action"]}}
                     suggested = adjudicate(failure, attempts=active["attempt"] - 1, diagnosis=diagnosis,
-                        plan=plan, evidence_context=diagnosis_context)
+                        plan=plan, evidence_context=assessment_context)
                 except AA2Error as exc:
                     rejection = {"diagnosis": diagnosis.model_dump() if diagnosis else None, "validation_error": str(exc)}
                     rejected_round = active.pop("diagnosis_round")
@@ -434,6 +455,10 @@ class RecoveryController:
                     self._reject_diagnosis(rid, permit, rejection)
                     return
                 policy.complete(rid, permit, {"status": "validated", "diagnosis": diagnosis.model_dump()})
+                if diagnosis.action in {"diagnose", "blocked"}:
+                    policy.progress.record(rid, failure.origin_id, "diagnose", progress_basis, progress_operation,
+                        {"status": "inconclusive", "evidence_ref": "invocation/" + progress_operation,
+                         "diagnosis": diagnosis.model_dump()})
                 active.pop("diagnosis_feedback", None)
                 active.pop("diagnosis_errors", None)
                 suggested, assess = self._diagnosis_assessment(failure, suggested)
@@ -712,12 +737,18 @@ class RecoveryController:
             # Author and reviewer must share the same selected recovery objective
             # and evidence, including after snapshot creation or interruption.
             self.store.checkpoint(rid, context_key, recovery_context)
-        patch = await engine._invoke("plan", {**recovery_context, "plan_patch": True, "base_revision": revision,
+        patch_context = {**recovery_context, "plan_patch": True, "base_revision": revision,
             "plan": plan.model_dump(), "failure": failure.model_dump(), "task_origins": self.store.task_origin_state(rid),
-            "specification": self.store.get(rid, "clarify"), "project": engine.contexts.build(work)},
-            PlanPatch, work, rid, "recovery/patch/" + identity, fresh=True)
+            "specification": self.store.get(rid, "clarify"), "project": engine.contexts.build(work)}
+        progress_key = "recovery/patch-progress-basis/" + identity
+        if self.store.get(rid, progress_key) is None:
+            progress_context = {**patch_context, "prototype_approval": self.store.get(rid, "prototype_approval")}
+            self.store.checkpoint(rid, progress_key, engine.recovery_policy.progress.basis(
+                progress_context, tree_hash(work), "plan_patch"))
+        patch = await engine._invoke("plan", patch_context, PlanPatch, work, rid, "recovery/patch/" + identity, fresh=True)
         unchanged({"patch": patch.model_dump()})
         try:
+            validate_timing_references(patch, patch_context)
             coverage_verified = False
             if plan.mode == "verification_only":
                 from .models import IntakeResult
@@ -760,16 +791,24 @@ class RecoveryController:
                     baseline["base_commit"] = snapshot["commit"]
                 self.store.checkpoints(rid, {snapshot_key: saved_snapshots, baseline_key: baseline})
                 candidates[task_id] = {"state": saved, "project": engine.contexts.build(path)}
-        review = await engine._invoke("review", {**recovery_context, "review_kind": "plan_patch", "previous_plan": plan.model_dump(),
+        review_context = {**recovery_context, "review_kind": "plan_patch", "previous_plan": plan.model_dump(),
             "patch": patch.model_dump(), "plan": candidate.model_dump(), "failure": failure.model_dump(),
             "retained_candidates": candidates,
             "affected": sorted(affected), "reopen": sorted(reopen), "specification": self.store.get(rid, "clarify"),
-            "project": engine.contexts.build(work)}, ReviewResult, work, rid, "recovery/patch-review/" + identity, fresh=True)
+            "project": engine.contexts.build(work)}
+        review = await engine._invoke("review", review_context, TimingPlanReview if patch.timing_corrections else ReviewResult,
+            work, rid, "recovery/patch-review/" + identity, fresh=True)
         unchanged({"patch": patch.model_dump(), "review": review.model_dump()})
         if not review.approved:
             # Preserve both the rejected proposal and its review. A new bounded
             # diagnosis decides what to do; replaying this cached patch cannot help.
             self._reject_patch(rid, active, failure, identity, {"patch": patch.model_dump(), "patch_review": review.model_dump()})
+            return False
+        try:
+            validate_timing_review(patch, review, review_context)
+        except AA2Error as exc:
+            self._reject_patch(rid, active, failure, identity, {"patch": patch.model_dump(),
+                "patch_review": review.model_dump(), "validation_error": str(exc)})
             return False
         for task_id, snapshot in snapshots.items():
             if tree_hash(Path(snapshot["workspace"])) != snapshot["source_hash"]:
@@ -781,6 +820,9 @@ class RecoveryController:
             "snapshots": snapshots, **baseline,
             "document_preimage": {"path": "docs/aa2/plan.md", "before": digest(document.read_bytes()) if document.is_file() else None,
                                   "mode": document.stat().st_mode & 0o7777 if document.is_file() else 0o644}}
+        if patch.timing_corrections:
+            journal["timing_review_binding"] = timing_review_binding(
+                journal["previous_plan"], journal["patch"], journal["plan"], journal["review"])
         self.store.checkpoint(rid, journal_key, journal)
         self.store.activate_plan_patch(rid, identity)
         # A derived document is written only after activation. Startup materializes
@@ -791,6 +833,11 @@ class RecoveryController:
     def _reject_patch(self, rid, active, failure, identity, evidence):
         key = "recovery/patch-rejection/" + identity
         self.store.checkpoint(rid, key, evidence)
+        if evidence.get("patch", {}).get("timing_corrections"):
+            basis = self.store.get(rid, "recovery/patch-progress-basis/" + identity)
+            if basis:
+                self.engine.recovery_policy.progress.record(rid, failure.origin_id, "plan_patch", basis,
+                    "recovery/patch/" + identity, {"status": "rejected", "evidence_ref": key})
         successor = failure.model_copy(update={"evidence": {**failure.evidence, **evidence},
             "evidence_refs": [*failure.evidence_refs, key]})
         self._finish(rid, active, {}, successor=successor.model_dump())

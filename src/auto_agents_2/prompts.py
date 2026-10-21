@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 
 from .context_plan import purpose_for
+from .execution_stages import stage_instructions
 from .prompt_rules import COMMON, instructions
 from .research import request_documents
 
 INVOCATION_CONTRACT_VERSION = "2026-10-16.2"
-PROMPT_VERSION = "2026-10-21.source-history-v3"
+PROMPT_VERSION = "2026-10-21.task-stages-v1"
 CORE = COMMON
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
@@ -185,5 +186,6 @@ class PromptCompiler:
             task = ("Validate only the native structured-response contract requested in context.task. "
                     "Do not execute tools or assess a project acceptance gate. This diagnostic response "
                     "does not approve implementation, tests or human decisions.")
+        task += stage_instructions(stage, context, purpose)
         prompt = f"{instructions(stage, context, purpose)}\n{style}\n<context>\n{data}\n</context>\n<task stage=\"{stage}\">\n{task}\n</task>"
         return prompt, family

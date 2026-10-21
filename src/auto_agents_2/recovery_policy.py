@@ -1,4 +1,4 @@
-"""Action authorization over controller facts; counts inform decisions, never stop them."""
+"""Action authorization over facts; cumulative counts do not replace action availability."""
 from __future__ import annotations
 
 from typing import Literal
@@ -11,6 +11,7 @@ from .models import PlanResult, Record
 from .preview_evidence import PreviewEvidence
 from .recovery import Diagnosis, RecoveryDecision, check_rows, failure_summary, implemented_candidate
 from .recovery_identity import authorization_binding, binding_matches_failure, failure_contract
+from .recovery_progress import RecoveryProgress
 from .util import digest
 from .workspace import tree_hash
 
@@ -48,6 +49,7 @@ class RecoveryCycle(Record):
 class RecoveryPolicy:
     def __init__(self, engine):
         self.engine, self.store = engine, engine.store
+        self.progress = RecoveryProgress(engine)
 
     @staticmethod
     def cycle_id(failure, active):
@@ -105,6 +107,8 @@ class RecoveryPolicy:
         if (self.store.get(rid, "delivery/journal") or {}).get("publication_started"):
             for action in STAGE_REENTRY_ACTIONS | {"plan_patch"}:
                 choices.pop(action, None)
+        for action in self.progress.exclusions(rid, failure, work, plan):
+            choices.pop(action, None)
         return choices, prototype_binding, preview_binding
 
     def diagnosis_actions(self, rid, failure, work, plan):
@@ -148,6 +152,8 @@ class RecoveryPolicy:
             candidates = None
         force_decision = force_decision or diagnosis_assessment
         cid = self.cycle_id(failure, active)
+        if candidates is None:
+            operation = self.progress.resume_operation(rid, failure, work, plan, cid, operation)
         cycle_key = "recovery/cycles/" + cid
         permit_key = "recovery/permits/" + digest([cid, operation])
         source, plan_hash = tree_hash(work), digest(plan.model_dump() if plan else None)
@@ -183,6 +189,17 @@ class RecoveryPolicy:
         if suggested.action == "preview_recheck" and (
                 not preview_binding or suggested.task_ids != [failure.task_id]):
             raise StateConflict("Preview evidence refresh requires an accepted preview, human consent and the current task")
+        exclusions = self.progress.exclusions(rid, failure, work, plan) if candidates is None else {}
+        # An issued permit retains its exact scope; only a NEW selection excludes exhausted paths.
+        if not prior and suggested.action in exclusions:
+            if bound is not None:
+                self.progress.stop(rid, failure, work, plan, cid, operation, exclusions,
+                    "已保留的恢复请求指向同证据下已耗尽的动作；保留请求，先核对新的有效证据。")
+            if not choices:
+                self.progress.stop(rid, failure, work, plan, cid, operation, exclusions,
+                    "相同证据下没有可执行的新恢复动作；现场保留，须补充有效证据或修复方案。")
+            suggested = choices.get("repair") or choices.get("plan_patch") or next(iter(choices.values()))
+            force_decision = True
         transition = suggested.action in STAGE_REENTRY_ACTIONS
         rule_key = "recovery/rules/" + digest([failure.origin_id, failure.step,
             sorted(failure.obligations), suggested.action])
@@ -274,6 +291,8 @@ class RecoveryPolicy:
             "consumption": {"implementation": self.store.get(rid, "rounds/" + failure.origin_id, {}),
                 "diagnosis": self.store.get(rid, "recovery/budgets/diagnosis/" + failure.origin_id, {}),
                 "tokens": self.store.usage_summary(rid)}}
+        if exclusions:
+            evidence["excluded_actions"] = exclusions
         if prototype_binding:
             evidence["prototype_recheck"] = {"binding": prototype_binding,
                 "previous_review": self.store.get(rid, "prototype_approval", {}).get("review"),
@@ -350,6 +369,9 @@ class RecoveryPolicy:
                 actor, selected = "agent", result.selected_action
             else:
                 manual = True
+        if manual and exclusions and result_key is not None and not answered and not human_cycle:
+            self.progress.stop(rid, failure, work, plan, cid, operation, exclusions,
+                "同证据的无效恢复路径已停止；决策未找到有效替代动作：" + result.reason)
         if manual:
             if not legacy_answer:
                 requirement = routing.human_requirement or HumanRequirement(

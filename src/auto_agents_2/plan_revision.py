@@ -6,9 +6,11 @@ from pathlib import PurePosixPath
 from pydantic import Field
 
 from .errors import AA2Error
-from .models import Command, PlanResult, PreviewSpec, Record, TaskSpec
+from .evidence_refs import controller_context_catalog
+from .execution_stages import TimingProducer
+from .models import Command, PlanResult, PreviewSpec, Record, ReviewResult, TaskSpec
 from .planning import validate_plan
-from .util import atomic_write
+from .util import atomic_write, digest
 
 
 def materialize_plan(store, rid, work, plan):
@@ -20,12 +22,116 @@ def materialize_plan(store, rid, work, plan):
     atomic_write(path, plan.document)
 
 
+class TimingCorrection(Record):
+    task_id: str = Field(min_length=1)
+    acceptance_index: int = Field(ge=0)
+    previous: str = Field(min_length=1)
+    replacement: str = Field(min_length=1)
+    producer: TimingProducer
+    reason: str = Field(min_length=1)
+    evidence_refs: list[str] = Field(min_length=1)
+
+
+class TimingReview(Record):
+    task_id: str
+    acceptance_index: int = Field(ge=0)
+    timing_only: bool
+    obligations_preserved: bool
+    user_order_preserved: bool
+    reason: str = Field(min_length=1)
+    evidence_refs: list[str] = Field(min_length=1)
+
+
+class TimingPlanReview(ReviewResult):
+    timing_reviews: list[TimingReview] = []
+
+
+def _timing_acceptance(plan, patch):
+    """Check explicit mappings and exact structural invariants, not prose equivalence."""
+    if not patch.timing_corrections:
+        return {}
+    old = {t.id: t for t in plan.tasks}
+    updates = {t.id: t for t in patch.upsert_tasks}
+    expected, seen = {}, set()
+    for correction in patch.timing_corrections:
+        key = (correction.task_id, correction.acceptance_index)
+        task = old.get(correction.task_id)
+        if (key in seen or task is None or correction.acceptance_index >= len(task.acceptance)
+                or task.acceptance[correction.acceptance_index] != correction.previous
+                or correction.previous == correction.replacement):
+            raise AA2Error('Timing correction has a duplicate, stale or invalid acceptance mapping')
+        seen.add(key)
+        expected.setdefault(task.id, list(task.acceptance))[correction.acceptance_index] = correction.replacement
+    if patch.remove_tasks or set(updates) != set(expected) or len(updates) != len(patch.upsert_tasks):
+        raise AA2Error('Timing correction must update exactly its existing tasks without additions or removals')
+    for name in ('final_checks', 'runtime_prepare', 'runtime_probes', 'preview', 'environment_file', 'requirements_file'):
+        value = getattr(patch, name)
+        if value is not None and value != getattr(plan, name):
+            raise AA2Error('Timing correction changes a delivery or environment contract')
+    for task_id, acceptance in expected.items():
+        before, after = old[task_id], updates[task_id]
+        if (before.model_dump(exclude={'description', 'acceptance'}) != after.model_dump(exclude={'description', 'acceptance'})
+                or after.acceptance != acceptance):
+            raise AA2Error('Timing correction changes an unmapped obligation or a structured task contract')
+    return expected
+
+
+def _require_timing_references(references, context, *, review=False):
+    provenance = {'patch': 'proposal', **({'plan': 'proposal'} if review else {})}
+    catalog = controller_context_catalog(context, provenance=provenance)
+    resolved = [catalog.resolve(ref) for ref in references]
+    if None in resolved or not catalog.controller.intersection(resolved):
+        raise AA2Error('Timing correction requires resolvable controller evidence, not only its own proposal')
+
+
+def validate_timing_references(patch, context):
+    for correction in patch.timing_corrections:
+        _require_timing_references(correction.evidence_refs, context)
+
+
+def validate_timing_review(patch, review, context=None):
+    """Require explicit independent semantic judgments; these are not machine proofs."""
+    if not patch.timing_corrections:
+        return
+    verdict = TimingPlanReview.model_validate(review.model_dump() if hasattr(review, 'model_dump') else review)
+    expected = {(c.task_id, c.acceptance_index) for c in patch.timing_corrections}
+    actual = [(r.task_id, r.acceptance_index) for r in verdict.timing_reviews]
+    if not verdict.approved or len(actual) != len(expected) or set(actual) != expected:
+        raise AA2Error('Timing correction lacks a complete independent review')
+    for row in verdict.timing_reviews:
+        if not (row.timing_only and row.obligations_preserved and row.user_order_preserved):
+            raise AA2Error('Timing review did not preserve substance or legitimate prerequisites')
+        if context is not None:
+            _require_timing_references(row.evidence_refs, context, review=True)
+
+
+def timing_review_binding(previous, patch, candidate, review):
+    return digest(['timing-review-v1', previous, patch, candidate, review])
+
+
+def validate_timing_journal(journal):
+    """Recheck a prepared journal on activation, including after interruption."""
+    patch_data = journal.get('patch', {})
+    if not patch_data.get('timing_corrections'):
+        return
+    patch = PlanPatch.model_validate(patch_data)
+    previous = PlanResult.model_validate(journal['previous_plan'])
+    candidate, affected, reopen = apply_patch(previous, patch, journal['base_revision'],
+        set(patch.failure_ids), {t.id: t.origin_id for t in previous.tasks})
+    validate_timing_review(patch, journal['review'])
+    expected = timing_review_binding(journal['previous_plan'], patch_data, journal['plan'], journal['review'])
+    if (journal.get('timing_review_binding') != expected or candidate.model_dump() != journal['plan']
+            or set(journal['affected']) != affected or set(journal['reopen']) != reopen):
+        raise AA2Error('Timing correction journal no longer matches its reviewed candidate')
+
+
 class PlanPatch(Record):
     base_revision: int = Field(ge=1)
     failure_ids: list[str] = Field(min_length=1)
     reason: str
     document: str
     upsert_tasks: list[TaskSpec] = []
+    timing_corrections: list[TimingCorrection] = []
     remove_tasks: list[str] = []
     final_checks: list[Command] | None = None
     runtime_prepare: list[Command] | None = None
@@ -80,6 +186,7 @@ def apply_patch(plan: PlanResult, patch: PlanPatch, revision: int, failures: set
         raise AA2Error("Stale plan patch base_revision")
     if not set(patch.failure_ids) <= failures:
         raise AA2Error("Plan patch references unknown failures")
+    timing = _timing_acceptance(plan, patch)
     old = {t.id: t for t in plan.tasks}
     updates = {t.id: t for t in patch.upsert_tasks}
     if len(updates) != len(patch.upsert_tasks) or set(patch.remove_tasks) & updates.keys():
@@ -96,7 +203,7 @@ def apply_patch(plan: PlanResult, patch: PlanPatch, revision: int, failures: set
         replacements = [t for t in tasks.values() if t.origin_id == task.origin_id]
         if not replacements or not set(task.requirement_ids) <= {r for t in replacements for r in t.requirement_ids}:
             raise AA2Error("Removed task lacks replacement coverage in its original budget lineage")
-        if not set(task.acceptance) <= {a for t in replacements for a in t.acceptance}:
+        if task.id not in timing and not set(task.acceptance) <= {a for t in replacements for a in t.acceptance}:
             raise AA2Error("Plan patch removes accepted obligations")
         _retain_checks(task.checks, [c for t in replacements for c in t.checks])
     changes = {k: getattr(patch, k) for k in ("final_checks", "runtime_prepare", "runtime_probes", "preview", "environment_file", "requirements_file")

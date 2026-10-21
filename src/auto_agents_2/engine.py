@@ -37,6 +37,7 @@ from .errors import (
     ProtectedChange,
     PrototypeBrowserError,
     ProviderError,
+    RecoveryPathExhausted,
     RetryableInfrastructureError,
     VerificationPreparationError,
 )
@@ -222,6 +223,12 @@ class WorkflowEngine:
                         self.recovery.submit(rid, exc.failure)
                     except Replan as exc:
                         self._controller_replan(rid, exc)
+                    except RecoveryPathExhausted as exc:
+                        self.store.checkpoint(rid, "recovery/path-exhausted",
+                            {"reason": str(exc), "excluded_actions": exc.evidence})
+                        self.store.event(rid, "recovery.path_exhausted", {"reason": str(exc)})
+                        self.store.update(rid, status="PAUSED", pause_reason=str(exc), last_error=exc.code)
+                        return self.store.run(rid)
                     except HumanIntervention as exc:
                         await self._wait_prerequisite(rid, exc)
                     except Exception as exc:

@@ -2,6 +2,15 @@ class AA2Error(Exception):
     code = "AA2_ERROR"
 
 
+class RecoveryPathExhausted(AA2Error):
+    """No useful permitted action remains on these unchanged recovery facts."""
+    code = "RECOVERY_PATH_EXHAUSTED"
+
+    def __init__(self, evidence, reason):
+        self.evidence = evidence
+        super().__init__(reason)
+
+
 class IncompleteIteration(AA2Error):
     code = "ITERATION_INCOMPLETE"
 
