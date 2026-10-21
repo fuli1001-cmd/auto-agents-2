@@ -1,4 +1,4 @@
-"""Public source comparisons from controller-recorded Git snapshots, never native Git history."""
+"""Public source comparisons from recorded Git snapshots and controller observations."""
 from __future__ import annotations
 
 import difflib
@@ -76,6 +76,82 @@ class SourceHistory:
                     "checks": saved.get("checks") or saved.get("feedback", {}).get("checks", [])})
         return proposals
 
+    def _observations(self, rid, source, admitted):
+        """Recover selected bytes from prior collections, not model citations or proposals.
+
+        Only the original `current` slot is read. Following earlier observations
+        would recursively expand history and make repeated collection unstable.
+        Keep the first origin supplying each file so new manifests of the same
+        observation cannot invalidate the cache indefinitely.
+        """
+        with self.store.connect() as db:
+            rows = db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND "
+                "key LIKE 'review-evidence/source-history/%' ORDER BY rowid", (rid,)).fetchall()
+        observed = {}
+        for origin, raw in rows:
+            try:
+                record = json.loads(raw)
+                previous = record.get("source_hash")
+                if previous == source:
+                    continue
+                ref = record["artifact"]
+                if (not re.fullmatch(r"[0-9a-f]{64}", previous or "") or ref.get("kind") != "source_history"):
+                    raise ValueError("Invalid observation identity")
+                manifest = self.engine.artifacts.json(ref)
+                if (manifest.get("version") not in {1, 2, 3, 4} or manifest.get("source_hash") != previous
+                        or not isinstance(manifest.get("current"), dict)):
+                    raise ValueError("Unbound source observation")
+                selected = {}
+                for name, entry in manifest["current"].items():
+                    # Apply today's public path/scope policy before reading any body.
+                    if not admitted(name):
+                        continue
+                    content = entry["content"]
+                    mode = entry["mode"]
+                    if (content.get("kind") != "source_snapshot" or type(mode) is not int
+                            or not 0 <= mode <= 0o777):
+                        raise ValueError("Invalid observed file")
+                    body = self.engine.artifacts.bytes(content)
+                    body.decode("utf-8")
+                    if len(body) != content["bytes"]:
+                        raise ValueError("Invalid observed file length")
+                    selected[name] = {"content": {k: content[k] for k in ("hash", "kind", "bytes")}, "mode": mode}
+                if not selected:
+                    continue
+                item = observed.setdefault(previous, {"source_hash": previous, "status": "observed_only",
+                    "origins": [], "files": {}})
+                added = False
+                for name, entry in selected.items():
+                    existing = item["files"].get(name)
+                    # Execution source identity binds contents and executable bits,
+                    # not other permission bits. Preserve the first observed mode.
+                    if existing is not None and (existing["content"] != entry["content"]
+                            or bool(existing["mode"] & 0o111) != bool(entry["mode"] & 0o111)):
+                        raise ValueError("Conflicting bytes for one observed source identity")
+                    if existing is None:
+                        item["files"][name] = entry
+                        added = True
+                if added:
+                    # Provenance metadata, not permission to mount the unfiltered old manifest.
+                    item["origins"].append({"checkpoint": origin, "manifest_hash": ref["hash"]})
+            except (AttributeError, KeyError, TypeError, ValueError, OSError, UnicodeError) as exc:
+                raise StateConflict("Recorded source observation is unavailable or inconsistent; preserve the candidate") from exc
+        return [observed[key] for key in sorted(observed)]
+
+    def _comparisons(self, label, files, current):
+        comparisons = []
+        for name in sorted(files.keys() | current.keys()):
+            before, after = files.get(name), current.get(name)
+            if before and after and before["content"] == after["content"] and before["mode"] == after["mode"]:
+                continue
+            old = self.engine.artifacts.bytes(before["content"]).decode("utf-8") if before else ""
+            new = self.engine.artifacts.bytes(after["content"]).decode("utf-8") if after else ""
+            patch = "".join(difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
+                fromfile=label + ":" + name, tofile="current:" + name))
+            comparisons.append({"path": name, "before": before, "after": after,
+                                "diff": self.engine.artifacts.put(patch, "source_diff")})
+        return comparisons
+
     def collect(self, rid, work, scopes=()):
         source = tree_hash(work)
         extra = self.engine.config.load().sensitive_paths
@@ -101,7 +177,8 @@ class SourceHistory:
                 anchors[label] = git(work, "rev-parse", "--verify", ref + "^{commit}")
             except AA2Error:
                 missing.append({"anchor": label, "status": "missing"})
-        identity = digest([3, source, anchors, missing, list(scopes), extra, proposals])
+        observations = self._observations(rid, source, admitted)
+        identity = digest([4, source, anchors, missing, list(scopes), extra, proposals, observations])
         key = "review-evidence/source-history/" + identity
         cached = self.store.get(rid, key)
         if cached:
@@ -154,28 +231,28 @@ class SourceHistory:
                 entry["body_status"] = "included" if blobs[oid] is not None else "non_utf8"
                 if blobs[oid] is not None:
                     files[name] = {"blob": oid, "content": blobs[oid], "mode": int(mode, 8) & 0o777}
-            comparisons = []
-            for name in sorted(files.keys() | current.keys()):
-                before, after = files.get(name), current.get(name)
-                if before and after and before["content"] == after["content"] and before["mode"] == after["mode"]:
-                    continue
-                old = self.engine.artifacts.bytes(before["content"]).decode("utf-8") if before else ""
-                new = self.engine.artifacts.bytes(after["content"]).decode("utf-8") if after else ""
-                patch = "".join(difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
-                    fromfile=label + ":" + name, tofile="current:" + name))
-                comparisons.append({"path": name, "before": before, "after": after,
-                                    "diff": self.engine.artifacts.put(patch, "source_diff")})
+            comparisons = self._comparisons(label, files, current)
             snapshots.append({"anchor": label, "commit": commit, "root_tree": root_tree,
                 "public_tree": public_tree, "private_paths_omitted": private_paths_omitted,
                 "files": files, "changes_to_current": comparisons})
+        for observation in observations:
+            observation["changes_to_current"] = self._comparisons(
+                "observed:" + observation["source_hash"], observation["files"], current)
         if tree_hash(work) != source:
             raise StateConflict("Source changed while collecting review history; preserve the candidate")
-        ref = self.engine.artifacts.put({"version": 3, "source_hash": source, "scope": list(scopes),
+        ref = self.engine.artifacts.put({"version": 4, "source_hash": source, "scope": list(scopes),
             "includes_public_protected_files": True, "current": current, "snapshots": snapshots, "missing": missing,
-            "proposals": proposals,
+            "proposals": proposals, "observations": observations,
             "coverage": {
                 "inventory": "complete_public_git_tree", "body_selection": "protected_files_plus_scope",
                 "missing": "unresolved_anchors_only",
+                "observations": "Selected UTF-8 regular file bytes from earlier controller collections in this run, "
+                                "bound to their source hashes and original manifests. They may be uncommitted, "
+                                "rejected or from another task workspace; they are not accepted baselines or approvals. "
+                                "Only paths admitted by the current public/scope policy are exposed. "
+                                "No complete inventory was captured for these observations: a missing file or null "
+                                "comparison side means not captured, not proof of absence. No implied chronology "
+                                "or exhaustive capture of every candidate; reconcile identities with task evidence.",
                 "absence": "Each public_tree enumerates all public tracked entries in its bound commit/root_tree, "
                            "independently of scope. If private_paths_omitted is false it is the entire tracked tree; "
                            "otherwise absence from this inventory cannot prove absence from private paths. "
@@ -189,7 +266,7 @@ class SourceHistory:
                        "observations, not verification of the proposal. Reconcile against the recorded snapshots; "
                        "submit changes for the normal protected-change review and fresh verification. "
                        "Read the before/after files and diffs; missing history remains an evidence gap."}, "source_history")
-        record = {"status": "incomplete" if missing else "available" if anchors or proposals else "unavailable",
+        record = {"status": "incomplete" if missing else "available" if anchors or proposals or observations else "unavailable",
                   "source_hash": source, "artifact": ref, "anchors": anchors, "missing": missing}
         self.store.checkpoint(rid, key, record)
         return record

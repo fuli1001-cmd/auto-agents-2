@@ -55,7 +55,7 @@ def test_complete_tree_distinguishes_absence_from_outside_body_scope(tmp_path):
     assert report["missing"] == [] and report["coverage"]["missing"] == "unresolved_anchors_only"
     assert report["coverage"]["inventory"] == "complete_public_git_tree"
     assert report["coverage"]["body_selection"] == "protected_files_plus_scope"
-    assert report["scope"] == ["app.py"] and report["version"] == 3
+    assert report["scope"] == ["app.py"] and report["version"] == 4
 
 
 def test_present_unreadable_and_private_entries_are_not_reported_as_absent(tmp_path, monkeypatch):
