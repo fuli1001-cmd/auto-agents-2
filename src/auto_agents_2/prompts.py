@@ -118,7 +118,10 @@ class PromptCompiler:
             task += (" design_review contains the controller's document-bound architecture decision, distinct from prototype "
                      "approval and task acceptance. Historical pending-review prose does not override a matching receipt. "
                      "source_history provides exact public files and diffs from recorded "
-                     "baselines and recovery snapshots. The mounted Git repository is only a filtered current snapshot: "
+                     "baselines and recovery snapshots, plus filtered archived proposals when present. These proposals "
+                     "are not applied source or approvals; prior checks do not verify a proposed repair. Reconcile their "
+                     "exact changes with the snapshots and submit through normal review and verification. "
+                     "The mounted Git repository is only a filtered current snapshot: "
                      "read those history artifacts for test-change audits. A no-op implementation.changes does not prove "
                      "historical tests were unchanged. Missing comparison evidence still blocks an audit that requires it.")
         if stage in {"plan", "implement"} or stage == "review" and context.get("review_kind") in {"plan", "plan_patch"}:

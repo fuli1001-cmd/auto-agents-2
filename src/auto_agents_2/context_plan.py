@@ -516,7 +516,7 @@ class _Selection:
             ref, source = queue.pop()
             sha = ref["hash"]
             if (sha in visited or ref["kind"].startswith("research_")
-                    or ref["kind"] in {"source_snapshot", "source_diff"} or self.artifacts.released(ref)):
+                    or ref["kind"] in {"source_snapshot", "source_diff", "source_proposal"} or self.artifacts.released(ref)):
                 continue
             visited.add(sha)
             with self.artifacts.store.connect() as db:
@@ -536,7 +536,7 @@ class _Selection:
                         if source_file or key in {"logs", "report", "attachments", "image_artifact", "diagnostic_evidence", "environment_resolution"}:
                             for dependency in references(child):
                                 if (dependency["hash"] in edges and {"kind", "bytes"} <= dependency.keys()
-                                        and (not source_file or dependency["kind"] in {"source_snapshot", "source_diff"})
+                                        and (not source_file or dependency["kind"] in {"source_snapshot", "source_diff", "source_proposal"})
                                         and not dependency["kind"].startswith("research_")):
                                     if dependency["hash"] not in inline:
                                         dependencies[dependency["hash"]] = copy.deepcopy(dependency)

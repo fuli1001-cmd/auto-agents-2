@@ -18,17 +18,20 @@ class SourceHistory:
     def __init__(self, engine):
         self.engine, self.store = engine, engine.store
 
-    def _anchors(self, rid):
+    def _records(self, rid):
+        with self.store.connect() as db:
+            rows = db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND "
+                "(key LIKE 'recovery/gate-history/%' OR key LIKE 'recovery/task-baselines/%' "
+                "OR key LIKE 'plan_revision/journal/%' OR key LIKE 'plan_revision/history/%' "
+                "OR key='replan_feedback') ORDER BY rowid", (rid,)).fetchall()
+        return [(key, json.loads(raw)) for key, raw in rows]
+
+    def _anchors(self, rid, records):
         anchors = {}
         baseline = self.store.get(rid, "baseline")
         if isinstance(baseline, str) and re.fullmatch(r"[0-9a-f]{40,64}", baseline):
             anchors["baseline"] = baseline
-        with self.store.connect() as db:
-            rows = db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND "
-                "(key LIKE 'recovery/gate-history/%' OR key LIKE 'recovery/task-baselines/%' "
-                "OR key LIKE 'plan_revision/journal/%' OR key='replan_feedback') ORDER BY rowid", (rid,)).fetchall()
-        for key, raw in rows:
-            record = json.loads(raw)
+        for key, record in records:
             refs = list(record.get("recovery_refs", []))
             if record.get("recovery_ref"):
                 refs.append(record["recovery_ref"])
@@ -37,6 +40,41 @@ class SourceHistory:
                 if isinstance(ref, str) and ref.startswith(f"refs/aa2/{rid}/"):
                     anchors[ref] = ref
         return anchors
+
+    def _proposals(self, records, admitted):
+        """Read explicit controller archive slots, never recurse into model-owned records."""
+        proposals = []
+        for origin, record in records:
+            if origin.startswith("recovery/gate-history/"):
+                tasks = record.get("checkpoints", {})
+                plan = tasks.get("plan", {})
+            elif origin.startswith("plan_revision/history/"):
+                tasks, plan = record.get("tasks", {}), record.get("plan", {})
+            elif origin.startswith("recovery/task-baselines/"):
+                tasks = {"develop/task/" + origin.split("/")[2]: record.get("previous_task", {})}
+                plan = {}
+            else:
+                continue
+            for key, saved in tasks.items():
+                if not re.fullmatch(r"develop/task/[^/]+", key) or not isinstance(saved, dict):
+                    continue
+                proposal = saved.get("implementation") or {}
+                changes = proposal.get("changes", [])
+                if not changes:
+                    continue
+                selected = [{k: change[k] for k in ("path", "operation", "content", "old_text") if k in change}
+                            for change in changes if admitted(change["path"])]
+                if not selected:
+                    continue
+                task_id = key.removeprefix("develop/task/")
+                commands = next((t.get("checks", []) for t in plan.get("tasks", []) if t["id"] == task_id), [])
+                proposals.append({"origin": origin + "/" + key, "task_id": task_id,
+                    "status": "proposal_only", "recorded_phase": saved.get("phase"),
+                    "recorded_source_hash": saved.get("source_hash"), "proposal_hash": digest(proposal),
+                    "content": self.engine.artifacts.put({"changes": selected}, "source_proposal"),
+                    "omitted_changes": len(changes) - len(selected), "commands": commands,
+                    "checks": saved.get("checks") or saved.get("feedback", {}).get("checks", [])})
+        return proposals
 
     def collect(self, rid, work, scopes=()):
         source = tree_hash(work)
@@ -51,13 +89,15 @@ class SourceHistory:
             return (not path.is_absolute() and ".." not in path.parts and not set(path.parts) & EXCLUDED
                     and not sensitive(path, extra) and (protected or scopes and path_allowed(name, scopes)))
 
+        records = self._records(rid)
+        proposals = self._proposals(records, admitted)
         anchors, missing = {}, []
-        for label, ref in self._anchors(rid).items():
+        for label, ref in self._anchors(rid, records).items():
             try:
                 anchors[label] = git(work, "rev-parse", "--verify", ref + "^{commit}")
             except AA2Error:
                 missing.append({"anchor": label, "status": "missing"})
-        identity = digest([source, anchors, missing, list(scopes), extra])
+        identity = digest([2, source, anchors, missing, list(scopes), extra, proposals])
         key = "review-evidence/source-history/" + identity
         cached = self.store.get(rid, key)
         if cached:
@@ -111,11 +151,15 @@ class SourceHistory:
             snapshots.append({"anchor": label, "commit": commit, "files": files, "changes_to_current": comparisons})
         if tree_hash(work) != source:
             raise StateConflict("Source changed while collecting review history; preserve the candidate")
-        ref = self.engine.artifacts.put({"version": 1, "source_hash": source, "scope": list(scopes),
+        ref = self.engine.artifacts.put({"version": 2, "source_hash": source, "scope": list(scopes),
             "includes_public_protected_files": True, "current": current, "snapshots": snapshots, "missing": missing,
+            "proposals": proposals,
             "meaning": "Exact public file bytes and comparisons, not proof that test changes are acceptable. "
+                       "Proposals are retained suggestions, not applied source or approvals. Their checks are prior "
+                       "observations, not verification of the proposal. Reconcile against the recorded snapshots; "
+                       "submit changes for the normal protected-change review and fresh verification. "
                        "Read the before/after files and diffs; missing history remains an evidence gap."}, "source_history")
-        record = {"status": "incomplete" if missing else "available" if anchors else "unavailable",
+        record = {"status": "incomplete" if missing else "available" if anchors or proposals else "unavailable",
                   "source_hash": source, "artifact": ref, "anchors": anchors, "missing": missing}
         self.store.checkpoint(rid, key, record)
         return record

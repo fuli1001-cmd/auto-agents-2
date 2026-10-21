@@ -24,6 +24,7 @@ from .recovery import (
     failure_summary,
     implemented_candidate,
 )
+from .source_history import SourceHistory
 from .util import digest
 from .workspace import git, prepared_before_hash, tree_hash
 
@@ -172,6 +173,7 @@ class RecoveryController:
             diagnosis_context = {"review_kind": "recovery_diagnosis",
                 **self._approval(rid, work),
                 "failure": failure.model_dump(), "project": project,
+                "source_history": SourceHistory(self.engine).collect(rid, work, scopes),
                 "diagnosis_feedback": saved.get("diagnosis_feedback"),
                 "specification": self.store.get(rid, "clarify"), "delivery_journal": self.store.get(rid, "delivery/journal"),
                 "constraint": "Delivery may only repair within supplied allowed_paths or recheck. Gate/plan changes require user reconciliation; never invalidate a published journal.",
@@ -404,6 +406,9 @@ class RecoveryController:
                     "observations": self.store.get(rid, "recovery/observations/" + failure.origin_id, []),
                     "allowed_actions": policy.diagnosis_actions(rid, failure, work, plan),
                 }
+                scopes = sorted({path for task in plan.tasks if not failure.task_id or task.id == failure.task_id
+                                 for path in task.allowed_paths}) if plan else []
+                diagnosis_context["source_history"] = SourceHistory(engine).collect(rid, work, scopes)
                 from .preview_evidence import PreviewEvidence
                 if plan and plan.preview:
                     diagnosis_context["preview_contracts"] = PreviewEvidence(engine).contracts(rid, plan)
