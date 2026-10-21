@@ -102,7 +102,7 @@ def test_decision_attachment_citations_use_the_same_original_evidence_paths(tmp_
     DecisionService.validate(request, DecisionResult.model_validate(result))
 
 
-@pytest.mark.parametrize("old_version", ["context-v1", "context-v2", "context-v3"])
+@pytest.mark.parametrize("old_version", ["context-v1", "context-v2", "context-v3", "context-v4"])
 def test_pending_legacy_view_upgrades_citations_without_rewriting_receipts(tmp_path, old_version):
     config, store, rid, artifacts, child, _, failure, context = fixture(tmp_path)
     old = ContextPlanner(artifacts).prepare("recovery_diagnosis", context, tmp_path).record()

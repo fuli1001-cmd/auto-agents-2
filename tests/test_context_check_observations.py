@@ -5,7 +5,7 @@ import json
 import pytest
 
 from auto_agents_2.artifacts import ArtifactStore
-from auto_agents_2.context_plan import ContextPlanner, remap_references
+from auto_agents_2.context_plan import CONTEXT_VERSION, ContextPlanner, remap_references
 from auto_agents_2.errors import AA2Error, InvalidStructuredResponse
 from auto_agents_2.recovery import Diagnosis, FailureRecord, adjudicate
 from auto_agents_2.store import Store
@@ -186,4 +186,4 @@ def test_pending_view_does_not_replace_unknown_or_corrupt_record(observations, t
     with pytest.raises((ValueError, ProviderError), match="integrity|Unsupported"):
         router._prepare_context("review", {}, tmp_path, rid, "review", "frozen")
     assert store.get(rid, key) == {"identity": "frozen", "artifact": ref}
-    assert store.get(rid, key + "/context-v4") is None
+    assert store.get(rid, key + "/" + CONTEXT_VERSION) is None

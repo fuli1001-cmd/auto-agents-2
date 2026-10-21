@@ -14,11 +14,12 @@ from urllib.parse import urldefrag
 from .context import ContextBuilder
 from .diagnostics import references
 from .errors import InvalidStructuredResponse, ProviderError
+from .evidence_refs import controller_context_catalog
 from .research_sections import extract_sections, select_section
 from .util import digest
 from .workspace import git_environment, path_allowed
 
-CONTEXT_VERSION = "context-v4"
+CONTEXT_VERSION = "context-v5"
 TEXT_INLINE = 12000
 REFERENCE_INLINE = 2000
 RESEARCH_INLINE = 16000
@@ -542,6 +543,12 @@ class _Selection:
         # Direct artifact roots need the same provenance as compacted records.
         # Index only supplied structure, never paths or IDs claimed by artifact text.
         index(self.original)
+        # Original controller hashes are canonical evidence, even when their
+        # occurrences move into a compacted index. Presentation aliases must
+        # not shadow them; proposal-only hashes still need provenance mapping.
+        canonical = origins.keys() & controller_context_catalog(self.original).controller
+        for sha in canonical:
+            self.result.reference_map.pop(sha, None)
         selected = [ref for ref in references(self.result.payload) if {"kind", "bytes"} <= ref.keys()]
         inline = {ref["hash"] for ref in selected}
         queue = [(ref, self.result.reference_map.get(ref["hash"], origins.get(ref["hash"]))) for ref in selected]
@@ -574,7 +581,7 @@ class _Selection:
                                     if dependency["hash"] not in inline:
                                         dependencies[dependency["hash"]] = copy.deepcopy(dependency)
                                     queue.append((dependency, source))
-                                    if source is not None and dependency["hash"] not in inline:
+                                    if source is not None and dependency["hash"] not in inline | canonical:
                                         previous = self.result.reference_map.get(dependency["hash"], source)
                                         self.result.reference_map[dependency["hash"]] = source if previous == source else ""
                         elif not (isinstance(child, dict) and {"hash", "kind", "bytes"} <= child.keys()):
