@@ -699,7 +699,20 @@ class RecoveryController:
                 self.store.checkpoint(rid, "recovery/patch-drift/" + identity, {**baseline, **proposal})
                 raise StateConflict("Integration baseline changed during plan amendment; preserved proposal requires reconciliation")
         unchanged({"phase": "approved"})
-        patch = await engine._invoke("plan", {"plan_patch": True, "base_revision": revision,
+        context_key = "recovery/patch-context/" + identity
+        recovery_context = self.store.get(rid, context_key)
+        if recovery_context is None:
+            targets = set(active["decision"].get("task_ids", []))
+            if failure.task_id:
+                targets.add(failure.task_id)
+            scopes = sorted({path for task in plan.tasks if not targets or task.id in targets
+                             for path in task.allowed_paths})
+            recovery_context = {"recovery_decision": active["decision"], "design": self.store.get(rid, "design"),
+                                "source_history": SourceHistory(engine).collect(rid, work, scopes)}
+            # Author and reviewer must share the same selected recovery objective
+            # and evidence, including after snapshot creation or interruption.
+            self.store.checkpoint(rid, context_key, recovery_context)
+        patch = await engine._invoke("plan", {**recovery_context, "plan_patch": True, "base_revision": revision,
             "plan": plan.model_dump(), "failure": failure.model_dump(), "task_origins": self.store.task_origin_state(rid),
             "specification": self.store.get(rid, "clarify"), "project": engine.contexts.build(work)},
             PlanPatch, work, rid, "recovery/patch/" + identity, fresh=True)
@@ -747,7 +760,7 @@ class RecoveryController:
                     baseline["base_commit"] = snapshot["commit"]
                 self.store.checkpoints(rid, {snapshot_key: saved_snapshots, baseline_key: baseline})
                 candidates[task_id] = {"state": saved, "project": engine.contexts.build(path)}
-        review = await engine._invoke("review", {"review_kind": "plan_patch", "previous_plan": plan.model_dump(),
+        review = await engine._invoke("review", {**recovery_context, "review_kind": "plan_patch", "previous_plan": plan.model_dump(),
             "patch": patch.model_dump(), "plan": candidate.model_dump(), "failure": failure.model_dump(),
             "retained_candidates": candidates,
             "affected": sorted(affected), "reopen": sorted(reopen), "specification": self.store.get(rid, "clarify"),

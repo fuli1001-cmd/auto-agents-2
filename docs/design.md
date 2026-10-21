@@ -184,6 +184,8 @@ verification-v6 同时识别 Node 显式执行的项目包入口：`node_modules
 
 恢复身份分为血缘／观察、授权动作和模型调用三层。授权动作按源码、计划契约、任务范围和动作效果绑定，展示理由和引用别名不改变动作身份。决策请求冻结原事实快照，自身 token 记账不产生新请求；真实事实或范围变化仍拒绝旧授权。已完成许可和结果不可覆盖，任务结果、复验及计划派发沿用原回执。模型调用的传输／提示版本改变不能重新生成已完成的诊断或决策。
 
+Local plan amendment authors and independent reviewers receive the selected recovery decision, accepted design and scoped SourceHistory together. These inputs freeze under the existing amendment identity before generation and survive interruption unchanged. The review must assess whether structured contracts address the evidenced recovery objective, not merely whether the old contract survives. Historical proposals remain unverified, and plan approval does not accept an implementation or discharge fresh verification obligations.
+
 验证批次按逻辑操作保存 started、completed 或已清理的 interrupted 状态。completed 结果在消费方保存前发生中断也可复用；消费者仍核对当前验证身份。started 且无法核实完成的批次保留占用，不能自动执行第二次。已确认取消清理的批次形成证据恢复请求，由新动作决定是否复验。主目录运行在同一个预约上接续已完成检查，不重复消费运行次数；完成证据真正失效时归档旧回执，并在原发布后预算内预约新检查。
 
 引用校验 v4 使用共同 `ReferenceCatalog`，由生产者标明事实与提案来源，记录所属观察；历史模型诊断仍是提案。保留根名称、点路径、数组索引、已登记哈希和控制器别名，规范化只解析真实存在的引用。引用存在、来源可信和足以支持动作是不同判定；提案不能生成事实 ID、扩大范围或证明验收通过。检查器 v12 保留 v11 精确的运行缓存排除规则，并返回结构化失效原因。

@@ -44,7 +44,7 @@ CONTRACTS = {
              "planning_mode", "coverage_verification", "task_origins", "task_budgets", "task_origin_validation",
              "unresolved_issues", "plan_answer"},
     "plan_patch": {"plan_patch", "base_revision", "plan", "previous_plan", "patch", "failure", "task_origins",
-                   "specification", "project", "retained_candidates", "affected", "reopen"},
+                   "specification", "project", "retained_candidates", "affected", "reopen", "recovery_decision", "design"},
     "implement": {"specification", "project", "design", "verification_contract", "execution_contract",
                   "unresolved_issues", "preview_contracts"},
     "implementation": {"specification", "project", "design", "verification_contract", "execution_contract",
