@@ -80,14 +80,18 @@ class SourceHistory:
         source = tree_hash(work)
         extra = self.engine.config.load().sensitive_paths
 
+        def public_path(name):
+            path = Path(name)
+            return (not path.is_absolute() and ".." not in path.parts and not set(path.parts) & EXCLUDED
+                    and not sensitive(path, extra))
+
         def admitted(name):
             path = Path(name)
             protected = (path.name in PROTECTED_NAMES or bool(set(path.parts) & {
                 "tests", "test", "__tests__", "__snapshots__", "fixtures", "scripts", ".github"}) or
                 ".test." in path.name or ".spec." in path.name or path.name.startswith("test_")
                 or path.name.endswith(("_test.py", ".snap")))
-            return (not path.is_absolute() and ".." not in path.parts and not set(path.parts) & EXCLUDED
-                    and not sensitive(path, extra) and (protected or scopes and path_allowed(name, scopes)))
+            return public_path(name) and (protected or scopes and path_allowed(name, scopes))
 
         records = self._records(rid)
         proposals = self._proposals(records, admitted)
@@ -97,7 +101,7 @@ class SourceHistory:
                 anchors[label] = git(work, "rev-parse", "--verify", ref + "^{commit}")
             except AA2Error:
                 missing.append({"anchor": label, "status": "missing"})
-        identity = digest([2, source, anchors, missing, list(scopes), extra, proposals])
+        identity = digest([3, source, anchors, missing, list(scopes), extra, proposals])
         key = "review-evidence/source-history/" + identity
         cached = self.store.get(rid, key)
         if cached:
@@ -116,13 +120,25 @@ class SourceHistory:
                                  "mode": path.stat().st_mode & 0o777}
         snapshots, blobs = [], {}
         for label, commit in anchors.items():
-            files = {}
-            for row in git(work, "ls-tree", "-r", "-z", commit).split("\0"):
+            files, public_tree = {}, {}
+            private_paths_omitted = False
+            root_tree = git(work, "rev-parse", "--verify", commit + "^{tree}")
+            for row in git(work, "ls-tree", "--full-tree", "-r", "-z", commit).split("\0"):
                 if not row:
                     continue
                 info, name = row.split("\t", 1)
                 mode, kind, oid = info.split()
-                if kind != "blob" or mode not in {"100644", "100755"} or not admitted(name):
+                if not public_path(name):
+                    private_paths_omitted = True
+                    continue
+                # Enumerate public paths independently of body selection. Do not
+                # follow links/submodules or read out-of-scope or private blobs.
+                entry = {"mode": mode, "type": kind, "object": oid, "body_status": "unsupported_type"}
+                public_tree[name] = entry
+                if kind != "blob" or mode not in {"100644", "100755"}:
+                    continue
+                entry["body_status"] = "outside_scope"
+                if not admitted(name):
                     continue
                 if oid not in blobs:
                     result = subprocess.run(["git", "--literal-pathspecs", "-C", str(work), "cat-file", "blob", oid],
@@ -135,6 +151,7 @@ class SourceHistory:
                         blobs[oid] = None
                     else:
                         blobs[oid] = self.engine.artifacts.put(result.stdout, "source_snapshot")
+                entry["body_status"] = "included" if blobs[oid] is not None else "non_utf8"
                 if blobs[oid] is not None:
                     files[name] = {"blob": oid, "content": blobs[oid], "mode": int(mode, 8) & 0o777}
             comparisons = []
@@ -148,12 +165,25 @@ class SourceHistory:
                     fromfile=label + ":" + name, tofile="current:" + name))
                 comparisons.append({"path": name, "before": before, "after": after,
                                     "diff": self.engine.artifacts.put(patch, "source_diff")})
-            snapshots.append({"anchor": label, "commit": commit, "files": files, "changes_to_current": comparisons})
+            snapshots.append({"anchor": label, "commit": commit, "root_tree": root_tree,
+                "public_tree": public_tree, "private_paths_omitted": private_paths_omitted,
+                "files": files, "changes_to_current": comparisons})
         if tree_hash(work) != source:
             raise StateConflict("Source changed while collecting review history; preserve the candidate")
-        ref = self.engine.artifacts.put({"version": 2, "source_hash": source, "scope": list(scopes),
+        ref = self.engine.artifacts.put({"version": 3, "source_hash": source, "scope": list(scopes),
             "includes_public_protected_files": True, "current": current, "snapshots": snapshots, "missing": missing,
             "proposals": proposals,
+            "coverage": {
+                "inventory": "complete_public_git_tree", "body_selection": "protected_files_plus_scope",
+                "missing": "unresolved_anchors_only",
+                "absence": "Each public_tree enumerates all public tracked entries in its bound commit/root_tree, "
+                           "independently of scope. If private_paths_omitted is false it is the entire tracked tree; "
+                           "otherwise absence from this inventory cannot prove absence from private paths. "
+                           "Entries without included bodies are present, not absent.",
+                "limits": "Tracked Git entries only: no untracked files, external configuration, installed plugins, "
+                          "symlink targets or submodule contents. current and changes_to_current compare selected "
+                          "UTF-8 regular file bodies only, not complete current path existence. Unavailable bodies "
+                          "remain evidence gaps when needed. Inventory visibility never grants write permission."},
             "meaning": "Exact public file bytes and comparisons, not proof that test changes are acceptable. "
                        "Proposals are retained suggestions, not applied source or approvals. Their checks are prior "
                        "observations, not verification of the proposal. Reconcile against the recorded snapshots; "

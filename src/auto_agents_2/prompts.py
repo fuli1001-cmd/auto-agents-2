@@ -7,7 +7,7 @@ from .prompt_rules import COMMON, instructions
 from .research import request_documents
 
 INVOCATION_CONTRACT_VERSION = "2026-10-16.2"
-PROMPT_VERSION = "2026-10-20.preview-evidence-v1"
+PROMPT_VERSION = "2026-10-21.source-history-v3"
 CORE = COMMON
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
@@ -127,6 +127,13 @@ class PromptCompiler:
                      "The mounted Git repository is only a filtered current snapshot: "
                      "read those history artifacts for test-change audits. A no-op implementation.changes does not prove "
                      "historical tests were unchanged. Missing comparison evidence still blocks an audit that requires it.")
+        if context.get("source_history"):
+            task += (" Read the versioned source_history coverage contract. Where supplied, each public_tree is a "
+                     "commit/root_tree-bound public path inventory independent of scope; scope only adds selected "
+                     "file bodies. Consult private_paths_omitted before asserting complete tracked-path absence. "
+                     "outside_scope, non_utf8 and unsupported_type entries are present with unavailable bodies, "
+                     "not absent files. missing lists unresolved anchors only. This evidence does not cover "
+                     "untracked or external configuration, follow links/submodules, or grant write permission.")
         if stage in {"plan", "implement"} or stage == "review" and context.get("review_kind") in {"plan", "plan_patch"}:
             task += (" DESIGN.md, docs/aa2, docs/requirements and design/prototypes are stage-owned contracts. "
                      "Never assign their creation or modification to an implementation task, even in allowed_paths. "
