@@ -19,6 +19,7 @@ from .dependencies import copy_execution_source, manifest_reference, pip_inputs
 from .diagnostics import DiagnosticOperation, current_diagnostics
 from .errors import AA2Error, DependencyResolutionError, RetryableInfrastructureError
 from .evidence import RUNTIME_CACHES
+from .installation_evidence import has_installation_record, save_installation
 from .logs import capture_diagnostics
 from .progress import capture_output
 from .readview import sensitive_values
@@ -154,7 +155,7 @@ class EnvironmentManager:
                         prefix = selected
                 except (OSError, ValueError, KeyError, TypeError):
                     pass
-            if self.valid(prefix, fingerprint):
+            if self.valid(prefix, fingerprint) and has_installation_record(prefix):
                 self.resources.register(prefix, "environment", run["id"] if run else None)
                 return Environment(prefix, self.installed_identity(prefix))
             # A corrupt or interrupted instance can still be referenced by recovery records.
@@ -246,7 +247,7 @@ class EnvironmentManager:
             await self.sandbox.stop(process)
 
     async def _prepare(self, prefix, ready, fingerprint, profile, conda_file, pip_file, workspace, dependencies, local, inputs=None):
-        with DiagnosticOperation(self.store, self.resources, "prepare/" + str(prefix)):
+        with DiagnosticOperation(self.store, self.resources, "prepare/" + str(prefix)) as operation:
             cfg = self.config.load().environment
             from .resolution import load_resolution, save_resolution
             records = self.root / "environment-records" / fingerprint
@@ -295,12 +296,17 @@ class EnvironmentManager:
                 if dependencies and pip_file is None:
                     pip_file = scratch / "dependencies.txt"
                     atomic_write(pip_file, "\n".join(dependencies) + "\n")
+                report_path, installation_logs = None, []
                 if pip_file:
                     if replay_lock and not saved_pip.is_file():
                         raise AA2Error("Recorded pip resolution is missing; preserving the previous environment identity")
                     constraints = ["-c", str(saved_pip)] if replay_lock else []
-                    await self._command([str(prefix / "bin/python"), "-m", "pip", "install", "-r", str(pip_file), *constraints],
+                    report_path = scratch / "pip-install-report.json"
+                    log_start = len(operation.logs)
+                    await self._command([str(prefix / "bin/python"), "-m", "pip", "install", "--report", str(report_path),
+                                         "--verbose", "-r", str(pip_file), *constraints],
                                         install_workspace, env, [prefix, scratch], [prefix, pip_file.parent, *reads])
+                    installation_logs = operation.logs[log_start:]
                 await self._command([str(prefix / "bin/python"), "-m", "pip", "check"],
                                     workspace, env, [scratch], [prefix], timeout=60)
                 identity = await self._command([str(prefix / "bin/python"), "-c", "import sys; print(sys.prefix)"],
@@ -317,11 +323,12 @@ class EnvironmentManager:
                         raise AA2Error("Reconstructed pip resolution differs from the saved lock; previous records retained")
                 if replay_lock and resolution(explicit) != resolution(resolution_record["conda"]):
                     raise AA2Error("Reconstructed Conda resolution differs from the saved generation")
+                installation_hash = save_installation(self, prefix, report_path, installation_logs, workspace=workspace)
                 atomic_write(prefix / "aa2-pip.lock", frozen)
                 atomic_write(prefix / "aa2-conda.lock", explicit)
                 if not local and not replay_lock:
                     save_resolution(records, frozen, explicit)
-                write_json(ready, {"fingerprint": fingerprint, "private": local,
+                write_json(ready, {"fingerprint": fingerprint, "private": local, "installation_hash": installation_hash,
                                    "pip_hash": digest(frozen), "conda_hash": digest(explicit),
                                    "integrity": self.integrity(prefix)})
 

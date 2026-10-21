@@ -48,6 +48,11 @@ async def test_reconstruction_constrains_pip_and_preserves_original_resolution(t
         calls.append(argv)
         if "install" in argv and "-c" in argv:
             assert Path(argv[argv.index("-c") + 1]).read_text() == "dep==1\n"
+        if "install" in argv:
+            from auto_agents_2.artifacts import ArtifactStore
+            from auto_agents_2.diagnostics import current_diagnostics
+            write_json(Path(argv[argv.index("--report") + 1]), {"version": "1", "pip_version": "fixture", "install": [], "environment": {}})
+            current_diagnostics.get().capture([ArtifactStore(store.root).put(text, "dependency_log") for text in ("fixture install", "")])
         if "create" in argv:
             (prefix / "bin").mkdir()
             (prefix / "bin/python").write_text("fixture")

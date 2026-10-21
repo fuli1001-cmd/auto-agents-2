@@ -145,7 +145,10 @@ async def test_corrupt_environment_gets_new_instance_without_destroying_old(tmp_
     async def prepare(prefix, ready, fingerprint, *args):
         (prefix / "bin").mkdir(parents=True)
         (prefix / "bin/python").write_text("immutable fixture")
-        write_json(ready, {"fingerprint": fingerprint, "integrity": manager.integrity(prefix)})
+        from auto_agents_2.installation_evidence import save_installation
+        capture_hash = save_installation(manager, prefix, None, [])
+        write_json(ready, {"fingerprint": fingerprint, "installation_hash": capture_hash,
+                           "integrity": manager.integrity(prefix)})
     manager._prepare = prepare
     first = await manager.ensure(tmp_path, "python")
     assert await manager.ensure(tmp_path, "python") == first

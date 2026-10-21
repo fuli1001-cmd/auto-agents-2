@@ -213,7 +213,9 @@ async def test_environment_shares_equal_dependencies_and_separates_private_insta
         prepared.append(fingerprint)
         (prefix / "bin").mkdir(parents=True)
         (prefix / "bin/python").touch()
-        write_json(ready, {"fingerprint": fingerprint, "integrity": manager.integrity(prefix)})
+        from auto_agents_2.installation_evidence import save_installation
+        capture_hash = save_installation(manager, prefix, None, [])
+        write_json(ready, {"fingerprint": fingerprint, "installation_hash": capture_hash, "integrity": manager.integrity(prefix)})
 
     manager._prepare = prepare
     a, b = tmp_path / "a", tmp_path / "b"

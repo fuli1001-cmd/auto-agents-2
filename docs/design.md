@@ -286,6 +286,8 @@ PlanResult 的 `environment_file`、`requirements_file` 仅表示工作区根目
 
 环境准备还将当前安装前缀的完整 pip/Conda 锁、Python 安装包的版本、Requires-Python、Requires-Dist 与 extras，以及 Conda 的 depends/constrains 归档为 environment_resolution 证据。记录绑定 installed environment hash 和原始锁摘要，公开文本沿用凭证脱敏；不执行新的解析或安装，不把元数据当作兼容性批准。每条真实 CheckResult 携带该引用，任务、最终、复用、重集成审查及恢复沿现有检查证据通道读取；缺失、损坏或环境身份不匹配不能复用。旧环境无需重装即可读取实际安装元数据，旧检查在 verification-v13 下保留为历史并重新执行，不补写其成功记录。
 
+Python 准备在真实 pip install 成功时保存官方 `--report` JSON 和完整脱敏安装输出，发布就绪记录前将其绑定到安装前缀完整性；公开 environment_resolution 验证报告中的包版本和运行时与实际安装元数据一致，并提供 ABI、安装构件地址/已有哈希、请求 extras 和真实构建输出。报告只覆盖本次 pip 事务选择的发行包，Conda 已满足的包仍由完整显式锁与元数据覆盖；报告不是锁，也不枚举隔离构建环境，源码构建的依赖及结果须按实际安装输出审查，缺失的事实不推断为已验证。没有安装历史的旧前缀明确记为 not_recorded；再次准备时使用既有解析锁建立新实例，保留旧实例和历史证据，不以重跑当前元数据伪造过去的构件来源。新记录缺失、损坏或与当前包/解释器不符时不得发布成功证据；报告和安装输出沿原有脱敏及内容寻址通道交给独立审查，控制器不代替语义验收。
+
 任务工作区的 Conda 清单被解析器明确拒绝（包版本不存在或约束冲突）时，保存失败候选和阶段故障，由恢复策略诊断并授权修正清单，再重新准备环境及验收；尝试仍按原始任务血缘累计。不能根据宿主机已安装版本推断 Conda 渠道存在对应包，也不能静默放宽版本约束。暂时性网络失败结束单次重试后可重新决策；权限、锁文件重放和用户配置默认环境的失败保留阻塞恢复语义。
 
 项目声明 Playwright 时，EnvironmentManager 使用该项目锁定的 CLI 安装匹配浏览器，默认 Chromium；`environment.playwright_browsers` 可配置 chromium、firefox、webkit。目标命令使用 `PLAYWRIGHT_BROWSERS_PATH=0`，浏览器位于项目 node_modules 内，安装完成后才保存 Node 就绪记录，浏览器内容也计入依赖完整性和检查输入身份。目标运行环境采用无头模式，不继承 DISPLAY、WAYLAND_DISPLAY、XDG_RUNTIME_DIR 等桌面会话入口，避免 WSLg 干扰渲染帧；不修改宿主会话变量或放宽沙箱权限。VerificationService 仅执行检查，不安装浏览器；静态原型检查继续使用控制器自己的浏览器环境。

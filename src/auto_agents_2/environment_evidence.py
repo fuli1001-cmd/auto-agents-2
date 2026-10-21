@@ -6,6 +6,7 @@ import os
 
 from .artifacts import ArtifactStore
 from .errors import AA2Error
+from .installation_evidence import installation_record
 from .readview import sensitive_values
 from .resolution import validate
 from .safe_files import read_regular
@@ -18,6 +19,7 @@ import importlib.metadata as metadata
 import json
 import platform
 import sys
+import sysconfig
 packages = []
 for dist in metadata.distributions():
     item = dist.metadata
@@ -26,7 +28,8 @@ for dist in metadata.distributions():
         "requires_dist": dist.requires or [], "provides_extra": item.get_all("Provides-Extra") or []})
 print(json.dumps({"prefix": sys.prefix, "runtime": {"python": platform.python_version(),
     "implementation": platform.python_implementation(), "platform": sys.platform,
-    "machine": platform.machine()},
+    "machine": platform.machine(), "soabi": sysconfig.get_config_var("SOABI"),
+    "extension_suffix": sysconfig.get_config_var("EXT_SUFFIX")},
     "packages": sorted(packages, key=lambda item: (str(item["name"]).casefold(), item["version"]))}))
 """
 MAX_RECORD_BYTES = 32 * 1024 * 1024
@@ -74,6 +77,7 @@ async def capture_resolution(manager, workspace, environment):
                     or not all(isinstance(package.get(k), list) and all(isinstance(v, str) for v in package[k])
                                for k in ("requires_dist", "provides_extra"))):
                 raise ValueError("Invalid Python dependency metadata")
+        installation = installation_record(prefix, ready.get("installation_hash"), python)
         if not manager.valid(prefix, environment.fingerprint):
             raise ValueError("Installed environment changed during evidence capture")
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
@@ -91,12 +95,12 @@ async def capture_resolution(manager, workspace, environment):
         return value
 
     facts = {"pip_lock": pip, "conda_explicit_lock": conda,
-             "python": python, "conda_packages": conda_packages}
+             "python": python, "conda_packages": conda_packages, "installation": installation}
     sanitized = public(facts)
     return ArtifactStore(manager.root).put({"version": 1,
         "environment_hash": environment.fingerprint, "input_fingerprint": ready["fingerprint"],
         "resolution_hash": digest([pip, conda]), "pip_hash": digest(pip), "conda_hash": digest(conda),
-        "redacted": sanitized != facts,
+        "redacted": sanitized != facts or installation.get("redacted", False),
         "provenance": "Installed metadata and complete locks from the checked environment. "
             "Requires-Dist and Conda depends/constrains preserve conditional dependency edges; "
             "root requirements and constraints are declared in the workspace manifests. "
