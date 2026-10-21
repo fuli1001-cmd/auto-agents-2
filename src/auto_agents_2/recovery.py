@@ -1,6 +1,7 @@
 """Recovery facts and controller policy. A model recommendation cannot advance a gate."""
 from __future__ import annotations
 
+from pathlib import PurePosixPath
 from typing import Literal
 
 from pydantic import Field
@@ -172,6 +173,40 @@ def check_failure(commands, results, *, task=None, step="checks", evidence_ref="
         evidence={"commands": [c.model_dump() for c in commands], "checks": [r.model_dump() for r in results]})
 
 
+def _planned_repair_inputs(failure, task, plan, context, references):
+    """Accepted future inputs are candidate scope, never evidence of existing files.
+
+    Only the current responsible task has a controller-bound failure contract.
+    Other tasks keep the existing concrete-source evidence requirement.
+    """
+    if (task.id != failure.task_id or failure.evidence.get("task") != task.model_dump()
+            or context.get("plan") != plan.model_dump()):
+        return []
+    index = next(i for i, row in enumerate(plan.tasks) if row.id == task.id)
+    roots = (f"plan.tasks[{index}]", "failure.evidence.task")
+    # Permission lists alone do not establish a planned implementation obligation.
+    if not any(ref == root or ref == root + ".checks" or ref.startswith(root + ".checks[")
+               for ref in references if ref is not None for root in roots):
+        return []
+    return [path for check in task.checks for path in check.inputs]
+
+
+def _candidate_repair_path(value, *, existing=False):
+    """A target may name a file or literal subtree, not a glob or private/control path."""
+    from .readview import sensitive
+    from .workspace import EXCLUDED, path_allowed
+
+    name = value[:-1] if value.endswith("/") else value
+    path = PurePosixPath(name)
+    if (not name or path.as_posix() != name or path.is_absolute() or ".." in path.parts
+            or not path.parts or any(char in name for char in "\\:\x00")
+            or not existing and any(char in name for char in "*?[")
+            or set(path.parts) & EXCLUDED or sensitive(path)
+            or path_allowed(name, ["DESIGN.md", "docs/aa2", "docs/requirements", "design/prototypes"])):
+        return None
+    return name
+
+
 def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None, evidence_context=None):
     """Facts first; ambiguous or repeated collection failures require independent diagnosis."""
     action, reason = "diagnose", "需要独立诊断故障归属和最小修复范围"
@@ -212,10 +247,23 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None,
             if task_id not in diagnosis.task_ids or task_id not in known:
                 raise AA2Error("Repair target must belong to a named existing task")
             target_refs = {catalog.resolve(ref) for ref in target.evidence_refs}
-            if (not target_refs <= known_refs or not supplied.intersection(target_refs)
-                    or not all(path in evidence_references(failure) and path_allowed(path, known[task_id].allowed_paths)
-                               for path in target.paths)):
-                raise AA2Error("Repair target is outside the evidenced existing task scope; amend the plan if necessary")
+            error = "Repair target is outside the evidenced existing task scope: "
+            if not target_refs <= known_refs or not supplied.intersection(target_refs):
+                raise AA2Error(error + task_id + " requires supplied factual evidence_refs; proposals or protocols alone are insufficient")
+            task = known[task_id]
+            planned_inputs = _planned_repair_inputs(failure, task, plan, evidence_context or {}, target_refs)
+            existing = set(evidence_references(failure))
+            for index, path in enumerate(target.paths):
+                name = _candidate_repair_path(path, existing=path in existing)
+                location = f"{task_id}.paths[{index}] ({path!r})"
+                if name is None or not path_allowed(name, task.allowed_paths):
+                    raise AA2Error(error + location + " is not a public literal path in the accepted task scope")
+                if path not in existing and not (target.reason.strip() and planned_inputs
+                                                 and path_allowed(name, planned_inputs)):
+                    raise AA2Error(error + location + " has no current-file evidence. A planned input requires the current "
+                        "failure's exact accepted task contract, a citation to that task or its checks, and coverage by its "
+                        "declared check inputs. allowed_paths alone is insufficient; do not amend the plan merely because "
+                        "the candidate does not exist yet.")
         if diagnosis.action == "repair" and set(diagnosis.task_ids) - {failure.task_id} and failure.origin_id != "delivery":
             if set(targets) != set(diagnosis.task_ids):
                 raise AA2Error("Cross-task repair requires evidence and owned paths for each existing task")

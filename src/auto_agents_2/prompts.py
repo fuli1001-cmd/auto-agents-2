@@ -8,7 +8,7 @@ from .prompt_rules import COMMON, instructions
 from .research import request_documents
 
 INVOCATION_CONTRACT_VERSION = "2026-10-16.2"
-PROMPT_VERSION = "2026-10-21.task-stage-references-v1"
+PROMPT_VERSION = "2026-10-21.planned-repair-inputs-v1"
 CORE = COMMON
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
@@ -28,6 +28,13 @@ DIAGNOSIS_ACTIONS = (
     "Use preview_recheck when offered to compare archived production preview contracts, verify build inputs, "
     "and execute the full isolated production preview with cleanup before task review. "
     "Use repair for justified changes within accepted task scopes, or plan_patch for changes to those contracts. "
+    "repair_targets.paths names literal owned files or subtrees, never globs or new write permissions. "
+    "For the current failure task, missing planned inputs may be proposed when the failure's task contract still "
+    "matches the accepted plan, the paths are covered by both allowed_paths and declared check inputs, and the "
+    "target cites that exact plan task or its checks with a repair reason. allowed_paths alone is insufficient. "
+    "Other task targets require supplied current-file evidence. Distinguish planned creation/restoration from "
+    "existing source; neither target selection nor archived proposals prove history completeness, authorize "
+    "test changes or accept implementation. Preserve required historical material, protected review and fresh checks. "
     "diagnose requests another read-only model analysis; it does not execute commands or modify files. "
     "If inconclusive, identify the missing observation and the useful next action so the decision service can assess it. "
     "Use blocked only for an identified human prerequisite, such as unavailable credentials or a product choice; "
