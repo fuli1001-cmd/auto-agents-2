@@ -18,7 +18,7 @@ from .research_sections import extract_sections, select_section
 from .util import digest
 from .workspace import git_environment, path_allowed
 
-CONTEXT_VERSION = "context-v2"
+CONTEXT_VERSION = "context-v3"
 TEXT_INLINE = 12000
 REFERENCE_INLINE = 2000
 RESEARCH_INLINE = 16000
@@ -508,17 +508,35 @@ class _Selection:
 
     def evidence_dependencies(self):
         """Expose report/log dependencies of selected records, not their entire archive graph."""
-        dependencies, visited = {}, set()
+        dependencies, visited, origins = {}, set(), {}
+
+        def index(value, path=""):
+            if isinstance(value, dict):
+                if ({"hash", "kind", "bytes"} <= value.keys() and isinstance(value["hash"], str)
+                        and re.fullmatch(r"[a-f0-9]{64}", value["hash"])):
+                    sha = value["hash"]
+                    previous = origins.get(sha, path)
+                    origins[sha] = path if previous == path else ""
+                    return
+                for key, child in value.items():
+                    index(child, f"{path}.{key}" if path else key)
+            elif isinstance(value, list):
+                for i, child in enumerate(value):
+                    index(child, f"{path}[{i}]")
+
+        # Direct artifact roots need the same provenance as compacted records.
+        # Index only supplied structure, never paths or IDs claimed by artifact text.
+        index(self.original)
         selected = [ref for ref in references(self.result.payload) if {"kind", "bytes"} <= ref.keys()]
         inline = {ref["hash"] for ref in selected}
-        queue = [(ref, self.result.reference_map.get(ref["hash"], "")) for ref in selected]
+        queue = [(ref, self.result.reference_map.get(ref["hash"], origins.get(ref["hash"]))) for ref in selected]
         while queue:
             ref, source = queue.pop()
             sha = ref["hash"]
-            if (sha in visited or ref["kind"].startswith("research_")
+            if ((sha, source) in visited or ref["kind"].startswith("research_")
                     or ref["kind"] in {"source_snapshot", "source_diff", "source_proposal"} or self.artifacts.released(ref)):
                 continue
-            visited.add(sha)
+            visited.add((sha, source))
             with self.artifacts.store.connect() as db:
                 edges = {r[0] for r in db.execute("SELECT child FROM artifact_edges WHERE parent=?", (sha,))}
             if not edges:
@@ -541,7 +559,7 @@ class _Selection:
                                     if dependency["hash"] not in inline:
                                         dependencies[dependency["hash"]] = copy.deepcopy(dependency)
                                     queue.append((dependency, source))
-                                    if source:
+                                    if source is not None and dependency["hash"] not in inline:
                                         previous = self.result.reference_map.get(dependency["hash"], source)
                                         self.result.reference_map[dependency["hash"]] = source if previous == source else ""
                         elif not (isinstance(child, dict) and {"hash", "kind", "bytes"} <= child.keys()):

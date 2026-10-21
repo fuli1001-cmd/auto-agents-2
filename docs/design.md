@@ -84,6 +84,8 @@ Prompt 分为通用任务语义、阶段角色、模型适配、工具调用适�
 
 恢复故障只持久登记显式证据别名和公开源码路径；字段路径、数组索引及产物 hash 的完整引用目录在校验时派生，不复制到每个候选动作及历史许可。`context-v2` 按列表的总大小处理旧的大引用目录，提供带内容身份的按需入口；目录是定位元数据，不是必须逐项阅读的新证据。历史逐用例进度保留真实计数和完整账本入口，历史观察按需读取，当前检查状态、未通过用例、审查缺项、任务范围、验收义务和累计消耗仍完整提供。标量观察次数不能误作历史正文归档；选中记录的日志和报告依赖只挂载一次。原始记录及引用校验的事实／提案区分保持不变。
 
+`context-v3` maps selected dependencies of directly supplied artifacts back to their original controller paths, as it does for compacted records. The same attachment reached from different origins remains ambiguous unless it is also directly supplied. Proposal origins stay unverified; source/proposal contents do not mint citations or expand admission. Pending v1/v2 presentations upgrade without replacing their old records, completed responses, authorization or counters.
+
 旧版未完成调用可从原始冻结输入生成新版呈现，另存版本化检查点并保留旧呈现；新版首次派发与恢复使用同一序列化结果，损坏或未知版本不能静默替换。呈现版本隔离原生会话，不改变逻辑调用、授权或预算身份；已完成的决策（包括 `ask_user`）和诊断不因输入优化重跑。整份 prompt 的文件传输只解决 CLI 入口长度限制，不能充当上下文选择或减少实际必读内容的方案。
 
 ## 工作流与门禁
