@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .errors import PolicyViolation
+from .process_records import read_record
 from .util import identifier, write_json
 
 
@@ -85,19 +86,38 @@ class ManagedProcess:
         return stdout, stderr
 
 
+def _supervisor_cleaned(process, record):
+    data = read_record(record)
+    return (data.get("version") == 3 and data.get("status") == "cleaned"
+            and data.get("pid") == process.pid)
+
+
 async def finish_supervisor(process, record):
     deadline = asyncio.get_running_loop().time() + 6
     while process.returncode is None and asyncio.get_running_loop().time() < deadline:
         await asyncio.sleep(0.02)
-    if process.returncode is None:
+    pending_exit = process.returncode is None
+    if pending_exit and not _supervisor_cleaned(process, record):
         raise PolicyViolation("Child termination could not be confirmed; process recovery record retained")
+    # A busy event loop can reach the deadline before delivering an exit already
+    # observed by its child watcher. Only an owned durable cleanup receipt permits
+    # reconciling that notification within the existing final wait; it cannot
+    # substitute for the supervisor's actual exit.
     for stream in (process.stdout, process.stderr):
         if stream is not None and not stream.at_eof():
             transport = getattr(stream, "_transport", None)
             if transport is not None:
                 transport.close()
-    await asyncio.wait_for(process.wait(), 2)
-    if json.loads(record.read_text()).get("status") != "cleaned":
+    try:
+        await asyncio.wait_for(process.wait(), 2)
+    except TimeoutError as exc:
+        if pending_exit:
+            raise PolicyViolation(
+                "Child termination could not be confirmed; process recovery record retained") from exc
+        raise
+    if process.returncode is None:
+        raise PolicyViolation("Child termination could not be confirmed; process recovery record retained")
+    if not _supervisor_cleaned(process, record):
         raise PolicyViolation("Supervisor exited without cleanup confirmation; resources retained")
 
 
