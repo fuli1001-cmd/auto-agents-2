@@ -1,6 +1,7 @@
 """Central reuse policy: an input match permits reuse only of complete current evidence."""
 from __future__ import annotations
 
+import json
 import os
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from .errors import AA2Error
 from .util import contained, digest
 from .workspace import input_entry, tree_hash
 
-CHECKER_VERSION = "verification-v12"
+CHECKER_VERSION = "verification-v13"
 NODE_RUNTIME_CACHES = {".cache", ".vite", ".vite-temp", ".tmp"}
 RUNTIME_CACHES = {"__pycache__", ".pytest_cache", *NODE_RUNTIME_CACHES}
 
@@ -127,6 +128,13 @@ def _assess_observation(command, result, workspace, environment, artifacts, inva
     if ((result.capture_policy_hash or result.test_runner == "playwright")
             and result.capture_policy_hash != policy_identity(artifacts.store.root)):
         return EvidenceAssessment(False, False, "attachment capture policy changed", "capture_policy_changed")
+    if environment and environment.resolution and result.environment_resolution != environment.resolution:
+        return EvidenceAssessment(False, False, "environment resolution evidence changed or missing", "environment_resolution_changed")
+    if result.environment_resolution:
+        resolution = json.loads(artifacts.bytes(result.environment_resolution))
+        if (not isinstance(resolution, dict) or resolution.get("version") != 1
+                or resolution.get("environment_hash") != result.environment_hash):
+            return EvidenceAssessment(False, False, "resolution belongs to another environment", "environment_resolution_changed")
     report_failed = False
     for ref in result.logs:
         if not ref.get("capture_complete", True):

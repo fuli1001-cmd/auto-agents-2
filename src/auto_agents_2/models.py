@@ -183,6 +183,7 @@ class CheckResult(Record):
     duration: float
     source_hash: str
     environment_hash: str
+    environment_resolution: dict = {}
     command_hash: str = ""
     effective_argv: list[str] = []
     checker_version: str = ""

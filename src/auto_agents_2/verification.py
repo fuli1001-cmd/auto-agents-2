@@ -322,6 +322,7 @@ class VerificationService:
                            attachments=attachments, capture_policy_hash=policy_hash, attachment_capture=capture,
                            duration=time.monotonic() - start, source_hash=baseline,
                            environment_hash=environment.fingerprint if environment else "host",
+                           environment_resolution=environment.resolution if environment else {},
                            command_hash=digest(command.model_dump()),
                            effective_argv=argv, checker_version=CHECKER_VERSION, input_hash=inputs_before,
                            runtime_config_hash=runtime_config, logs=log_refs,

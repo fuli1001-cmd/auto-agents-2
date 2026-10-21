@@ -8,7 +8,7 @@ import re
 import shlex
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -33,6 +33,7 @@ from .workspace import files, input_entry, tree_hash
 class Environment:
     prefix: Path
     fingerprint: str
+    resolution: dict = field(default_factory=dict)
 
     def variables(self, scratch: Path) -> dict[str, str]:
         # Target checks are headless. Inheriting WSLg/desktop endpoints can freeze
@@ -179,6 +180,11 @@ class EnvironmentManager:
                     raise DependencyResolutionError(f"Conda manifest {conda_file.relative_to(workspace)}: {exc}") from exc
             write_json(location, {"prefix": str(prefix)})
         return Environment(prefix, self.installed_identity(prefix))
+
+    async def with_resolution(self, workspace: Path, environment: Environment) -> Environment:
+        from .environment_evidence import capture_resolution
+        evidence = await capture_resolution(self, workspace, environment)
+        return Environment(environment.prefix, environment.fingerprint, evidence)
 
     @staticmethod
     def integrity(prefix: Path) -> str:

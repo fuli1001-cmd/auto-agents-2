@@ -1595,6 +1595,7 @@ class WorkflowEngine:
             self.resources.register(environment.prefix, "environment", rid)
             for directory in profile.node_roots:
                 await self.environments.install_node(directory, environment)
+            environment = await self.environments.with_resolution(work, environment)
             self.store.event(rid, "environment.ready", {"fingerprint": environment.fingerprint})
             return environment
 
@@ -2298,7 +2299,8 @@ class WorkflowEngine:
                                                          "review": review.model_dump(), "visuals": visuals})
             return {"candidate": candidate, "candidate_tree": git(work, "rev-parse", f"{candidate}^{{tree}}"),
                     "source_hash": before, "validation": identity,
-                    "environment": {"prefix": str(environment.prefix), "fingerprint": environment.fingerprint}}
+                    "environment": {"prefix": str(environment.prefix), "fingerprint": environment.fingerprint,
+                                    "resolution": environment.resolution}}
 
     async def _recover_delivery_evidence(self, rid, commands, checks, work, environment, source, observation):
         failure = self._verification_problem(rid, commands, checks, work, environment,

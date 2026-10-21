@@ -74,7 +74,8 @@ class DeliveryCoordinator:
             journal = {"identity_version": 2, "phase": "ready", "target": run["data"]["target_branch"],
                        "old": self.store.get(rid, "target_base", ""), "candidate": candidate,
                        "work": str(work), "plan": plan.model_dump() if plan else None,
-                       "environment": {"prefix": str(environment.prefix), "fingerprint": environment.fingerprint},
+                       "environment": {"prefix": str(environment.prefix), "fingerprint": environment.fingerprint,
+                                       "resolution": environment.resolution},
                        "outcome": outcome, "reintegrations": 0, "runtime_budget_used": 0,
                        "source_hash": tree_hash(work), "validation": self.store.get(rid, "verify/identity"),
                        "candidate_tree": git(work, "rev-parse", f"{candidate}^{{tree}}")}
@@ -200,7 +201,8 @@ class DeliveryCoordinator:
                 journal["runtime_attempt_id"] = identifier("runtime")
                 journal["runtime_source_hash"] = runtime_source
                 self.save(rid, journal, "runtime")
-            env = Environment(Path(journal["environment"]["prefix"]), journal["environment"]["fingerprint"])
+            env = Environment(Path(journal["environment"]["prefix"]), journal["environment"]["fingerprint"],
+                          journal["environment"].get("resolution", {}))
             plan = journal["plan"] or {}
             commands = plan.get("runtime_prepare", []) + plan.get("runtime_probes", [])
             if plan.get("preview"):
@@ -244,7 +246,8 @@ class DeliveryCoordinator:
         from .models import PlanResult
         from .util import contained
         project = self.workspaces.project
-        env = Environment(Path(journal["environment"]["prefix"]), journal["environment"]["fingerprint"])
+        env = Environment(Path(journal["environment"]["prefix"]), journal["environment"]["fingerprint"],
+                          journal["environment"].get("resolution", {}))
         plan = PlanResult.model_validate(journal["plan"]) if journal.get("plan") else None
         commands = runtime_commands(plan, project, env)
         if plan and plan.preview:
@@ -272,7 +275,7 @@ class DeliveryCoordinator:
         evidence = journal["completion_evidence"]
         artifacts = ArtifactStore(self.store.root)
         rows = [CheckResult.model_validate(row) for row in evidence.get("checks", [])]
-        env = Environment(prefix, journal["environment"]["fingerprint"])
+        env = Environment(prefix, journal["environment"]["fingerprint"], journal["environment"].get("resolution", {}))
         plan = PlanResult.model_validate(journal["plan"]) if journal["plan"] else None
         assessment = reusable(runtime_commands(plan, self.workspaces.project, env), rows,
                               self.workspaces.project, env, artifacts)

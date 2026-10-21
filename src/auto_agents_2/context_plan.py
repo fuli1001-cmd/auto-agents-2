@@ -533,7 +533,7 @@ class _Selection:
                 if isinstance(value, dict):
                     for key, child in value.items():
                         source_file = ref["kind"] == "source_history" and key in {"content", "diff"}
-                        if source_file or key in {"logs", "report", "attachments", "image_artifact", "diagnostic_evidence"}:
+                        if source_file or key in {"logs", "report", "attachments", "image_artifact", "diagnostic_evidence", "environment_resolution"}:
                             for dependency in references(child):
                                 if (dependency["hash"] in edges and {"kind", "bytes"} <= dependency.keys()
                                         and (not source_file or dependency["kind"] in {"source_snapshot", "source_diff"})
