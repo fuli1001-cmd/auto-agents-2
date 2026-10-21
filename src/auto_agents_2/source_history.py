@@ -76,6 +76,52 @@ class SourceHistory:
                     "checks": saved.get("checks") or saved.get("feedback", {}).get("checks", [])})
         return proposals
 
+    def _response_proposals(self, rid, admitted, archived):
+        """Ordinary retries retain returned proposals even when task slots advance.
+
+        Read only this run's explicit controller task-response events. A response
+        proves neither application nor acceptance; never follow model references
+        or mount the raw, unfiltered response as a material dependency.
+        """
+        from .models import ImplementationResult
+
+        with self.store.connect() as db:
+            rows = db.execute("SELECT seq,data FROM events WHERE run_id=? AND kind='artifact.created' "
+                              "ORDER BY seq", (rid,)).fetchall()
+        seen = {(p["task_id"], p["proposal_hash"]) for p in archived}
+        proposals = []
+        for seq, raw in rows:
+            record = json.loads(raw)
+            operation = record.get("operation", "")
+            match = re.fullmatch(r"develop/task/([^/]+)", operation)
+            if record.get("stage") != "implement" or not match:
+                continue
+            try:
+                ref = record["artifact"]
+                if ref.get("kind") != "implement":
+                    raise ValueError("Invalid task response kind")
+                body = self.engine.artifacts.bytes(ref)
+                if len(body) != ref["bytes"]:
+                    raise ValueError("Invalid task response length")
+                proposal = json.loads(body)
+                ImplementationResult.model_validate(proposal)
+                identity = (match[1], digest(proposal))
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                changes = proposal.get("changes", [])
+                selected = [{k: c[k] for k in ("path", "operation", "content", "old_text") if k in c}
+                            for c in changes if admitted(c["path"])]
+                if selected:
+                    proposals.append({"origin": f"events/{seq}/" + operation, "task_id": match[1],
+                        "status": "proposal_only", "recorded_phase": "returned", "recorded_source_hash": None,
+                        "proposal_hash": identity[1], "response_hash": ref["hash"],
+                        "content": self.engine.artifacts.put({"changes": selected}, "source_proposal"),
+                        "omitted_changes": len(changes) - len(selected), "commands": [], "checks": []})
+            except (AttributeError, KeyError, TypeError, ValueError, OSError) as exc:
+                raise StateConflict("Recorded task response is unavailable or inconsistent; preserve the candidate") from exc
+        return proposals
+
     def _observations(self, rid, source, admitted):
         """Recover selected bytes from prior collections, not model citations or proposals.
 
@@ -171,6 +217,7 @@ class SourceHistory:
 
         records = self._records(rid)
         proposals = self._proposals(records, admitted)
+        proposals.extend(self._response_proposals(rid, admitted, proposals))
         anchors, missing = {}, []
         for label, ref in self._anchors(rid, records).items():
             try:
@@ -246,6 +293,10 @@ class SourceHistory:
             "coverage": {
                 "inventory": "complete_public_git_tree", "body_selection": "protected_files_plus_scope",
                 "missing": "unresolved_anchors_only",
+                "proposals": "Filtered changes from explicit controller archives and returned task-response events "
+                             "in this run. Returned responses do not establish application, acceptance, source "
+                             "identity or historical checks. Their assertions are suggestions to reconcile "
+                             "against accepted requirements, not new acceptance obligations by themselves.",
                 "observations": "Selected UTF-8 regular file bytes from earlier controller collections in this run, "
                                 "bound to their source hashes and original manifests. They may be uncommitted, "
                                 "rejected or from another task workspace; they are not accepted baselines or approvals. "
