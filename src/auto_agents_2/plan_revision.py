@@ -7,7 +7,7 @@ from pydantic import Field
 
 from .errors import AA2Error
 from .evidence_refs import controller_context_catalog
-from .execution_stages import TimingProducer
+from .execution_stages import TimingProducer, current_stage_contract
 from .models import Command, PlanResult, PreviewSpec, Record, ReviewResult, TaskSpec
 from .planning import validate_plan
 from .util import atomic_write, digest
@@ -80,7 +80,7 @@ def _require_timing_references(references, context, *, review=False):
     provenance = {'patch': 'proposal', **({'plan': 'proposal'} if review else {})}
     catalog = controller_context_catalog(context, provenance=provenance)
     resolved = [catalog.resolve(ref) for ref in references]
-    if None in resolved or not catalog.controller.intersection(resolved):
+    if None in resolved or not catalog.factual.intersection(resolved):
         raise AA2Error('Timing correction requires resolvable controller evidence, not only its own proposal')
 
 
@@ -105,8 +105,10 @@ def validate_timing_review(patch, review, context=None):
             _require_timing_references(row.evidence_refs, context, review=True)
 
 
-def timing_review_binding(previous, patch, candidate, review):
-    return digest(['timing-review-v1', previous, patch, candidate, review])
+def timing_review_binding(previous, patch, candidate, review, controller_stage_contract=None):
+    if controller_stage_contract is None:
+        return digest(['timing-review-v1', previous, patch, candidate, review])
+    return digest(['timing-review-v2', previous, patch, candidate, review, controller_stage_contract])
 
 
 def validate_timing_journal(journal):
@@ -119,7 +121,14 @@ def validate_timing_journal(journal):
     candidate, affected, reopen = apply_patch(previous, patch, journal['base_revision'],
         set(patch.failure_ids), {t.id: t.origin_id for t in previous.tasks})
     validate_timing_review(patch, journal['review'])
-    expected = timing_review_binding(journal['previous_plan'], patch_data, journal['plan'], journal['review'])
+    protocol = journal.get('controller_stage_contract')
+    if protocol is not None and not current_stage_contract(protocol):
+        raise AA2Error('Timing correction journal cites a stale or invalid controller stage contract')
+    if protocol is None and any(ref == 'controller_stage_contract' or ref.startswith('controller_stage_contract.')
+            for row in [*patch_data['timing_corrections'], *journal['review'].get('timing_reviews', [])]
+            for ref in row['evidence_refs']):
+        raise AA2Error('Timing correction journal has no bound controller stage contract')
+    expected = timing_review_binding(journal['previous_plan'], patch_data, journal['plan'], journal['review'], protocol)
     if (journal.get('timing_review_binding') != expected or candidate.model_dump() != journal['plan']
             or set(journal['affected']) != affected or set(journal['reopen']) != reopen):
         raise AA2Error('Timing correction journal no longer matches its reviewed candidate')

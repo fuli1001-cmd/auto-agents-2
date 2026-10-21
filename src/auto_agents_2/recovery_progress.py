@@ -1,6 +1,6 @@
 """Exclude repeated evidence-neutral recovery paths, not cumulative work budgets."""
 from .errors import RecoveryPathExhausted
-from .execution_stages import STAGE_CONTRACT_VERSION
+from .execution_stages import STAGE_CONTRACT_VERSION, current_stage_contract, stage_contract
 from .faults import StateConflict
 from .recovery import check_rows
 from .source_history import SourceHistory
@@ -17,7 +17,8 @@ class RecoveryProgress:
     def inputs(self, rid, failure, work, plan):
         scopes = sorted({p for t in plan.tasks if not failure.task_id or t.id == failure.task_id
                          for p in t.allowed_paths}) if plan else []
-        return {'failure': failure.model_dump(), 'plan': plan.model_dump() if plan else None,
+        return {'controller_stage_contract': stage_contract(),
+                'failure': failure.model_dump(), 'plan': plan.model_dump() if plan else None,
                 'specification': self.store.get(rid, 'clarify'), 'design': self.store.get(rid, 'design'),
                 'prototype_approval': self.store.get(rid, 'prototype_approval'),
                 'source_history': SourceHistory(self.engine).collect(rid, work, scopes)}
@@ -32,8 +33,15 @@ class RecoveryProgress:
             facts['observations'] = {name: evidence.get(name) for name in
                                      ('review', 'environment_error', 'candidate_error')}
             facts['checks'] = check_rows(evidence)
-        return digest([STAGE_CONTRACT_VERSION, action, source_hash, facts,
-            {name: context.get(name) for name in ('plan', 'specification', 'design', 'prototype_approval', 'source_history')}])
+        materials = {name: context.get(name) for name in
+                     ('plan', 'specification', 'design', 'prototype_approval', 'source_history')}
+        # The newly supplied citation contract changes what a timing amendment can
+        # actually cite. Preserve old ledgers; prose/prompt edits and diagnosis
+        # counters alone cannot create fresh attempts or replace human permission.
+        protocol = context.get('controller_stage_contract')
+        if action == 'plan_patch' and current_stage_contract(protocol):
+            materials['controller_stage_contract'] = protocol
+        return digest([STAGE_CONTRACT_VERSION, action, source_hash, facts, materials])
 
     def record(self, rid, owner, action, basis, operation, outcome):
         key = f'recovery/no-progress/{action}/{basis}'

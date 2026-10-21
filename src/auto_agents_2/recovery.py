@@ -189,8 +189,8 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None,
             raise AA2Error("Duplicate repair-target task IDs")
         catalog = controller_context_catalog(evidence_context or {"failure": failure.model_dump()},
                                              aliases=evidence_references(failure))
-        supplied = catalog.controller
-        known_refs = supplied | catalog.proposals
+        supplied = catalog.factual
+        known_refs = catalog.controller | catalog.proposals
         resolved = [catalog.resolve(ref) for ref in diagnosis.evidence_refs]
         missing = [i for i, ref in enumerate(resolved) if ref is None]
         if missing:

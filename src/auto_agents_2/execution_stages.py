@@ -1,6 +1,8 @@
 """The existing task lifecycle, shared by model roles; not a programmable workflow."""
 from typing import Literal
 
+from .util import digest
+
 STAGE_CONTRACT_VERSION = 'task-stages-v1'
 TimingProducer = Literal['protected_review', 'environment', 'checks', 'acceptance']
 
@@ -36,6 +38,18 @@ Reviewers check the actual phase and substantive obligations, not just the autho
 """
 
 
+def stage_contract():
+    """A supplied controller protocol, never a receipt for project facts or acceptance."""
+    record = {'version': STAGE_CONTRACT_VERSION, 'reference_version': 1,
+              'authority': 'workflow_timing_only', 'content': STAGE_CONTRACT}
+    return {**record, 'hash': digest(record)}
+
+
+def current_stage_contract(value):
+    # A digest alone, a matching version alone or a proposal copy is not authority.
+    return value == stage_contract()
+
+
 def stage_instructions(stage, context, purpose):
     if purpose not in {'plan', 'plan_patch', 'implement', 'implementation', 'test_changes',
                        'recovery_diagnosis', 'decision', 'verify'}:
@@ -43,6 +57,13 @@ def stage_instructions(stage, context, purpose):
     if stage not in {'plan', 'implement', 'review', 'recovery_diagnosis', 'decision', 'verify'}:
         return ''
     text = STAGE_CONTRACT
+    text += """
+When controller_stage_contract is supplied in the controller context (inside evidence for a
+decision), cite that record or its supplied hash for workflow timing only. It cannot prove
+source availability, user consent, passing checks, preserved assertions or task acceptance.
+Ground a proposed action or timing correction in separate actual project evidence as well.
+Only supplied current records are referenceable; a prompt heading does not mint an evidence ID.
+"""
     if purpose == 'plan_patch':
         text += """
 For a proven scheduling defect in accepted task.acceptance, use PlanPatch.timing_corrections.

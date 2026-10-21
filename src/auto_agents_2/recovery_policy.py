@@ -5,6 +5,7 @@ from typing import Literal
 
 from .action_authority import STAGE_REENTRY_ACTIONS, route_action, transition_effects
 from .decisions import DecisionRequest, DecisionResult, decision_request_identity
+from .execution_stages import stage_contract
 from .faults import HumanIntervention, HumanRequirement, StateConflict, route_failure
 from .interaction import choice_spec
 from .models import PlanResult, Record
@@ -284,7 +285,7 @@ class RecoveryPolicy:
         if routing.human_requirement:
             raise HumanIntervention(routing.human_requirement, reason_code=routing.reason_code, phase=failure.phase)
         rule = routing.route == "rule"
-        evidence = {"failure": failure.model_dump(), "progress": self.engine.convergence.state(rid, failure.origin_id),
+        evidence = {"controller_stage_contract": stage_contract(), "failure": failure.model_dump(), "progress": self.engine.convergence.state(rid, failure.origin_id),
             "engineering": self.store.get(rid, "automation/engineering/" + failure.origin_id, {}),
             "diagnosis_feedback": active.get("diagnosis_feedback"),
             "history": self.store.recovery_history(rid, failure.origin_id),

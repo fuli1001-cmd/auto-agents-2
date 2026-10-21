@@ -7,6 +7,7 @@ from pydantic import Field, ValidationError
 
 from .errors import AA2Error, InvalidStructuredResponse, PostCommitError
 from .evidence_refs import controller_context_catalog
+from .execution_stages import stage_contract
 from .interaction import choice_spec, is_prototype_approval
 from .models import Record
 from .progress import safe_event
@@ -217,7 +218,7 @@ class DecisionService:
                 unresolved_indexes=unresolved, allowed_roots=sorted(request.evidence))
         if result.action != "ask_user" and not result.evidence_refs:
             raise DecisionValidationError("evidence_required", "evidence_refs", "Cite at least one supplied evidence reference.")
-        if result.action != "ask_user" and not refs.controller.intersection(resolved):
+        if result.action != "ask_user" and not refs.factual.intersection(resolved):
             raise DecisionValidationError("controller_evidence_required", "evidence_refs",
                 "Unverified proposals describe suggested work, not verified results. Cite at least one controller record.",
                 allowed_roots=sorted(request.evidence))
@@ -269,7 +270,7 @@ class DecisionService:
         tasks = (self.store.get(rid, "plan", {}) or {}).get("tasks", [])
         request = DecisionRequest(kind=kind, owner=owner, allowed_choices=["approve", "ask_user"],
             scope={"one_attempt": True, "same_requirements": True,
-                   "tasks": [t for t in tasks if owner == "final" or (t.get("origin_id") or t["id"]) == owner]}, evidence=evidence,
+                   "tasks": [t for t in tasks if owner == "final" or (t.get("origin_id") or t["id"]) == owner]}, evidence={**evidence, "controller_stage_contract": stage_contract()},
             budget={"consumed": count, "grant": count + 1, "legacy_automatic_ceiling": ceiling,
                     "count_limits_enforced": False},
             state_identity=digest([guards, source, policy.model_dump()]))

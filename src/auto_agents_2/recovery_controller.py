@@ -10,6 +10,7 @@ from .design import PROTOTYPE_BROWSER_VERSION
 from .errors import AA2Error, InvalidStructuredResponse
 from .evidence import assess_observation
 from .evidence_refs import controller_context_catalog
+from .execution_stages import current_stage_contract, stage_contract
 from .faults import HumanRequirement, ResourceBoundary, StateConflict, route_failure
 from .interaction import choice_spec
 from .models import CheckResult, ImplementationResult, PlanResult, ReviewResult
@@ -179,7 +180,7 @@ class RecoveryController:
                          "diagnosis_permit": permit}
                 self.store.checkpoints(rid, {key: saved, count_key: count,
                     "recovery/diagnosis/" + failure.id: {"round": count["round"]}})
-            diagnosis_context = {"review_kind": "recovery_diagnosis",
+            diagnosis_context = {"review_kind": "recovery_diagnosis", "controller_stage_contract": stage_contract(),
                 **self._approval(rid, work),
                 "failure": failure.model_dump(), "project": project,
                 "source_history": SourceHistory(self.engine).collect(rid, work, scopes),
@@ -405,6 +406,7 @@ class RecoveryController:
                         "recovery/diagnosis/" + failure.id: {"round": budget["round"]}})
                 policy.start(rid, permit)
                 diagnosis_context = {
+                    "controller_stage_contract": stage_contract(),
                     "review_kind": "recovery_diagnosis", "failure": failure_data,
                     "plan": plan_data, "project": project,
                     "specification": self.store.get(rid, "clarify"), "design": self.store.get(rid, "design"),
@@ -732,14 +734,19 @@ class RecoveryController:
                 targets.add(failure.task_id)
             scopes = sorted({path for task in plan.tasks if not targets or task.id in targets
                              for path in task.allowed_paths})
-            recovery_context = {"recovery_decision": active["decision"], "design": self.store.get(rid, "design"),
+            recovery_context = {"controller_stage_contract": stage_contract(), "recovery_decision": active["decision"], "design": self.store.get(rid, "design"),
                                 "source_history": SourceHistory(engine).collect(rid, work, scopes)}
             # Author and reviewer must share the same selected recovery objective
             # and evidence, including after snapshot creation or interruption.
             self.store.checkpoint(rid, context_key, recovery_context)
+        if ("controller_stage_contract" in recovery_context
+                and not current_stage_contract(recovery_context["controller_stage_contract"])):
+            raise StateConflict("Controller stage contract changed; preserve the frozen plan amendment for reconciliation")
         patch_context = {**recovery_context, "plan_patch": True, "base_revision": revision,
             "plan": plan.model_dump(), "failure": failure.model_dump(), "task_origins": self.store.task_origin_state(rid),
             "specification": self.store.get(rid, "clarify"), "project": engine.contexts.build(work)}
+        patch_context["evidence_reference_contract"] = controller_context_catalog(
+            patch_context, provenance={"patch": "proposal"}).contract(patch_context)
         progress_key = "recovery/patch-progress-basis/" + identity
         if self.store.get(rid, progress_key) is None:
             progress_context = {**patch_context, "prototype_approval": self.store.get(rid, "prototype_approval")}
@@ -796,6 +803,8 @@ class RecoveryController:
             "retained_candidates": candidates,
             "affected": sorted(affected), "reopen": sorted(reopen), "specification": self.store.get(rid, "clarify"),
             "project": engine.contexts.build(work)}
+        review_context["evidence_reference_contract"] = controller_context_catalog(
+            review_context, provenance={"patch": "proposal", "plan": "proposal"}).contract(review_context)
         review = await engine._invoke("review", review_context, TimingPlanReview if patch.timing_corrections else ReviewResult,
             work, rid, "recovery/patch-review/" + identity, fresh=True)
         unchanged({"patch": patch.model_dump(), "review": review.model_dump()})
@@ -821,8 +830,11 @@ class RecoveryController:
             "document_preimage": {"path": "docs/aa2/plan.md", "before": digest(document.read_bytes()) if document.is_file() else None,
                                   "mode": document.stat().st_mode & 0o7777 if document.is_file() else 0o644}}
         if patch.timing_corrections:
+            if "controller_stage_contract" in recovery_context:
+                journal["controller_stage_contract"] = recovery_context["controller_stage_contract"]
             journal["timing_review_binding"] = timing_review_binding(
-                journal["previous_plan"], journal["patch"], journal["plan"], journal["review"])
+                journal["previous_plan"], journal["patch"], journal["plan"], journal["review"],
+                journal.get("controller_stage_contract"))
         self.store.checkpoint(rid, journal_key, journal)
         self.store.activate_plan_patch(rid, identity)
         # A derived document is written only after activation. Startup materializes

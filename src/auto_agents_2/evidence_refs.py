@@ -2,6 +2,7 @@
 import re
 from dataclasses import dataclass, field
 
+from .execution_stages import current_stage_contract
 from .util import digest
 
 
@@ -18,6 +19,7 @@ class EvidenceReference:
 class ReferenceCatalog:
     controller: set[str] = field(default_factory=set)
     proposals: set[str] = field(default_factory=set)
+    protocol: set[str] = field(default_factory=set)
     entries: dict[str, EvidenceReference] = field(default_factory=dict)
     observation_id: str = ""
     provenance: dict[str, str] = field(default_factory=dict)
@@ -29,9 +31,15 @@ class ReferenceCatalog:
         if alias in self.controller and origin == "proposal":
             return
         self.entries[alias] = reference
+        if origin == "controller_protocol":
+            self.protocol.add(alias)
         (self.proposals if origin == "proposal" else self.controller).add(alias)
         if origin != "proposal":
             self.proposals.discard(alias)
+
+    @property
+    def factual(self):
+        return self.controller - self.protocol
 
     def resolve(self, reference):
         if reference in self.entries:
@@ -42,11 +50,13 @@ class ReferenceCatalog:
         return None
 
     def contract(self, roots):
-        return {"version": 4, "roots": sorted(roots), "observation_id": self.observation_id,
+        return {"version": 5, "roots": sorted(roots), "observation_id": self.observation_id,
+                "protocol_roots": ["controller_stage_contract"] if self.protocol else [],
                 "provenance": self.provenance,
                 "syntax": "Cite an existing dot path with [index], a supplied artifact hash or a controller-indexed alias. "
                           "Root paths are valid. Proposal paths describe unverified suggestions only; "
-                          "include a controller record when proposing an action. Citations never establish acceptance."}
+                          "include a factual controller record when proposing an action. Controller protocols support workflow "
+                          "timing only, not project facts or acceptance. Citations never establish acceptance."}
 
 
 def reference_catalog(value, *, prefixes=("",), provenance=None, observation_id=""):
@@ -76,6 +86,13 @@ def reference_catalog(value, *, prefixes=("",), provenance=None, observation_id=
 
 def controller_context_catalog(context, *, aliases=(), provenance=None):
     """Register controller context slots; producers must annotate new model-owned slots via provenance."""
+    # The reserved slot must contain the exact currently supplied protocol, not
+    # model-authored text, a fabricated digest or an obsolete controller version.
+    context = dict(context)
+    context.pop("evidence_reference_contract", None)  # Citation syntax is not project evidence.
+    protocol = context.get("controller_stage_contract")
+    if "controller_stage_contract" in context and not current_stage_contract(protocol):
+        context.pop("controller_stage_contract")
     origins = {}
     failure = context.get("failure") or {}
     if isinstance(failure, dict):
@@ -92,6 +109,10 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
     origins.update(provenance or {})
     refs = reference_catalog(context, provenance=origins,
                              observation_id=failure.get("observation_id", "") if isinstance(failure, dict) else "")
+    if current_stage_contract(protocol) and origins.get("controller_stage_contract") != "proposal":
+        for alias, entry in list(refs.entries.items()):
+            if entry.path == "controller_stage_contract" or entry.path.startswith("controller_stage_contract."):
+                refs.add(alias, entry.path, "controller_protocol", status="protocol")
     registered = list(aliases)
     if isinstance(failure, dict):
         registered.extend(failure.get("evidence_refs", []))
