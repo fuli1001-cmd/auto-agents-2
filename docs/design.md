@@ -148,6 +148,8 @@ verification-v6 同时识别 Node 显式执行的项目包入口：`node_modules
 
 ## 恢复与有界循环
 
+Provider cancellation accounting distinguishes a confirmed pause from an unknown request. Only an observed cancellation of a still-running managed process, successful cleanup and usage persistence, and absence of a response or known error produce a cancellation receipt. The same logical input may consume one such receipt per operation/provider to resume on a later invocation; cancellation itself always propagates and never loops into a retry. Further cancellations, a crash/legacy pending checkpoint, changed input, unconfirmed cleanup or a response of uncertain status retain budget occupancy. Failure, cancellation, resumption, grant and token history are not reset. Decision response/correction limits and committed-result reuse remain unchanged. Saved manual fallbacks and unanswered questions are not migrated or revoked by this policy.
+
 设计阶段通过 `DesignDocuments` 落盘并独立审查架构文档，再进入规划。`DocumentResult.document` 默认生成 `docs/aa2/design.md`；`files` 可修改该入口、`docs/aa2/design-*.md` 及 `docs/aa2/design/` 下的 Markdown。若 `files` 显式修改入口，以实际应用后的文件为准，不能随后用 `document` 覆盖替换结果。设计阶段不能修改产品源码、原型、规格、计划或环境锁定记录。替换锚点不匹配复用有界补丁纠错。
 
 设计提案、文件前后映像、完整输入身份和独立审查存入 `candidate/design`。部分应用恢复按原映像继续；未知源码、文件内容或模式变更阻止自动覆盖。审查失败不进入规划，成功后后续阶段读取最新源码快照。旧版保存了 `design.files` 却没有应用与审查回执的迭代返回设计门禁核对，既有阶段归档机制保留旧提案、任务、预算和原型人工批准。已存在的恢复授权继续按原绑定处理。

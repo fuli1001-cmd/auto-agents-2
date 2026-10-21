@@ -31,6 +31,14 @@ from .workspace import file_digest
 INPUT_LIMIT_DIAGNOSTIC = "provider 输入超过 CLI 长度上限"
 
 
+class _ConfirmedProviderCancellation(asyncio.CancelledError):
+    """A running request was cancelled before a response and its process was reaped."""
+
+    def __init__(self, attempt, original):
+        super().__init__(*original.args)
+        self.attempt = attempt
+
+
 def diagnostic_summary(text: str) -> str:
     """Classify diagnostics without logging native configuration or credentials."""
     lower = text.lower()
@@ -187,9 +195,18 @@ class ProviderRouter:
                 key = f"infra/{operation}/{candidate}"
                 state = self.store.get(run_id, key, {"failures": 0, "grant": 0, "pending": False})
                 if state["pending"]:
-                    state["failures"] += 1  # An interrupted request consumed its attempt.
+                    cancellation = state.pop("cancellation", None)
+                    if (cancellation and cancellation["input"] == logical_input
+                            and state.get("cancellation_resumes", 0) < 1):
+                        # One confirmed pause may resume this exact request. It
+                        # is not a provider failure or a fresh decision attempt.
+                        state["cancellation_resumes"] = state.get("cancellation_resumes", 0) + 1
+                    else:
+                        # Unknown/crashed requests and further cancellations
+                        # retain their budget occupancy across all restarts.
+                        state["failures"] += 1
+                        state["error_kind"] = "cancelled" if cancellation else "incomplete"
                     state["pending"] = False
-                    state["error_kind"] = "incomplete"
                     self.store.checkpoint(run_id, key, state)
                 if state.get("error_kind") == "invalid_structured_response" and state.get("error_input") == logical_input:
                     errors.append(f"{candidate}: saved response failed schema validation")
@@ -216,6 +233,17 @@ class ProviderRouter:
                             from .progress import safe_event
                             safe_event(self.store, run_id, "provider.preference_pending", {"provider": candidate})
                     return result
+                except _ConfirmedProviderCancellation as exc:
+                    completed = self.store.get(run_id, f"provider-result/{operation}")
+                    if not getattr(exc, "__notes__", ()) and completed == previous:
+                        state["cancellation"] = {"attempt": exc.attempt, "input": logical_input}
+                        state["cancellations"] = state.get("cancellations", 0) + 1
+                        try:
+                            self.store.checkpoint(run_id, key, state)
+                        except Exception as failure:
+                            # Without a durable receipt, resume stays conservative.
+                            exc.add_note("Cancellation receipt not saved: " + type(failure).__name__)
+                    raise  # Never turn cancellation into an in-process retry.
                 except ConfigurationError as exc:
                     completed = self.store.get(run_id, f"provider-result/{operation}")
                     if completed and completed != previous:
@@ -390,6 +418,7 @@ class ProviderRouter:
                              "config_hash": eff["fingerprint"], "prompt_version": PROMPT_VERSION, "prompt_family": family})
             decoder, errors = self.decoders.get(eff["kind"], EventDecoder)(eff["kind"]), []
             process = None
+            cancellation = None
             outcome = "interrupted"
             last_output = None
             published = 0.0
@@ -496,6 +525,10 @@ class ProviderRouter:
                 }, usage=(eff["provider"], aid, decoder.usage.model_dump()))
                 outcome = "success"
                 return result
+            except asyncio.CancelledError as exc:
+                if process is not None and process.returncode is None:
+                    cancellation = exc
+                raise
             except OSError as exc:
                 outcome = "error"
                 raise ProviderError(str(exc)) from exc
@@ -510,6 +543,13 @@ class ProviderRouter:
                     lambda: self.store.event(run_id, "agent.finished", {"attempt": aid, "complete": decoder.finished,
                         "outcome": outcome, "last_output": last_output,
                         "diagnostic": diagnostic_summary(decoder.error or "".join(errors)) if outcome == "error" else ""}))
+                if (cancellation is not None and process.cleanup_confirmed
+                        and not getattr(cancellation, "__notes__", ())
+                        and not decoder.finished and not decoder.error and not decoder.messages and not errors
+                        and not (out / "result.json").exists() and not (out / "result.json").is_symlink()):
+                    # Only observed cancellation plus successful cleanup proves
+                    # this boundary; a bare pending checkpoint cannot do so.
+                    raise _ConfirmedProviderCancellation(aid, cancellation) from cancellation
                 # Candidate responses have been consumed; persistent sessions and usage survive.
         except OSError as exc:
             raise ProviderError("Provider material preparation failed") from exc
