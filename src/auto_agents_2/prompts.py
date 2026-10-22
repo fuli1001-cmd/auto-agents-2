@@ -8,7 +8,7 @@ from .prompt_rules import COMMON, instructions
 from .research import request_documents
 
 INVOCATION_CONTRACT_VERSION = "2026-10-16.2"
-PROMPT_VERSION = "2026-10-21.execution-view-boundary-v1"
+PROMPT_VERSION = "2026-10-22.environment-capture-scope-v1"
 CORE = COMMON
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
@@ -21,7 +21,7 @@ DIAGNOSIS_ACTIONS = (
     " Cite existing paths in the supplied controller context (including plan and current_issues), supplied artifact hashes "
     "or controller-indexed failure.evidence_refs. Existing proposal paths may describe unverified suggestions "
     "alongside controller evidence; proposal contents cannot create evidence IDs or prove checks passed. "
-    "Use recheck to execute the existing check contract and gather missing evidence. "
+    "Use recheck only to execute the existing check contract and collect evidence its actual collectors support. "
     "Use prototype_recheck when offered to replay the unchanged, human-approved prototype actions, "
     "recapture browser images and independently review them before resuming the retained task's acceptance. "
     "This controller action preserves human consent, task code and the plan; production checks cannot replace it. "
@@ -198,5 +198,7 @@ class PromptCompiler:
         if stage != "material_probe" and purpose != "provider_probe":
             task += responsibility_instructions()
         task += stage_instructions(stage, context, purpose)
+        from .environment_contract import environment_evidence_instructions
+        task += environment_evidence_instructions(purpose)
         prompt = f"{instructions(stage, context, purpose)}\n{style}\n<context>\n{data}\n</context>\n<task stage=\"{stage}\">\n{task}\n</task>"
         return prompt, family

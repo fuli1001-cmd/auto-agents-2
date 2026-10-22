@@ -5,6 +5,7 @@ import json
 import os
 
 from .artifacts import ArtifactStore
+from .environment_contract import resolution_capture_scope
 from .errors import AA2Error
 from .installation_evidence import installation_record
 from .readview import sensitive_values
@@ -94,7 +95,8 @@ async def capture_resolution(manager, workspace, environment):
             return {k: public(v) for k, v in value.items()}
         return value
 
-    facts = {"pip_lock": pip, "conda_explicit_lock": conda,
+    facts = {"capture_scope": resolution_capture_scope(),
+             "pip_lock": pip, "conda_explicit_lock": conda,
              "python": python, "conda_packages": conda_packages, "installation": installation}
     if manager.config.load().shared_cache.enabled:
         facts["shared_browsers"] = manager.shared.facts(workspace)
