@@ -101,7 +101,7 @@ def test_gitlink_is_an_explicit_boundary_without_reading_external_tree(tmp_path)
     git(tmp_path, "update-index", "--add", "--cacheinfo", "160000," + base + ",vendor")
     git(tmp_path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "gitlink")
     workflow.store.checkpoint(rid, "baseline", git(tmp_path, "rev-parse", "HEAD"))
-    report = workflow.artifacts.json(SourceHistory(workflow).collect(rid, tmp_path)["artifact"])
+    report = workflow.artifacts.json(SourceHistory(workflow).collect_protected(rid, tmp_path)["artifact"])
     entry = report["snapshots"][0]["public_tree"]["vendor"]
     assert entry == {"mode": "160000", "type": "commit", "object": base, "body_status": "unsupported_type"}
     assert not any(name.startswith("vendor/") for name in report["snapshots"][0]["public_tree"])
@@ -112,7 +112,7 @@ def test_missing_anchor_stays_incomplete_even_with_a_complete_public_tree(tmp_pa
     workflow, rid, _, _ = recorded_tree(tmp_path)
     missing = f"refs/aa2/{rid}/replans/0/missing"
     workflow.store.checkpoint(rid, "replan_feedback", {"recovery_refs": [missing]})
-    result = SourceHistory(workflow).collect(rid, tmp_path)
+    result = SourceHistory(workflow).collect_protected(rid, tmp_path)
     report = workflow.artifacts.json(result["artifact"])
     assert result["status"] == "incomplete" and report["snapshots"][0]["public_tree"]
     assert result["missing"] == [{"anchor": missing, "status": "missing"}]
@@ -129,7 +129,7 @@ def test_tree_read_failure_cannot_publish_a_complete_inventory(tmp_path, monkeyp
 
     monkeypatch.setattr(history_module, "git", fail)
     with pytest.raises(AA2Error, match="historical tree unavailable"):
-        SourceHistory(workflow).collect(rid, tmp_path)
+        SourceHistory(workflow).collect_protected(rid, tmp_path)
     with workflow.store.connect() as db:
         assert not db.execute("SELECT 1 FROM checkpoints WHERE run_id=? AND key LIKE 'review-evidence/source-history/%'", (rid,)).fetchall()
 

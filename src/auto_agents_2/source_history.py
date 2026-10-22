@@ -198,16 +198,32 @@ class SourceHistory:
                                 "diff": self.engine.artifacts.put(patch, "source_diff")})
         return comparisons
 
-    def collect_plan(self, rid, work, plan):
-        """Use the reviewed plan's task scopes for integrated read-only review.
+    def collect_protected(self, rid, work):
+        """Explicit no-plan view; never infer scope from a proposal or citation."""
+        return self.collect(rid, work, [])
+
+    def collect_task(self, rid, work, task):
+        """Use the caller's bound task without changing its scope order/identity."""
+        return self.collect(rid, work, task.allowed_paths)
+
+    def collect_plan(self, rid, work, plan, *, task_ids=None):
+        """Read a bound plan, or an explicit nonempty subset of its tasks.
 
         Callers supply their active, inherited or journal-bound plan. This does
-        not infer scope from model citations or expand any task's write policy.
+        not establish plan approval or expand any task's write policy. None is
+        not a plan: callers without one must explicitly select protected history.
         """
-        scopes = sorted({path for task in plan.tasks for path in task.allowed_paths}) if plan else []
+        if plan is None:
+            raise StateConflict("Source history requires a bound plan; select protected history explicitly")
+        targets = set(task_ids) if task_ids is not None else None
+        if targets is not None and (not targets or targets - {task.id for task in plan.tasks}):
+            raise StateConflict("Source history task selection must identify tasks in the bound plan")
+        scopes = sorted({path for task in plan.tasks if targets is None or task.id in targets
+                         for path in task.allowed_paths})
         return self.collect(rid, work, scopes)
 
-    def collect(self, rid, work, scopes=()):
+    def collect(self, rid, work, scopes):
+        """Collect an explicit controller scope; omitting it must not lose bodies."""
         source = tree_hash(work)
         extra = self.engine.config.load().sensitive_paths
 

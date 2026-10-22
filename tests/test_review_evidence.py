@@ -144,7 +144,7 @@ def test_history_preserves_complete_bytes_diffs_and_filters_sensitive_paths(tmp_
     assert {changed["before"]["content"]["hash"], changed["after"]["content"]["hash"], changed["diff"]["hash"]} <= mounted
     assert SourceHistory(workflow).collect(rid, tmp_path, ["frontend/src", "private"]) == result
     (tmp_path / "frontend/src/App.test.tsx").write_text("new edit")
-    assert SourceHistory(workflow).collect(rid, tmp_path)["source_hash"] != result["source_hash"]
+    assert SourceHistory(workflow).collect_protected(rid, tmp_path)["source_hash"] != result["source_hash"]
 
 
 def test_source_file_contents_cannot_expand_artifact_admission(tmp_path):
@@ -154,7 +154,7 @@ def test_source_file_contents_cannot_expand_artifact_admission(tmp_path):
     source = workflow.artifacts.put(content, "fixture_json")  # Existing edges must not turn source text into authority.
     path = tmp_path / "frontend/src/test/reference.json"
     path.write_text(json.dumps(content, ensure_ascii=True, sort_keys=True))
-    history = SourceHistory(workflow).collect(rid, tmp_path)
+    history = SourceHistory(workflow).collect_protected(rid, tmp_path)
     view = ContextPlanner(workflow.artifacts).prepare("review", {"review_kind": "implementation", "source_history": history}, tmp_path)
     mounted = {ref["hash"] for ref in view.payload["evidence_materials"]}
     assert source["hash"] in mounted and unrelated["hash"] not in mounted
@@ -164,7 +164,7 @@ def test_missing_history_is_explicit_and_deleted_public_tests_remain_auditable(t
     workflow, rid, _, ref = history_fixture(tmp_path)
     (tmp_path / "frontend/src/App.test.tsx").unlink()
     git(tmp_path, "update-ref", "-d", ref)
-    result = SourceHistory(workflow).collect(rid, tmp_path)
+    result = SourceHistory(workflow).collect_protected(rid, tmp_path)
     assert result["status"] == "incomplete" and result["missing"] == [{"anchor": ref, "status": "missing"}]
     report = workflow.artifacts.json(result["artifact"])
     change = next(c for c in report["snapshots"][0]["changes_to_current"] if c["path"] == "frontend/src/App.test.tsx")

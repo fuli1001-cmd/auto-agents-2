@@ -1,0 +1,35 @@
+{
+  "utc": "2026-10-22T04:04:26.194153+00:00",
+  "original_run": "run_37cae45162ca4228",
+  "delivered": "01eac45a8b9ac00e112ee2cc76245824b1212c31",
+  "historical_commit": "83b438e9256da34778ee419952826359c474e336",
+  "plan_hash": "a52174c187edb1c5b135b075dcead7ba17a3689538d50a0440327d7fec8c3509",
+  "scope_count": 57,
+  "manifest_version": 4,
+  "whole_plan_record_identical": true,
+  "historical_configurations": [
+    {
+      "path": "frontend/vite.config.mjs",
+      "bytes": 768,
+      "hash": "ae7ebee57986406dbf498dd2d146339765cf5f350ee92464e548289fd0625346",
+      "mounted": true
+    },
+    {
+      "path": "frontend/vitest.config.mjs",
+      "bytes": 521,
+      "hash": "89051328d14d941bbdda939706b689792c12055ad4c6d8431b70edd03c2bc4fb",
+      "mounted": true
+    }
+  ],
+  "task_records": {
+    "T01": "exact record equality",
+    "T02": "exact record equality",
+    "T03": "exact record equality",
+    "T04": "exact record equality",
+    "T05": "exact record equality",
+    "T06": "exact record equality"
+  },
+  "protected_record_identical": true,
+  "live_state_unchanged": true,
+  "limits": "Replays real Git originals and the approved plan in an isolated Store, not the released full live evidence graph; no models or product run."
+}

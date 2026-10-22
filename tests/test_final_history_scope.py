@@ -118,8 +118,8 @@ def test_missing_or_taskless_plan_does_not_infer_history_scope(tmp_path, no_plan
     workflow, rid, _ = history_fixture(tmp_path)
     history = SourceHistory(workflow)
     plan = None if no_plan else plan_for()
-    scoped = history.collect_plan(rid, tmp_path, plan)
-    assert scoped == history.collect(rid, tmp_path)
+    scoped = history.collect_protected(rid, tmp_path) if no_plan else history.collect_plan(rid, tmp_path, plan)
+    assert scoped == history.collect_protected(rid, tmp_path)
     manifest = workflow.artifacts.json(scoped["artifact"])
     assert manifest["scope"] == []
     assert manifest["snapshots"][0]["public_tree"]["frontend/vite.config.mjs"]["body_status"] == "outside_scope"
@@ -129,7 +129,7 @@ def test_plan_scope_changes_cache_without_changing_old_frozen_history(tmp_path):
     from auto_agents_2.source_history import SourceHistory
     workflow, rid, _ = history_fixture(tmp_path)
     history = SourceHistory(workflow)
-    old = history.collect(rid, tmp_path)
+    old = history.collect_protected(rid, tmp_path)
     old_bytes = workflow.artifacts.bytes(old["artifact"])
     workflow.store.checkpoint(rid, "presentation/final-review/frozen", {"source_history": old})
     plan = plan_for(["frontend/vite.config.mjs"], ["support/config_helper.py", "frontend/vite.config.mjs"])
@@ -216,7 +216,7 @@ async def test_new_history_scope_invalidates_prior_final_invocation_without_rewr
 
     workflow.agent = Reviewer()
     histories = SourceHistory(workflow)
-    old = histories.collect(rid, tmp_path)
+    old = histories.collect_protected(rid, tmp_path)
     first = await workflow._invoke_once("verify", {"source_history": old}, ReviewResult, tmp_path,
                                         rid, "final-review", fresh=True)
     original = workflow.store.get(rid, "invocation/final-review")

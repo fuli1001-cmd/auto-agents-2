@@ -109,7 +109,7 @@ class DesignDocuments:
         operation = "design/question-evidence/" + digest([fingerprint, source])
         resolution = await engine._invoke("design", {**context,
             "design_review_evidence": self.evidence(rid, work),
-            "source_history": SourceHistory(engine).collect(rid, work),
+            "source_history": SourceHistory(engine).collect_protected(rid, work),
             "controller_feedback": {"previous_proposal": document.model_dump(),
                 "instruction": "This request only reconciles questions: return summary and questions under the supplied "
                     "schema. The controller preserves the original document and proposed files byte for byte. "

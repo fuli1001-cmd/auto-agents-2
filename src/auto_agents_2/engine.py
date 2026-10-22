@@ -1841,7 +1841,7 @@ class WorkflowEngine:
                             "verification_contract": self._verification_contract(commands),
                             "design": context.get("design"), "feedback": feedback, "unresolved_issues": IssueLedger(self.store, self.artifacts).unresolved(rid),
                             "project": self.contexts.build(work, scopes=task.allowed_paths)}
-            task_context["source_history"] = SourceHistory(self).collect(rid, work, task.allowed_paths)
+            task_context["source_history"] = SourceHistory(self).collect_task(rid, work, task)
             if plan.preview:
                 task_context["preview_contracts"] = PreviewEvidence(self).contracts(rid, plan)
             retained = feedback.get("baseline_refresh", {}).get("retained_candidate")
@@ -1947,7 +1947,7 @@ class WorkflowEngine:
                 task_context["verification_observation"] = self._require_task_evidence(
                     rid, task, saved, commands, checks, work, environment)
                 task_context.update(self._task_approval_context(rid, work, context))
-                task_context["source_history"] = SourceHistory(self).collect(rid, work, task.allowed_paths)
+                task_context["source_history"] = SourceHistory(self).collect_task(rid, work, task)
                 task_context.update(self._task_design_context(rid, work))
                 preview_context = PreviewEvidence(self).context(rid, work, plan, environment, task_id=task.id)
                 preview_required = bool(saved.get("preview_permit"))
@@ -2123,8 +2123,11 @@ class WorkflowEngine:
             self.store.checkpoint(rid, "verify/visuals", visuals)
         verification_observation = self._require_candidate_evidence(
             rid, checks, evidence, work, environment, phase="reuse", expected_source=candidate_hash)
+        history = SourceHistory(self)
+        source_history = (history.collect_plan(rid, work, plan) if plan is not None
+                          else history.collect_protected(rid, work))
         review = await self._invoke("verify", {**approval_context, "project": self.contexts.build(work),
-                                    "source_history": SourceHistory(self).collect_plan(rid, work, plan),
+                                    "source_history": source_history,
                                     "preview_contracts": PreviewEvidence(self).contracts(source_run or rid, plan),
                                     "verification_contract": self._verification_contract(checks),
                                     "verification_observation": verification_observation,
@@ -2298,10 +2301,13 @@ class WorkflowEngine:
                     continue
             if await self._recover_delivery_evidence(rid, checks, evidence, work, environment, before, observation):
                 continue
+            history = SourceHistory(self)
+            source_history = (history.collect_plan(rid, work, plan) if plan is not None
+                              else history.collect_protected(rid, work))
             review = await self._invoke("verify", {**approval_context, "project": self.contexts.build(work), "specification": self.store.get(rid, "clarify"),
                 "design_review": DesignDocuments(self).context(rid, work),
                 "preview_contracts": PreviewEvidence(self).contracts(rid, plan),
-                "source_history": SourceHistory(self).collect_plan(rid, work, plan),
+                "source_history": source_history,
                 "verification_contract": self._verification_contract(checks),
                 "approved_prototype_visuals": self.store.get(rid, "prototype_approval", {}).get("visuals", []),
                 "evidence": [c.model_dump() for c in evidence], "implemented_visuals": visuals, "incoming": incoming},

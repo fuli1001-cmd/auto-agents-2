@@ -417,9 +417,10 @@ class RecoveryController:
                     "observations": self.store.get(rid, "recovery/observations/" + failure.origin_id, []),
                     "allowed_actions": policy.diagnosis_actions(rid, failure, work, plan),
                 }
-                scopes = sorted({path for task in plan.tasks if not failure.task_id or task.id == failure.task_id
-                                 for path in task.allowed_paths}) if plan else []
-                diagnosis_context["source_history"] = SourceHistory(engine).collect(rid, work, scopes)
+                history = SourceHistory(engine)
+                diagnosis_context["source_history"] = (history.collect_plan(rid, work, plan,
+                    task_ids=[failure.task_id] if failure.task_id else None) if plan is not None
+                    else history.collect_protected(rid, work))
                 from .preview_evidence import PreviewEvidence
                 if plan and plan.preview:
                     diagnosis_context["preview_contracts"] = PreviewEvidence(engine).contracts(rid, plan)
@@ -732,10 +733,9 @@ class RecoveryController:
             targets = set(active["decision"].get("task_ids", []))
             if failure.task_id:
                 targets.add(failure.task_id)
-            scopes = sorted({path for task in plan.tasks if not targets or task.id in targets
-                             for path in task.allowed_paths})
             recovery_context = {"controller_stage_contract": stage_contract(), "recovery_decision": active["decision"], "design": self.store.get(rid, "design"),
-                                "source_history": SourceHistory(engine).collect(rid, work, scopes)}
+                                "source_history": SourceHistory(engine).collect_plan(
+                                    rid, work, plan, task_ids=targets or None)}
             # Author and reviewer must share the same selected recovery objective
             # and evidence, including after snapshot creation or interruption.
             self.store.checkpoint(rid, context_key, recovery_context)

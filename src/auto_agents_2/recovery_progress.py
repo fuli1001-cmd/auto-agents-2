@@ -15,13 +15,15 @@ class RecoveryProgress:
         self.engine, self.store = engine, engine.store
 
     def inputs(self, rid, failure, work, plan):
-        scopes = sorted({p for t in plan.tasks if not failure.task_id or t.id == failure.task_id
-                         for p in t.allowed_paths}) if plan else []
+        history = SourceHistory(self.engine)
+        source_history = (history.collect_plan(rid, work, plan,
+            task_ids=[failure.task_id] if failure.task_id else None) if plan is not None
+            else history.collect_protected(rid, work))
         return {'controller_stage_contract': stage_contract(),
                 'failure': failure.model_dump(), 'plan': plan.model_dump() if plan else None,
                 'specification': self.store.get(rid, 'clarify'), 'design': self.store.get(rid, 'design'),
                 'prototype_approval': self.store.get(rid, 'prototype_approval'),
-                'source_history': SourceHistory(self.engine).collect(rid, work, scopes)}
+                'source_history': source_history}
 
     @staticmethod
     def basis(context, source_hash, action):
