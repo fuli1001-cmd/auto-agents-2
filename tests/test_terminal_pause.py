@@ -21,6 +21,12 @@ from auto_agents_2.config import ConfigStore
 from auto_agents_2.interaction import choice_spec
 project=Path(sys.argv[1])
 ConfigStore(project).initialize()
+# These subprocesses replace the business workflow to exercise real terminal
+# input/cleanup. Toolchain prerequisites have their own real engine tests.
+from auto_agents_2.toolchain import ToolchainPreflight
+async def ready_toolchain(self):
+    return {"version": 1, "ok": True, "checks": {}, "optional": {}}
+ToolchainPreflight.check = ready_toolchain
 async def waiting(self, rid):
     kind=sys.argv[2]
     interaction=choice_spec(["通过", "修改"]) if kind=="choice" else None
@@ -72,7 +78,7 @@ def test_ctrl_c_pauses_and_same_run_resumes_from_input(tmp_path, kind):
     run = store.current()
     assert run["status"] == "PAUSED"
     question = store.pending(run["id"])[0]
-    assert question["answer"] is None
+    assert question["answer"] is None and question["key"] == "fixture"
     pause_once(tmp_path, kind, resume=True)
     assert store.current()["id"] == run["id"]
     assert store.current()["status"] == "PAUSED"
@@ -102,6 +108,12 @@ from auto_agents_2.requirements import capture
 from auto_agents_2.store import Store
 project = Path(sys.argv[1])
 ConfigStore(project).initialize()
+# These subprocesses replace the business workflow to exercise real terminal
+# input/cleanup. Toolchain prerequisites have their own real engine tests.
+from auto_agents_2.toolchain import ToolchainPreflight
+async def ready_toolchain(self):
+    return {"version": 1, "ok": True, "checks": {}, "optional": {}}
+ToolchainPreflight.check = ready_toolchain
 store = Store(project)
 previous = store.admit("previous.md", {})
 store.update(previous["id"], status="SUCCEEDED", outcome="DELIVERED")
