@@ -209,7 +209,7 @@ class VerificationService:
                 logs.append(log)
                 await log.open()
             process = await self.sandbox.spawn(argv, cwd, env, outputs,
-                [workspace, environment.prefix] if environment else [workspace], overlays=overlays)
+                [workspace, environment.prefix, *self.sandbox.execution_reads(workspace)] if environment else [workspace], overlays=overlays)
         except BaseException:
             await finalize_async(*(log.close for log in logs), original=sys.exception())
             raise

@@ -26,6 +26,7 @@ from .sandbox import SandboxRunner
 from .util import atomic_write, digest, scrub_text
 
 PROTOTYPE_BROWSER_VERSION = 6
+BROWSER_RUNTIME = {}
 APPLICATION_VIEWPORTS = ((1440, 900), (390, 844))
 
 
@@ -336,7 +337,8 @@ async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[d
                         completed = []
                         row = {"page": unquote(urlsplit(resolved).path).lstrip("/"), "route": route,
                                "resolved_route": resolved, "viewport": width, "status": 0,
-                               "errors": errors, "actions": completed}
+                               "errors": errors, "actions": completed, "browser_runtime": dict(BROWSER_RUNTIME),
+                               "actual_browser_version": browser.version}
                         results.append(row)
                         context, page = None, None
                         try:
@@ -419,7 +421,7 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
     cwd = workspace if spec.command.cwd == "." else contained(workspace, spec.command.cwd)
     process = await sandbox.spawn(argv, cwd, environment.variables(scratch),
                                   [scratch, cwd / ".next", cwd / "dist",
-                                   *(cwd / "node_modules" / name for name in sorted(NODE_RUNTIME_CACHES))], [workspace, environment.prefix])
+                                   *(cwd / "node_modules" / name for name in sorted(NODE_RUNTIME_CACHES))], [workspace, environment.prefix, *sandbox.execution_reads(workspace)])
     # Drain pipes to avoid deadlocking a long-running server; retain a bounded diagnostic tail.
     tail = []
 
@@ -466,7 +468,8 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
                     for width, height in APPLICATION_VIEWPORTS:
                         errors, completed = [], []
                         row = {"route": route, "viewport": width, "viewport_height": height,
-                               "errors": errors, "status": 0, "actions": completed}
+                               "errors": errors, "status": 0, "actions": completed, "browser_runtime": dict(BROWSER_RUNTIME),
+                               "actual_browser_version": browser.version}
                         results.append(row)
                         context = await preview_context(browser, f"http://127.0.0.1:{port}", errors, width, height)
                         try:
@@ -549,6 +552,8 @@ async def _inspect_application(spec, workspace, output, environment, sandbox, ro
                 original.add_note("Preview cleanup failed: " + type(error).__name__)
 
 
-def browser_environment(cache: Path):
-    """Configure the browser driver of this single-project CLI process, never the user's shell."""
+def browser_environment(cache: Path, identity=None):
+    """Configure this single-project CLI driver; do not alter the user's shell."""
+    global BROWSER_RUNTIME
+    BROWSER_RUNTIME = dict(identity or {})
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(cache)

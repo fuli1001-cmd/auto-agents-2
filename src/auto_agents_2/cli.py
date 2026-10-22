@@ -370,9 +370,16 @@ def cancel(project: Project = Path(".")):
 
 
 @app.command()
-def gc(project: Project = Path("."), dry_run: bool = False):
+def gc(project: Project = Path("."), dry_run: bool = False, shared: bool = False):
     try:
         cfg = configuration(project).load()
+        if shared:
+            from .shared_cache import SharedCache
+            cache = SharedCache(configuration(project))
+            if not cache.enabled:
+                raise AA2Error("Shared cache is not enabled for this project")
+            console.print_json(data=cache.collect(dry_run=dry_run, ttl_seconds=cfg.cleanup.cache_ttl_seconds))
+            return
         store = Store(project)
         resources = ResourceManager(store, cfg.cleanup)
         if not dry_run:

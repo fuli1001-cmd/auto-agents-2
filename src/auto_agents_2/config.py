@@ -76,6 +76,11 @@ class EnvironmentConfig(Record):
     playwright_browsers: list[Literal["chromium", "firefox", "webkit"]] = Field(default=["chromium"], min_length=1)
 
 
+class SharedCacheConfig(Record):
+    enabled: bool = False
+    root: str = ""
+
+
 class DeliveryConfig(Record):
     target_branch: str = ""
     max_reintegrations: int = Field(default=2, ge=0)
@@ -100,6 +105,7 @@ class Config(Record):
     cleanup: Cleanup = Cleanup()
     attachment_capture: AttachmentCapture = AttachmentCapture()
     environment: EnvironmentConfig = EnvironmentConfig()
+    shared_cache: SharedCacheConfig = SharedCacheConfig()
     delivery: DeliveryConfig = DeliveryConfig()
     project_profile: Literal["auto", "python", "node", "python-node", "react", "next", "python-react", "python-next"] = "auto"
     verification: list[Command] = []

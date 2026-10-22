@@ -94,6 +94,7 @@ def test_new_defaults_preserve_existing_worker_invocation_receipts(tmp_path):
     cfg = config.load()
     original = cfg.model_dump(mode="json")
     original.pop("automation")
+    original.pop("shared_cache")  # This field did not exist in the historical configuration.
     original["efforts"].pop("decision")
     original["efforts"].pop("recovery_diagnosis")
     # Freeze the pre-presentation-split value: changing rendering must not

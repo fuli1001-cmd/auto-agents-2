@@ -6,7 +6,7 @@ import json
 from pydantic import Field
 
 from .builds import verification_commands
-from .design import APPLICATION_VIEWPORTS, PROTOTYPE_BROWSER_VERSION, inspect_application
+from .design import APPLICATION_VIEWPORTS, inspect_application
 from .errors import PrototypeBrowserError
 from .evidence import input_identity, reusable, runtime_configuration
 from .faults import StateConflict
@@ -71,7 +71,7 @@ class PreviewEvidence:
                 "previous": previous,
                 "history": [{k: v for k, v in row.items() if k != "preview"} for row in records],
                 "execution_viewports": [{"width": w, "height": h} for w, h in APPLICATION_VIEWPORTS],
-                "browser_version": PROTOTYPE_BROWSER_VERSION,
+                "browser_version": self.engine.browser_check_version(),
                 "meaning": "Accepted controller contracts, not execution evidence. Viewports are the controller's "
                            "fixed application execution contract. Compare commands, routes, every operation and "
                            "assertion, including cleanup. The chain contains the archived generation baseline, "
@@ -84,7 +84,7 @@ class PreviewEvidence:
         if not approval or (self.store.get(rid, "delivery/journal") or {}).get("publication_started"):
             return None
         prototype = self.store.get(rid, "prototype", {})
-        if not self.engine.approvals.current(rid, work, prototype.get("browser_actions", []), PROTOTYPE_BROWSER_VERSION):
+        if not self.engine.approvals.current(rid, work, prototype.get("browser_actions", []), self.engine.browser_check_version()):
             return None
         return {"contracts_hash": digest(contracts), "approval": approval}
 

@@ -693,7 +693,7 @@ class WorkflowEngine:
                 # A pending rollback cannot be replaced by raising another Replan.
                 # Preserve it and expose the real failed gate without a busy loop.
                 raise ApprovalBoundary(f"历史原型审批复核未通过：{exc.reason}") from exc
-            if (tree_hash(work) != source or not self.approvals.current(rid, work, actions, PROTOTYPE_BROWSER_VERSION)):
+            if (tree_hash(work) != source or not self.approvals.current(rid, work, actions, self.browser_check_version())):
                 raise StateConflict("审批恢复期间候选发生变化，已保留回退现场")
             record["approval"] = receipt
             updated = {**saved, "approval_context_version": APPROVAL_CONTEXT_VERSION,
@@ -912,6 +912,7 @@ class WorkflowEngine:
     async def _prototype_browser_report(self, rid, work, document):
         await self._ensure_browser(rid, work)
         fingerprint = self._prototype_hash(work)
+        browser_identity = self.browser_check_version()
         results, error = [], ""
         try:
             with observe_activity(self.store, rid, "原型浏览器检查"):
@@ -919,10 +920,10 @@ class WorkflowEngine:
                     self.store.root / "visuals" / rid / "prototype" / identifier("check"), document.browser_actions)
         except PrototypeBrowserError as exc:
             results, error = exc.results, str(exc)
-        if self._prototype_hash(work) != fingerprint:
-            raise StateConflict("原型在检查期间被修改，需要重新检查")
+        if self._prototype_hash(work) != fingerprint or self.browser_check_version() != browser_identity:
+            raise StateConflict("原型或浏览器环境在检查期间被修改，需要重新检查")
         results = self._archive_visuals(results)
-        report = {"version": PROTOTYPE_BROWSER_VERSION, "source_hash": fingerprint,
+        report = {"version": self.browser_check_version(), "source_hash": fingerprint,
                   "actions_hash": digest([a.model_dump() for a in document.browser_actions]),
                   "results": results, "error": error}
         artifact = self.artifacts.put(report, "prototype-browser")
@@ -936,8 +937,8 @@ class WorkflowEngine:
     async def _record_prototype_approval(self, rid, work, document, review, visuals):
         actions = [action.model_dump() for action in document.browser_actions]
         identity = prototype_identity(work, actions)
-        evidence = {**identity, "review": review, "visuals": visuals, "browser_version": PROTOTYPE_BROWSER_VERSION}
-        if not self.approvals.automation_current(evidence, identity, actions, PROTOTYPE_BROWSER_VERSION, expected_routes=self.approvals.routes(work, actions)):
+        evidence = {**identity, "review": review, "visuals": visuals, "browser_version": self.browser_check_version()}
+        if not self.approvals.automation_current(evidence, identity, actions, self.browser_check_version(), expected_routes=self.approvals.routes(work, actions)):
             raise Replan("prototype", "原型审批缺少完整浏览器证据或独立审查，需要重新核验")
         human = self.approvals.human(rid, work, actions)
         if not human:
@@ -945,7 +946,7 @@ class WorkflowEngine:
             if feedback is not None:
                 raise Replan("prototype", feedback)
             human = self.approvals.human(rid, work, actions)
-        record = self.approvals.publish(rid, work, actions, human, review, visuals, PROTOTYPE_BROWSER_VERSION)
+        record = self.approvals.publish(rid, work, actions, human, review, visuals, self.browser_check_version())
         return self.approvals.context(record)
 
     async def _ensure_prototype_approval(self, rid, work, prototype=None):
@@ -955,18 +956,20 @@ class WorkflowEngine:
             raise Replan("prototype", "Frontend development requires a verified prototype and explicit human approval")
         document = DocumentResult.model_validate({k: v for k, v in data.items() if k in DocumentResult.model_fields})
         actions = [action.model_dump() for action in document.browser_actions]
+        if self.environments.shared.enabled:
+            await self._ensure_browser(rid, work)
         binding = prototype_identity(work, actions)
-        current = self.approvals.current(rid, work, actions, PROTOTYPE_BROWSER_VERSION)
+        current = self.approvals.current(rid, work, actions, self.browser_check_version())
         if current:
             # Also attach provenance to modern receipts created before this version.
             return await self._record_prototype_approval(rid, work, document, current["review"], current["visuals"])
         previous = self.store.get(rid, "prototype_approval", {})
         verification_key = "candidate/prototype-approval-checks/" + digest([
-            binding["identity"], self.store.get(rid, "clarify", {}), PROTOTYPE_BROWSER_VERSION])
+            binding["identity"], self.store.get(rid, "clarify", {}), self.browser_check_version()])
         checked = self.store.get(rid, verification_key, {})
-        if self.approvals.automation_current(checked, binding, actions, PROTOTYPE_BROWSER_VERSION, expected_routes=self.approvals.routes(work, actions)):
+        if self.approvals.automation_current(checked, binding, actions, self.browser_check_version(), expected_routes=self.approvals.routes(work, actions)):
             previous = checked
-        if self.approvals.automation_current(previous, binding, actions, PROTOTYPE_BROWSER_VERSION, expected_routes=self.approvals.routes(work, actions)):
+        if self.approvals.automation_current(previous, binding, actions, self.browser_check_version(), expected_routes=self.approvals.routes(work, actions)):
             review, visuals = previous["review"], previous["visuals"]
         else:
             report = await self._prototype_browser_report(rid, work, document)
@@ -975,12 +978,13 @@ class WorkflowEngine:
             visuals = report["results"]
             review = (await self._invoke("review", {"review_kind": "prototype", "prototype": data,
                 "specification": self.store.get(rid, "clarify", {}), "browser_evidence": visuals,
+                "controller_browser_report": report,
                 "project": self.contexts.build(work)}, ReviewResult, work, rid,
                 "prototype-approval-review/" + binding["identity"], fresh=True)).model_dump()
             if not review["approved"]:
                 raise Replan("prototype", review["summary"])
             self.store.checkpoint(rid, verification_key, {**binding, "review": review, "visuals": visuals,
-                                                         "browser_version": PROTOTYPE_BROWSER_VERSION})
+                                                         "browser_version": self.browser_check_version()})
         if prototype_identity(work, actions) != binding:
             raise StateConflict("原型在审批复核期间发生变化，已保留现场")
         return await self._record_prototype_approval(rid, work, document, review, visuals)
@@ -989,7 +993,7 @@ class WorkflowEngine:
         if not (context.get("specification", {}).get("frontend") or self.store.get(rid, "clarify", {}).get("frontend")):
             return {}
         prototype = self.store.get(rid, "prototype")
-        record = (self.approvals.current(rid, work, prototype.get("browser_actions", []), PROTOTYPE_BROWSER_VERSION)
+        record = (self.approvals.current(rid, work, prototype.get("browser_actions", []), self.browser_check_version())
                   if prototype else None)
         if not record:
             raise ApprovalBoundary("当前任务缺少与原型内容及交互动作匹配的人工审批证据，已暂停派发")
@@ -1124,7 +1128,7 @@ class WorkflowEngine:
             self.store.checkpoint(rid, key, pending)
         if fingerprint != pending["fingerprint"]:
             raise StateConflict("待审核原型已被修改，已保留现场；请核对修改后再续跑")
-        if "visuals" in pending and pending.get("browser_version") != PROTOTYPE_BROWSER_VERSION:
+        if "visuals" in pending and pending.get("browser_version") != self.browser_check_version():
             self.artifacts.put(pending, "prototype-recovery")
             pending.pop("visuals")
             pending.pop("review", None)
@@ -1135,7 +1139,7 @@ class WorkflowEngine:
             if report["error"]:
                 raise Replan("prototype", report["error"])
             pending["visuals"] = report["results"]
-            pending["browser_version"] = PROTOTYPE_BROWSER_VERSION
+            pending["browser_version"] = self.browser_check_version()
             self.store.checkpoint(rid, key, pending)
         if self._prototype_hash(work) != fingerprint:
             raise StateConflict("原型在检查期间被修改，需要重新检查")
@@ -1988,12 +1992,26 @@ class WorkflowEngine:
             saved["phase"] = "rejected"
             ReviewEvidence(self.store).complete(rid, consumer_key(task), [c.model_dump() for c in checks], updates={key: saved})
             raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="review", step="review"))
+    def browser_check_version(self):
+        if not self.environments.shared.enabled:
+            return PROTOTYPE_BROWSER_VERSION
+        from .browser_cache import BrowserCache
+        return f"{PROTOTYPE_BROWSER_VERSION}:" + digest(BrowserCache(self.environments).current_identity())
+
     async def _ensure_browser(self, rid, workspace):
+        shared = self.environments.shared.enabled
+        if shared:
+            from .browser_cache import BrowserCache
+            record = BrowserCache(self.environments).prototype_ready()
+            if record:
+                browser_environment(Path(record["path"]), BrowserCache(self.environments).current_identity())
+                return
         cache = self.store.root / "cache/browsers"
-        cache.mkdir(parents=True, exist_ok=True)
-        self.resources.register(cache, "cache", rid)
+        if not shared:
+            cache.mkdir(parents=True, exist_ok=True)
+            self.resources.register(cache, "cache", rid)
         key = "infrastructure/browser/" + digest([str(workspace), tree_hash(workspace)])
-        while not any(cache.glob("chromium-*/chrome-linux*/chrome")):
+        while shared or not any(cache.glob("chromium-*/chrome-linux*/chrome")):
             previous = self.store.get(rid, key, {"attempts": 0})
             attempt = previous["attempts"] + 1
             permit = None
@@ -2025,7 +2043,12 @@ class WorkflowEngine:
     async def _install_browser(self, workspace, cache):
         run = self.store.current(unfinished=True)
         with observe_activity(self.store, run["id"] if run else None, "准备浏览器环境"), self.resources.temporary("browser-install") as scratch:
-            await self.environments.install_browser(workspace, cache, scratch)
+            if self.environments.shared.enabled:
+                from .browser_cache import BrowserCache
+                record = await BrowserCache(self.environments).prototype(workspace)
+                browser_environment(Path(record["path"]), BrowserCache(self.environments).current_identity())
+            else:
+                await self.environments.install_browser(workspace, cache, scratch)
 
     def _agent_instructions(self, work, plan):
         path = work / "AGENTS.md"
@@ -2415,7 +2438,7 @@ class WorkflowEngine:
                        "specification": self.store.get(rid, "clarify"), "project": self.contexts.build(work),
                        "feedback": {**feedback, "repair_feedback": rejection}}
             prototype = self.store.get(rid, "prototype", {})
-            approval = (self.approvals.current(rid, work, prototype.get("browser_actions", []), PROTOTYPE_BROWSER_VERSION)
+            approval = (self.approvals.current(rid, work, prototype.get("browser_actions", []), self.browser_check_version())
                         if prototype else None)
             if approval:
                 context["prototype_approval"] = self.approvals.context(approval)

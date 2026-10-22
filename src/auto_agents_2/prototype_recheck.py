@@ -1,7 +1,6 @@
 """Refresh automatic prototype evidence without regenerating an approved design."""
 from __future__ import annotations
 
-from .design import PROTOTYPE_BROWSER_VERSION
 from .faults import StateConflict
 from .issues import IssueLedger
 from .models import DocumentResult, ReviewResult
@@ -41,11 +40,11 @@ async def recheck_prototype(engine, rid, work, permit_key, failure):
         saved["report"] = engine.artifacts.put(report, "prototype-browser")
         store.checkpoint(rid, key, saved)
     report = engine.artifacts.json(saved["report"])
-    if (report.get("version") != PROTOTYPE_BROWSER_VERSION or report.get("source_hash") != binding["hash"]
+    if (report.get("version") != engine.browser_check_version() or report.get("source_hash") != binding["hash"]
             or report.get("actions_hash") != binding["actions_hash"]):
         raise StateConflict("Prototype recheck report no longer matches the approved contract or checker")
     if saved.get("phase") == "verified":
-        current = approvals.current(rid, work, actions, PROTOTYPE_BROWSER_VERSION)
+        current = approvals.current(rid, work, actions, engine.browser_check_version())
         if current and current["review"] == saved["review"] and current["visuals"] == report["results"]:
             return None
         raise StateConflict("Completed prototype evidence changed before task dispatch")
@@ -64,15 +63,15 @@ async def recheck_prototype(engine, rid, work, permit_key, failure):
         store.checkpoint(rid, key, saved)
     review = saved.get("review", {})
     evidence = {**binding, "review": review, "visuals": report["results"],
-                "browser_version": PROTOTYPE_BROWSER_VERSION}
+                "browser_version": engine.browser_check_version()}
     if report["error"] or not approvals.automation_current(evidence, binding, actions,
-            PROTOTYPE_BROWSER_VERSION, expected_routes=approvals.routes(work, actions)):
+            engine.browser_check_version(), expected_routes=approvals.routes(work, actions)):
         return FailureRecord.create(kind="review" if review else "evidence", component="prototype_verification",
             origin_id=failure.origin_id, task_id=failure.task_id, step="prototype_recheck",
             obligations=failure.obligations, evidence_refs=[key], evidence={"prototype_browser_report": saved["report"],
                 "review": review, "previous_failure": failure.model_dump()})
     require_binding()
-    record = approvals.publish(rid, work, actions, binding["human"], review, report["results"], PROTOTYPE_BROWSER_VERSION)
+    record = approvals.publish(rid, work, actions, binding["human"], review, report["results"], engine.browser_check_version())
     # Refresh only the prototype's issue scopes. Task acceptance still needs its
     # own independent review; passing production checks cannot close these issues.
     ledger = IssueLedger(store, engine.artifacts)

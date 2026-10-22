@@ -21,7 +21,7 @@ class SandboxRunner:
         self.test_unconfined = _test_unconfined
 
     def command(self, argv: list[str], cwd: Path, writable: list[Path],
-                readable: list[Path] | None = None, overlays: list[tuple[Path, Path]] | None = None, hidden: list[Path] | None = None) -> list[str]:
+                readable: list[Path] | None = None, overlays: list[tuple[Path, Path]] | None = None, hidden: list[Path] | None = None, cache_writes=None) -> list[str]:
         if self.test_unconfined:
             return argv
         if not Path(self.binary).is_file():
@@ -33,6 +33,20 @@ class SandboxRunner:
         for path in hidden or []:
             if path.exists():
                 cmd += ["--tmpfs", str(path.resolve())]
+        from .config import ConfigStore
+        from .shared_cache import SharedCache
+        cache = None
+        configuration = ConfigStore(self.root.parent)
+        if configuration.path.is_file():
+            cache = SharedCache(configuration)
+            if cache.enabled and cache.root.exists():
+                # Configured roots outside /home and /tmp must be hidden too.
+                # Only explicit object reads or installer cache writes reopen them.
+                cmd += ["--tmpfs", str(cache.root)]
+        if cache_writes:
+            if cache is None:
+                raise PolicyViolation("Shared cache writes require project configuration")
+            cache.validate_writes(cache_writes)
         mounts = [Path(sys.prefix).resolve(), cwd.resolve(), *(p.resolve() for p in readable or [])]
         implicit = [Path(sys.prefix).resolve()]
         direct = []
@@ -76,12 +90,27 @@ class SandboxRunner:
             if not path.is_file():
                 path.mkdir(parents=True, exist_ok=True)
             cmd += ["--bind", str(path.resolve()), str(path.resolve())]
+        for path in cache_writes or []:
+            cmd += ["--bind", str(path), str(path)]
         for source, destination in overlays or []:
             if source.absolute() != source.resolve() or not source.resolve().is_relative_to(self.root):
                 raise PolicyViolation("Provider session overlays must be owned by the controller")
             cmd += ["--bind", str(source.resolve()), str(destination)]
         cmd += ["--chdir", str(cwd.resolve()), "--", *argv]
         return cmd
+
+    def execution_reads(self, workspace):
+        """Checks/previews opt into their own registered immutable browser objects.
+
+        Installers deliberately do not mount old browser objects: a corrupt old
+        alias must not prevent npm ci or an isolated replacement installation.
+        """
+        from .config import ConfigStore
+        from .shared_cache import SharedCache
+        config = ConfigStore(self.root.parent)
+        if not config.path.is_file():
+            return []
+        return SharedCache(config).browser_reads(workspace)
 
     def probe(self) -> tuple[bool, str]:
         if self.test_unconfined:
@@ -103,15 +132,15 @@ class SandboxRunner:
         finally:
             shutil.rmtree(scratch)
 
-    async def spawn(self, argv, cwd, env, writable, readable=None, overlays=None, hidden=None):
+    async def spawn(self, argv, cwd, env, writable, readable=None, overlays=None, hidden=None, cache_writes=None):
         executable = shutil.which(argv[0], path=env.get("PATH", os.defpath))
         if not executable:
             raise PolicyViolation(f"Executable unavailable in selected environment: {argv[0]}")
         argv = [executable, *argv[1:]]
         env = {**env, "GIT_OPTIONAL_LOCKS": "0"}
-        command = await asyncio.to_thread(self.command, argv, cwd, writable, readable, overlays, hidden)
+        command = await asyncio.to_thread(self.command, argv, cwd, writable, readable, overlays, hidden, cache_writes)
         from .managed_process import spawn_managed
-        paths = [cwd, *writable, *(readable or []), *(p for pair in overlays or [] for p in pair)]
+        paths = [cwd, *writable, *(readable or []), *(cache_writes or []), *(p for pair in overlays or [] for p in pair)]
         return await spawn_managed(command, cwd, env, self.root, paths)
 
     async def stop(self, process):

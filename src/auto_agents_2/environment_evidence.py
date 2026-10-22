@@ -96,6 +96,8 @@ async def capture_resolution(manager, workspace, environment):
 
     facts = {"pip_lock": pip, "conda_explicit_lock": conda,
              "python": python, "conda_packages": conda_packages, "installation": installation}
+    if manager.config.load().shared_cache.enabled:
+        facts["shared_browsers"] = manager.shared.facts(workspace)
     sanitized = public(facts)
     return ArtifactStore(manager.root).put({"version": 1,
         "environment_hash": environment.fingerprint, "input_fingerprint": ready["fingerprint"],

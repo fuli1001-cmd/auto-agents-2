@@ -200,6 +200,7 @@ async def test_prototype_cancellation_closes_context_before_browser(tmp_path, mo
         async def close(self):
             closed.append('context')
     class Browser:
+        version = 'fixture-browser-version'
         async def close(self):
             closed.append('browser')
     async def context(*args):

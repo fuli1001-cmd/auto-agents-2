@@ -6,7 +6,6 @@ from pathlib import Path
 from .action_authority import STAGE_REENTRY_ACTIONS
 from .builds import verification_commands
 from .collection import policy_identity
-from .design import PROTOTYPE_BROWSER_VERSION
 from .errors import AA2Error, InvalidStructuredResponse
 from .evidence import assess_observation
 from .evidence_refs import controller_context_catalog
@@ -293,7 +292,7 @@ class RecoveryController:
 
     def _approval(self, rid, work):
         prototype = self.store.get(rid, "prototype", {})
-        approval = self.engine.approvals.current(rid, work, prototype.get("browser_actions", []), PROTOTYPE_BROWSER_VERSION) if prototype else None
+        approval = self.engine.approvals.current(rid, work, prototype.get("browser_actions", []), self.engine.browser_check_version()) if prototype else None
         return {"prototype_approval": self.engine.approvals.context(approval)} if approval else {}
 
     async def resume(self, rid):

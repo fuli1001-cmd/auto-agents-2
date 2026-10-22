@@ -17,7 +17,13 @@ from .artifacts import ArtifactStore
 from .config import ConfigStore
 from .dependencies import copy_execution_source, manifest_reference, pip_inputs
 from .diagnostics import DiagnosticOperation, current_diagnostics
-from .errors import AA2Error, DependencyResolutionError, RetryableInfrastructureError, ToolchainUnavailable
+from .errors import (
+    AA2Error,
+    DependencyResolutionError,
+    PolicyViolation,
+    RetryableInfrastructureError,
+    ToolchainUnavailable,
+)
 from .evidence import RUNTIME_CACHES
 from .installation_evidence import has_installation_record, save_installation
 from .logs import capture_diagnostics
@@ -25,6 +31,7 @@ from .progress import capture_output
 from .readview import sensitive_values
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
+from .shared_cache import SharedCache
 from .store import Store
 from .toolchain import require_executable
 from .util import SECRET, async_file_lock, atomic_write, contained, digest, identifier, scrub_text, write_json
@@ -102,6 +109,7 @@ class EnvironmentManager:
         self.root = config.project / ".aa2"
         self.store = Store(config.project)
         self.resources = ResourceManager(self.store, config.load().cleanup)
+        self.shared = SharedCache(config)
 
     async def ensure(self, workspace: Path, profile: str, environment_file="", requirements_file="") -> Environment:
         cfg = self.config.load().environment
@@ -211,8 +219,9 @@ class EnvironmentManager:
         except (OSError, ValueError, KeyError, RecursionError):
             return False
 
-    async def _command(self, argv, workspace, env, writes, reads=(), timeout=1800, *, conda_manifest=False, machine=False):
-        process = await self.sandbox.spawn(argv, workspace, env, writes, list(reads))
+    async def _command(self, argv, workspace, env, writes, reads=(), timeout=1800, *, conda_manifest=False, machine=False, cache_writes=()):
+        options = {"cache_writes": list(cache_writes)} if cache_writes else {}
+        process = await self.sandbox.spawn(argv, workspace, env, [p for p in writes if p not in cache_writes], list(reads), **options)
         try:
             async with asyncio.timeout(timeout):
                 if machine:
@@ -248,6 +257,11 @@ class EnvironmentManager:
             await self.sandbox.stop(process)
 
     async def _prepare(self, prefix, ready, fingerprint, profile, conda_file, pip_file, workspace, dependencies, local, inputs=None):
+        async with self.shared.downloads(("conda", "pip")) as caches:
+            return await self._prepare_cached(prefix, ready, fingerprint, profile, conda_file, pip_file,
+                                              workspace, dependencies, local, inputs, caches)
+
+    async def _prepare_cached(self, prefix, ready, fingerprint, profile, conda_file, pip_file, workspace, dependencies, local, inputs, caches):
         with DiagnosticOperation(self.store, self.resources, "prepare/" + str(prefix)) as operation:
             cfg = self.config.load().environment
             from .resolution import load_resolution, save_resolution
@@ -257,16 +271,19 @@ class EnvironmentManager:
             if prefix.exists():
                 shutil.rmtree(prefix)
             prefix.mkdir(parents=True)
-            cache = self.root / "cache/conda"
+            cache = caches.get("conda", self.root / "cache/conda")
             cache.mkdir(parents=True, exist_ok=True)
             run = self.store.current(unfinished=True)
-            self.resources.register(cache, "cache", run["id"] if run else None)
+            if not caches:
+                self.resources.register(cache, "cache", run["id"] if run else None)
+            else:
+                self.store.event(run["id"] if run else None, "cache.downloads", {"paths": {k: str(v) for k, v in caches.items()}})
             records = self.root / "environment-records" / fingerprint
             with self.resources.temporary("environment") as scratch:
                 environment = Environment(prefix, fingerprint)
                 env = environment.variables(scratch)
                 env.pop("CONDA_PREFIX", None)
-                env.update(CONDA_PKGS_DIRS=str(cache), PIP_CACHE_DIR=str(scratch / "pip"), CONDA_ALWAYS_COPY="true")
+                env.update(CONDA_PKGS_DIRS=str(cache), PIP_CACHE_DIR=str(caches.get("pip", scratch / "pip")), CONDA_ALWAYS_COPY="true")
                 replay_lock = resolution_record is not None
                 saved_pip, saved_conda = scratch / "saved-pip.lock", scratch / "saved-conda.lock"
                 if replay_lock:
@@ -286,7 +303,7 @@ class EnvironmentManager:
                 if records.exists():
                     reads.append(records)
                 await self._command(argv, workspace, env, [prefix, cache, scratch], reads,
-                                    conda_manifest=bool(conda_file) and not replay_lock)
+                                    conda_manifest=bool(conda_file) and not replay_lock, cache_writes=list(caches.values()))
                 install_workspace = workspace
                 if local:
                     # Editable bindings live in this private environment and never point into another task.
@@ -304,7 +321,7 @@ class EnvironmentManager:
                     log_start = len(operation.logs)
                     await self._command([str(prefix / "bin/python"), "-m", "pip", "install", "--report", str(report_path),
                                          "--verbose", "-r", str(pip_file), *constraints],
-                                        install_workspace, env, [prefix, scratch], [prefix, pip_file.parent, *reads])
+                                        install_workspace, env, [prefix, scratch], [prefix, pip_file.parent, *reads], cache_writes=list(caches.values()))
                     installation_logs = operation.logs[log_start:]
                 await self._command([str(prefix / "bin/python"), "-m", "pip", "check"],
                                     workspace, env, [scratch], [prefix], timeout=60)
@@ -332,15 +349,24 @@ class EnvironmentManager:
                                    "integrity": self.integrity(prefix)})
 
     async def install_node(self, workspace: Path, environment: Environment, *, frozen: bool = False):
+        if not (workspace / "package.json").is_file():
+            return
+        async with self.shared.downloads(("npm",)) as caches:
+            return await self._install_node_cached(workspace, environment, frozen=frozen, caches=caches)
+
+    async def _install_node_cached(self, workspace: Path, environment: Environment, *, frozen: bool, caches):
         with DiagnosticOperation(self.store, self.resources, "node/" + str(workspace)):
             if not (workspace / "package.json").is_file():
                 return
             if any((workspace / p).exists() for p in ("pnpm-lock.yaml", "yarn.lock")):
                 raise AA2Error("首期 Node 安装器使用 npm；已有 pnpm/yarn 锁文件需要对应安装器，不能自动改写包管理器")
-            package_cache = self.root / "cache/npm"
+            package_cache = caches.get("npm", self.root / "cache/npm")
             package_cache.mkdir(parents=True, exist_ok=True)
             run = self.store.current(unfinished=True)
-            self.resources.register(package_cache, "cache", run["id"] if run else None)
+            if not caches:
+                self.resources.register(package_cache, "cache", run["id"] if run else None)
+            else:
+                self.store.event(run["id"] if run else None, "cache.downloads", {"paths": {k: str(v) for k, v in caches.items()}})
             npm = str(environment.prefix / "bin/npm")
             if not Path(npm).exists():
                 raise ToolchainUnavailable("project npm", "missing", "在所选项目环境中恢复锁定的 Node/npm 工具链")
@@ -357,14 +383,14 @@ class EnvironmentManager:
                     staging.mkdir()
                     copy_execution_source(workspace, staging)
                     await self._command([npm, "install", "--package-lock-only", "--ignore-scripts"], staging,
-                                        variables, [scratch, package_cache], [environment.prefix], timeout=900)
+                                        variables, [scratch, package_cache], [environment.prefix], timeout=900, cache_writes=list(caches.values()))
                     lock_inputs(workspace, staging / "package-lock.json")
                     atomic_write(lock, (staging / "package-lock.json").read_bytes(), 0o644)
                 dependency_inputs += lock_inputs(workspace, lock)
                 locked_inputs = digest([dependency_inputs, lock.read_bytes().hex()])
                 modules = workspace / "node_modules"
                 marker = self.root / "node-records" / (digest(str(workspace)) + ".json")
-                identity = digest(["node-install-v3", environment.fingerprint, dependency_inputs,
+                identity = digest(["node-install-v4/shared=" + str(self.shared.root) if self.shared.enabled else "node-install-v3", environment.fingerprint, dependency_inputs,
                                    self.config.load().environment.playwright_browsers,
                                    (workspace / "package.json").read_text(), lock.read_text()])
                 try:
@@ -374,11 +400,17 @@ class EnvironmentManager:
                 if not isinstance(installed, dict):
                     installed = {}
                 actual = digest(input_entry(modules, modules, excluded=RUNTIME_CACHES)) if modules.exists() else ""
-                if installed.get("fingerprint") == identity and installed.get("integrity") == actual:
+                browsers_valid = True
+                if self.shared.enabled and (modules / "playwright/cli.js").is_file():
+                    try:
+                        browsers_valid = bool(self.shared.browser_reads(workspace))
+                    except (OSError, ValueError, KeyError, PolicyViolation):
+                        browsers_valid = False
+                if installed.get("fingerprint") == identity and installed.get("integrity") == actual and browsers_valid:
                     if not frozen:
                         await self.prepare_generated_types(workspace, environment)
                     return
-                await self._command([npm, "ci"], workspace, variables, [modules, scratch, package_cache], [environment.prefix], timeout=900)
+                await self._command([npm, "ci"], workspace, variables, [modules, scratch, package_cache], [environment.prefix], timeout=900, cache_writes=list(caches.values()))
                 if digest([node_dependency_inputs(workspace) + lock_inputs(workspace, lock), lock.read_bytes().hex()]) != locked_inputs:
                     raise AA2Error("Npm installation inputs changed; installed files retained for reconciliation")
                 await self.prepare_node_browsers(workspace, environment)
@@ -392,6 +424,9 @@ class EnvironmentManager:
         Installation precedes the Node readiness marker. Browser binaries are part
         of the same immutable execution-input identity as the installed packages.
         """
+        if self.shared.enabled:
+            from .browser_cache import BrowserCache
+            return await BrowserCache(self).node(workspace, environment)
         cli = workspace / "node_modules/playwright/cli.js"
         if not cli.is_file():
             return
