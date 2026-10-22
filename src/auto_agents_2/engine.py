@@ -39,6 +39,7 @@ from .errors import (
     ProviderError,
     RecoveryPathExhausted,
     RetryableInfrastructureError,
+    ToolchainUnavailable,
     VerificationPreparationError,
 )
 from .evidence import CHECKER_VERSION, invocation_identity, reusable
@@ -94,6 +95,7 @@ from .source_history import SourceHistory
 from .store import Store
 from .task_baselines import refresh_task_baseline
 from .test_reports import test_runner
+from .toolchain import ToolchainPreflight
 from .util import atomic_write, digest, file_lock, identifier, scrub_text
 from .verification import VerificationRefreshNeeded, VerificationService, passed, verification_operation
 from .workspace import (
@@ -136,6 +138,7 @@ class WorkflowEngine:
         self.patch_repair = PatchRepairService(self)
         self.resources = ResourceManager(self.store, cfg.cleanup)
         self.environments = EnvironmentManager(self.config, self.sandbox)
+        self.toolchain = ToolchainPreflight(self.config, self.sandbox)
         self.verifier = VerificationService(self.store.root, self.sandbox, self.resources)
         self.delivery = DeliveryCoordinator(self.store, self.workspaces, self.resources, self.environments,
                                             self._reintegrate_delivery, self._runtime_checks)
@@ -201,9 +204,15 @@ class WorkflowEngine:
                 if not task.cancelled() and task.exception() is not None:
                     owner.cancel()
             collector.add_done_callback(supervise_monitor)
+            preflight_complete = False
             try:
                 while True:
                     try:
+                        if not preflight_complete:
+                            report = await self.toolchain.check()
+                            self.store.checkpoint(rid, "environment/preflight", report)
+                            self.store.event(rid, "environment.preflight_passed", report)
+                            preflight_complete = True
                         if self.store.get(rid, "recovery/active"):
                             await self.recovery.resume(rid)
                             if self.store.get(rid, "recovery/active"):
@@ -232,6 +241,8 @@ class WorkflowEngine:
                     except HumanIntervention as exc:
                         await self._wait_prerequisite(rid, exc)
                     except Exception as exc:
+                        if isinstance(exc, ToolchainUnavailable):
+                            self.store.checkpoint(rid, "environment/preflight-failure", exc.report or exc.record())
                         boundary = known_exception(exc, self.store.run(rid)["stage"])
                         if boundary:
                             await self._wait_prerequisite(rid, boundary)

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -25,6 +24,7 @@ from .requirements import validate_requirements_text
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
 from .store import Store
+from .toolchain import ToolchainPreflight
 from .util import file_lock, write_json
 from .workspace import WorkspaceManager
 
@@ -409,8 +409,9 @@ def doctor(project: Project = Path("."), live: bool = False):
         config = configuration(project)
         cfg, store = config.load(), Store(project)
         runner = SandboxRunner(store.root, cfg.sandbox_binary)
-        sandbox_ok, explanation = runner.probe()
-        checks = {"sandbox": {"ok": sandbox_ok, "detail": explanation}, "conda": bool(shutil.which(cfg.environment.conda)), "providers": {}}
+        preflight = ToolchainPreflight(config, runner).inspect()
+        checks = {"toolchain": preflight, "sandbox": preflight["checks"]["sandbox"],
+                  "conda": preflight["checks"]["conda"]["ok"], "providers": {}}
         for name in cfg.providers:
             try:
                 effective = config.resolve("review", name)
@@ -422,8 +423,8 @@ def doctor(project: Project = Path("."), live: bool = False):
             with file_lock(store.root / "controller.lock", blocking=False):
                 if store.current(unfinished=True):
                     raise IncompleteIteration("请先完成当前迭代，再执行 live doctor")
-                if not sandbox_ok:
-                    raise AA2Error("Sandbox probe must pass before live checks")
+                if not preflight["ok"]:
+                    raise AA2Error("Toolchain preflight must pass before live checks")
                 run_record = store.admit("doctor://live", cfg.model_dump(mode="json"))
                 try:
                     result = asyncio.run(ProviderRouter(config, store, runner).invoke(
@@ -438,7 +439,7 @@ def doctor(project: Project = Path("."), live: bool = False):
                     resources = ResourceManager(store, cfg.cleanup)
                     resources.release_run(run_record["id"])
                     resources.collect()
-        if not sandbox_ok:
+        if not preflight["ok"]:
             raise typer.Exit(1)
     except AA2Error as exc:
         fail(exc)

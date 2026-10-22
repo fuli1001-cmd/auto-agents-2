@@ -17,7 +17,7 @@ from .artifacts import ArtifactStore
 from .config import ConfigStore
 from .dependencies import copy_execution_source, manifest_reference, pip_inputs
 from .diagnostics import DiagnosticOperation, current_diagnostics
-from .errors import AA2Error, DependencyResolutionError, RetryableInfrastructureError
+from .errors import AA2Error, DependencyResolutionError, RetryableInfrastructureError, ToolchainUnavailable
 from .evidence import RUNTIME_CACHES
 from .installation_evidence import has_installation_record, save_installation
 from .logs import capture_diagnostics
@@ -26,6 +26,7 @@ from .readview import sensitive_values
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
 from .store import Store
+from .toolchain import require_executable
 from .util import SECRET, async_file_lock, atomic_write, contained, digest, identifier, scrub_text, write_json
 from .workspace import files, input_entry, tree_hash
 
@@ -252,6 +253,7 @@ class EnvironmentManager:
             from .resolution import load_resolution, save_resolution
             records = self.root / "environment-records" / fingerprint
             resolution_record = load_resolution(records) if not local else None
+            conda = require_executable("conda", cfg.conda)
             if prefix.exists():
                 shutil.rmtree(prefix)
             prefix.mkdir(parents=True)
@@ -259,9 +261,6 @@ class EnvironmentManager:
             cache.mkdir(parents=True, exist_ok=True)
             run = self.store.current(unfinished=True)
             self.resources.register(cache, "cache", run["id"] if run else None)
-            conda = shutil.which(cfg.conda)
-            if not conda:
-                raise AA2Error("Conda not found")
             records = self.root / "environment-records" / fingerprint
             with self.resources.temporary("environment") as scratch:
                 environment = Environment(prefix, fingerprint)
@@ -312,7 +311,7 @@ class EnvironmentManager:
                 identity = await self._command([str(prefix / "bin/python"), "-c", "import sys; print(sys.prefix)"],
                                                workspace, env, [scratch], [prefix], timeout=30, machine=True)
                 if Path(identity.strip()).resolve() != prefix.resolve():
-                    raise AA2Error("Environment interpreter identity mismatch")
+                    raise ToolchainUnavailable("project Python", "prefix_mismatch", "保留该环境并修复解释器前缀；不能改用系统 Python")
                 frozen = await self._command([str(prefix / "bin/python"), "-m", "pip", "freeze"], workspace, env, [scratch], [prefix], timeout=30, machine=True)
                 explicit = await self._command([conda, "list", "--explicit", "-p", str(prefix)], workspace, env,
                                                [scratch], [prefix, *reads], timeout=30, machine=True)
@@ -344,7 +343,7 @@ class EnvironmentManager:
             self.resources.register(package_cache, "cache", run["id"] if run else None)
             npm = str(environment.prefix / "bin/npm")
             if not Path(npm).exists():
-                raise AA2Error("Node runtime is missing from the selected project environment")
+                raise ToolchainUnavailable("project npm", "missing", "在所选项目环境中恢复锁定的 Node/npm 工具链")
             dependency_inputs = node_dependency_inputs(workspace)
             from .node_inputs import lock_inputs
             lock = workspace / "package-lock.json"

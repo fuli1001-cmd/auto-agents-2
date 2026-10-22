@@ -19,6 +19,18 @@ class ConfigurationError(AA2Error):
     code = "CONFIGURATION_ERROR"
 
 
+class ToolchainUnavailable(AA2Error):
+    """A concrete execution prerequisite, not a product defect or a retry permit."""
+    code = "TOOLCHAIN_UNAVAILABLE"
+
+    def __init__(self, tool, status, action, report=None):
+        self.tool, self.status, self.action, self.report = tool, status, action, report
+        super().__init__(f"工具链预检未通过：{tool} ({status})。{action}")
+
+    def record(self):
+        return {"tool": self.tool, "status": self.status, "action": self.action}
+
+
 class DependencyResolutionError(AA2Error):
     """The resolver rejected a workspace dependency manifest."""
 

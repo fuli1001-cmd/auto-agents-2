@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from .errors import AA2Error, ConfigurationError, PolicyViolation, ProviderError
+from .errors import AA2Error, ConfigurationError, PolicyViolation, ProviderError, ToolchainUnavailable
 from .models import Record
 
 
@@ -60,6 +60,10 @@ def known_exception(error, phase):
     """Typed external boundaries only. Unknown AA2Error is an internal defect."""
     if isinstance(error, HumanIntervention):
         return error
+    if isinstance(error, ToolchainUnavailable):
+        return HumanIntervention(HumanRequirement(kind="external_input", reason=str(error),
+            action=error.action, resume_condition="在相同执行环境重新预检通过；回答本身不会跳过工具链核对。"),
+            reason_code=error.code, phase=phase)
     if isinstance(error, (ConfigurationError, ProviderError)):
         return HumanIntervention(HumanRequirement(kind="external_input",
             reason=f"外部配置或 provider 尚不可用（{error.code}）。",

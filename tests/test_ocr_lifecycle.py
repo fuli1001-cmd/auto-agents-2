@@ -227,7 +227,10 @@ def test_cancel_revalidates_after_acquiring_controller_lock(tmp_path, monkeypatc
 
 
 def test_live_doctor_owns_controller_lock(tmp_path, monkeypatch):
-    _, store = configured(tmp_path)
+    config, store = configured(tmp_path)
+    body = config.load().model_dump(mode="json")
+    body["environment"]["conda"] = sys.executable
+    write_json(config.path, body)
     monkeypatch.setattr(SandboxRunner, "probe", lambda self: (True, "fixture"))
     async def invoke(*args, **kwargs):
         with pytest.raises(BusyProject), file_lock(store.root / "controller.lock", blocking=False):

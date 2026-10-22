@@ -84,6 +84,11 @@ def engine(project, agent):
     sandbox = SandboxRunner(project / ".aa2", _test_unconfined=True)
     result = WorkflowEngine(project, agent=agent, sandbox=sandbox)
 
+    async def fixture_preflight():
+        return {"version": 1, "ok": True, "checks": {}, "fixture": True}
+
+    result.toolchain.check = fixture_preflight
+
     async def environment(*args, **kwargs):
         return Environment(Path(sys.prefix), "test-environment")
 
