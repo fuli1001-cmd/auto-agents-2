@@ -866,14 +866,15 @@ class RecoveryController:
                 journal["previous_plan"], journal["patch"], journal["plan"], journal["review"],
                 journal.get("controller_stage_contract"))
         if patch.contract_corrections:
-            journal["version"] = 2
+            journal["version"] = 3
             if plan.mode == "verification_only":
                 journal["contract_coverage"] = {"verified": coverage_verified,
                     "checks_hash": digest(self.store.get(rid, "coverage_checks"))}
             journal["correction_request"] = recovery_context["correction_request"]
-            journal["contract_review_context"] = {name: review_context[name] for name in (
-                "controller_correction_contract", "correction_request", "original_capture",
-                "original_requirements", "specification", "previous_plan", "failure", "design", "source_history")}
+            # Replay the exact role-specific inputs admitted above. In particular,
+            # author.plan is accepted fact; reviewer.plan/patch are proposals.
+            journal["contract_author_context"] = patch_context
+            journal["contract_review_context"] = review_context
             journal["contract_review_binding"] = contract_review_binding(journal)
         self.store.checkpoint(rid, journal_key, journal)
         self.store.activate_plan_patch(rid, identity)

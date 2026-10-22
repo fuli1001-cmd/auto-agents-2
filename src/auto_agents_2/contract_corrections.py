@@ -8,6 +8,7 @@ from pydantic import Field
 
 from .errors import AA2Error
 from .evidence_refs import controller_context_catalog
+from .execution_stages import current_stage_contract
 from .models import Command, Record, ReviewResult
 from .stage_responsibilities import current_correction_contract
 from .util import digest
@@ -156,15 +157,67 @@ def validate_contract_review(patch, review, context=None):
 
 
 def contract_review_binding(journal):
-    return digest(['contract-correction-review-v1', *[journal.get(k) for k in (
-        'base_revision', 'previous_plan', 'patch', 'plan', 'review', 'affected', 'reopen',
-        'correction_request', 'contract_review_context', 'contract_coverage')]])
+    fields = ('base_revision', 'previous_plan', 'patch', 'plan', 'review', 'affected', 'reopen',
+              'correction_request', 'contract_review_context', 'contract_coverage')
+    if journal.get('version') == 3:
+        return digest(['contract-correction-review-v2', *[journal.get(k) for k in fields],
+                       journal.get('contract_author_context')])
+    return digest(['contract-correction-review-v1', *[journal.get(k) for k in fields]])
 
 
-def validate_contract_journal(journal, get):
+def legacy_contract_contexts(journal, journal_id, records, read_artifact):
+    """Recover v2's omitted roots only from its frozen inputs, never today's workspace.
+
+    The old journal kept a review subset. Its separate recovery context and
+    content-addressed presentation receipts can prove the missing supplied roots.
+    Unsupported/unretained roots stay unavailable; this is not a new review.
+    """
+    if journal.get('version') != 2 or journal.get('contract_review_binding') != contract_review_binding(journal):
+        raise AA2Error('Legacy contract correction review binding changed')
+    saved = journal.get('contract_review_context', {})
+    base = records.get('recovery/patch-context/' + journal_id)
+    if (not isinstance(base, dict) or not base
+            or any(base[name] != saved[name] for name in base.keys() & saved.keys())):
+        raise AA2Error('Legacy contract correction lost its frozen recovery inputs')
+    author = {**saved, **base, 'plan': journal['previous_plan']}
+    author.pop('previous_plan', None)
+    reviewer = {**saved, **base, 'plan': journal['plan'], 'patch': journal['patch'],
+                'affected': journal['affected'], 'reopen': journal['reopen'], 'review_kind': 'plan_patch'}
+    for operation, context, result in (
+            ('recovery/patch/' + journal_id, author, journal['patch']),
+            ('recovery/patch-review/' + journal_id, reviewer, journal['review'])):
+        invocation = records.get('invocation/' + operation, {})
+        if invocation.get('result') != result:
+            raise AA2Error('Legacy contract correction lacks its completed invocation receipt')
+        proven = False
+        for name, receipt in records.items():
+            if not name.startswith('presentation/' + operation + '/'):
+                continue
+            try:
+                presentation = read_artifact(receipt['artifact'])
+            except (OSError, ValueError, KeyError):
+                continue
+            if not isinstance(presentation, dict) or presentation.get('purpose') != 'plan_patch':
+                continue
+            identities = {(row.get('source_ref'), row.get('identity'))
+                          for row in presentation.get('selections', [])
+                          if isinstance(row, dict) and row.get('presentation') != 'not_selected'}
+            payload = presentation.get('payload', {})
+            # These hashes describe original root values, before model projection.
+            # The projector copies review_kind directly without a selection row.
+            if all((root, digest(value)) in identities or root in payload and payload[root] == value
+                   for root, value in context.items()):
+                proven = True
+                break
+        if not proven:
+            raise AA2Error('Legacy contract correction frozen input evidence is missing or changed')
+    return author, reviewer
+
+
+def validate_contract_journal(journal, get, *, legacy_contexts=None):
     """Re-evaluate the exact reviewed candidate before transactional activation."""
     if not journal.get('patch', {}).get('contract_corrections'):
-        if journal.get('version') == 2 or 'contract_review_binding' in journal or 'contract_review_context' in journal:
+        if journal.get('version') in {2, 3} or 'contract_review_binding' in journal or 'contract_review_context' in journal:
             raise AA2Error('Contract correction journal lost its explicit mapping')
         return
     from .models import PlanResult
@@ -174,13 +227,28 @@ def validate_contract_journal(journal, get):
     previous = PlanResult.model_validate(journal['previous_plan'])
     request = journal.get('correction_request', {})
     validate_correction_request(request, get, action='plan_patch')
-    context = journal.get('contract_review_context', {})
-    if (context.get('correction_request') != request
+    if journal.get('contract_review_binding') != contract_review_binding(journal):
+        raise AA2Error('Contract correction no longer matches its independently reviewed candidate')
+    if journal.get('version') == 3:
+        author = journal.get('contract_author_context', {})
+        context = journal.get('contract_review_context', {})
+    elif journal.get('version') == 2 and legacy_contexts is not None:
+        author, context = legacy_contexts
+    else:
+        raise AA2Error('Contract correction lacks separate frozen author and review inputs')
+    if (author.get('plan') != journal['previous_plan']
             or context.get('previous_plan') != journal['previous_plan']
-            or context.get('original_capture') != get('capture')
-            or context.get('specification') != get('clarify')):
+            or context.get('plan') != journal['plan'] or context.get('patch') != journal['patch']
+            or any(view.get('correction_request') != request
+                   or view.get('original_capture') != get('capture')
+                   or view.get('specification') != get('clarify') for view in (author, context))
+            or any(author[name] != context[name] for name in author.keys() & context.keys()
+                   if name not in {'plan', 'evidence_reference_contract'})):
         raise AA2Error('Contract correction review lost its frozen original source bindings')
-    validate_contract_references(patch, context)
+    if any('controller_stage_contract' in view and not current_stage_contract(view['controller_stage_contract'])
+           for view in (author, context)):
+        raise AA2Error('Contract correction stage protocol changed before activation')
+    validate_contract_references(patch, author)
     validate_contract_review(patch, journal['review'], context)
     coverage_verified = False
     if previous.mode == 'verification_only':

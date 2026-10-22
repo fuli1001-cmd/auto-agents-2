@@ -273,8 +273,12 @@ class Store:
                 raise AA2Error("Plan activation CAS failed; preserving proposal and recovery snapshots")
             from .plan_revision import validate_timing_journal
             validate_timing_journal(journal)
-            from .contract_corrections import validate_contract_journal
-            validate_contract_journal(journal, rows.get)
+            from .contract_corrections import legacy_contract_contexts, validate_contract_journal
+            contexts = None
+            if journal.get("version") == 2 and journal.get("patch", {}).get("contract_corrections"):
+                from .artifacts import ArtifactStore
+                contexts = legacy_contract_contexts(journal, journal_id, rows, ArtifactStore(self.root).json)
+            validate_contract_journal(journal, rows.get, legacy_contexts=contexts)
             self._put(db, rid, f"plan_revision/history/{revision}", {
                 "plan": rows["plan"], "tasks": {k: v for k, v in rows.items() if k.startswith(("develop/", "task_state/"))}})
             origins = dict(rows.get("task_origins", {}))
