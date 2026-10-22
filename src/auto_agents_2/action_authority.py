@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 from .faults import HumanRequirement, RecoveryRoute, route_failure
-
-GATES = ("clarify", "provider_research", "prototype", "design", "plan", "develop", "readme", "verify", "deliver")
-STAGE_REENTRY_ACTIONS = frozenset((*GATES[:4], "readme"))
+from .stage_responsibilities import GATES, STAGE_REENTRY_ACTIONS
 
 
 def transition_effects(action, plan):

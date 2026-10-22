@@ -164,6 +164,8 @@ class DesignDocuments:
             if prepared_before_hash(work, pending["prepared"]) != pending["before"]:
                 raise StateConflict("Design inputs changed before application; preserve user edits")
             try:
+                from .stage_responsibilities import validate_stage_writes
+                validate_stage_writes("design", pending["prepared"], DESIGN_SCOPES)
                 apply_prepared(work, pending["prepared"])
             except PolicyViolation as exc:
                 raise StateConflict("Design candidate changed during application; preserve user edits") from exc

@@ -6,6 +6,12 @@ from pathlib import Path
 from .action_authority import STAGE_REENTRY_ACTIONS
 from .builds import verification_commands
 from .collection import policy_identity
+from .contract_corrections import (
+    ContractPlanReview,
+    contract_review_binding,
+    validate_contract_references,
+    validate_contract_review,
+)
 from .errors import AA2Error, InvalidStructuredResponse
 from .evidence import assess_observation
 from .evidence_refs import controller_context_catalog
@@ -34,6 +40,7 @@ from .recovery import (
     implemented_candidate,
 )
 from .source_history import SourceHistory
+from .stage_responsibilities import correction_contract, correction_request, validate_correction_request
 from .util import digest
 from .workspace import git, prepared_before_hash, tree_hash
 
@@ -478,6 +485,18 @@ class RecoveryController:
         active["actor"] = (self.store.get(rid, active.get("permit", ""), {}) or {}).get("actor", "rule")
         self.store.checkpoint(rid, "recovery/active", active)
         policy.start(rid, active.get("permit"))
+        # Admission metadata never replaces the selected action or its existing permission.
+        request_key = "recovery/correction-request/" + digest([failure.id, active["attempt"], decision.action])
+        request = self.store.get(rid, request_key)
+        activated = decision.action == "plan_patch" and self.store.get(
+            rid, f"plan_revision/journal/{failure.id}/{active['attempt']}", {}).get("phase") == "activated"
+        if request is None and not activated:
+            request = correction_request(self.store, rid, action=decision.action, reason=decision.reason,
+                evidence_refs=decision.evidence_refs, permit=active.get("permit"))
+            self.store.checkpoint(rid, request_key, request)
+        if request and not activated:
+            validate_correction_request(request, lambda key: self.store.get(rid, key), action=decision.action)
+        active["correction_request"] = request
         if decision.action == "recheck":
             key = "recovery/rechecks/" + recheck_identity()
             reservation = {"failure": failure.id, "attempt": active["attempt"], "permit": active.get("permit")}
@@ -563,7 +582,7 @@ class RecoveryController:
         if decision.action in STAGE_REENTRY_ACTIONS:
             self._finish(rid, active, {}, replan=(decision.action, decision.reason))
             pending = self.store.get(rid, "replanning/pending")
-            self.store.checkpoint(rid, "replanning/pending", {**pending, "granted": True})
+            self.store.checkpoint(rid, "replanning/pending", {**pending, "granted": True, "correction_permit": active.get("permit")})
             await engine._resume_replan(rid)
             return
         if decision.action not in {"repair", "recheck"}:
@@ -732,7 +751,14 @@ class RecoveryController:
             targets = set(active["decision"].get("task_ids", []))
             if failure.task_id:
                 targets.add(failure.task_id)
-            recovery_context = {"controller_stage_contract": stage_contract(), "recovery_decision": active["decision"], "design": self.store.get(rid, "design"),
+            request = active.get("correction_request") or correction_request(self.store, rid,
+                action="plan_patch", reason=active["decision"]["reason"], evidence_refs=failure.evidence_refs,
+                permit=active.get("permit"))
+            capture = self.store.get(rid, "capture")
+            recovery_context = {"controller_correction_contract": correction_contract(),
+                                "correction_request": request, "original_capture": capture,
+                                "original_requirements": engine.artifacts.read(capture["artifact"]) if capture else None,
+                                "controller_stage_contract": stage_contract(), "recovery_decision": active["decision"], "design": self.store.get(rid, "design"),
                                 "source_history": SourceHistory(engine).collect_plan(
                                     rid, work, plan, task_ids=targets or None)}
             # Author and reviewer must share the same selected recovery objective
@@ -741,6 +767,9 @@ class RecoveryController:
         if ("controller_stage_contract" in recovery_context
                 and not current_stage_contract(recovery_context["controller_stage_contract"])):
             raise StateConflict("Controller stage contract changed; preserve the frozen plan amendment for reconciliation")
+        if recovery_context.get("correction_request"):
+            validate_correction_request(recovery_context["correction_request"],
+                lambda key: self.store.get(rid, key), action="plan_patch")
         patch_context = {**recovery_context, "plan_patch": True, "base_revision": revision,
             "plan": plan.model_dump(), "failure": failure.model_dump(), "task_origins": self.store.task_origin_state(rid),
             "specification": self.store.get(rid, "clarify"), "project": engine.contexts.build(work)}
@@ -755,6 +784,7 @@ class RecoveryController:
         unchanged({"patch": patch.model_dump()})
         try:
             validate_timing_references(patch, patch_context)
+            validate_contract_references(patch, patch_context)
             coverage_verified = False
             if plan.mode == "verification_only":
                 from .models import IntakeResult
@@ -804,7 +834,7 @@ class RecoveryController:
             "project": engine.contexts.build(work)}
         review_context["evidence_reference_contract"] = controller_context_catalog(
             review_context, provenance={"patch": "proposal", "plan": "proposal"}).contract(review_context)
-        review = await engine._invoke("review", review_context, TimingPlanReview if patch.timing_corrections else ReviewResult,
+        review = await engine._invoke("review", review_context, ContractPlanReview if patch.contract_corrections else TimingPlanReview if patch.timing_corrections else ReviewResult,
             work, rid, "recovery/patch-review/" + identity, fresh=True)
         unchanged({"patch": patch.model_dump(), "review": review.model_dump()})
         if not review.approved:
@@ -814,6 +844,7 @@ class RecoveryController:
             return False
         try:
             validate_timing_review(patch, review, review_context)
+            validate_contract_review(patch, review, review_context)
         except AA2Error as exc:
             self._reject_patch(rid, active, failure, identity, {"patch": patch.model_dump(),
                 "patch_review": review.model_dump(), "validation_error": str(exc)})
@@ -834,6 +865,16 @@ class RecoveryController:
             journal["timing_review_binding"] = timing_review_binding(
                 journal["previous_plan"], journal["patch"], journal["plan"], journal["review"],
                 journal.get("controller_stage_contract"))
+        if patch.contract_corrections:
+            journal["version"] = 2
+            if plan.mode == "verification_only":
+                journal["contract_coverage"] = {"verified": coverage_verified,
+                    "checks_hash": digest(self.store.get(rid, "coverage_checks"))}
+            journal["correction_request"] = recovery_context["correction_request"]
+            journal["contract_review_context"] = {name: review_context[name] for name in (
+                "controller_correction_contract", "correction_request", "original_capture",
+                "original_requirements", "specification", "previous_plan", "failure", "design", "source_history")}
+            journal["contract_review_binding"] = contract_review_binding(journal)
         self.store.checkpoint(rid, journal_key, journal)
         self.store.activate_plan_patch(rid, identity)
         # A derived document is written only after activation. Startup materializes
@@ -844,7 +885,7 @@ class RecoveryController:
     def _reject_patch(self, rid, active, failure, identity, evidence):
         key = "recovery/patch-rejection/" + identity
         self.store.checkpoint(rid, key, evidence)
-        if evidence.get("patch", {}).get("timing_corrections"):
+        if evidence.get("patch", {}).get("timing_corrections") or evidence.get("patch", {}).get("contract_corrections"):
             basis = self.store.get(rid, "recovery/patch-progress-basis/" + identity)
             if basis:
                 self.engine.recovery_policy.progress.record(rid, failure.origin_id, "plan_patch", basis,

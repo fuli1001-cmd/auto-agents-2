@@ -3,6 +3,7 @@ import re
 from dataclasses import dataclass, field
 
 from .execution_stages import current_stage_contract
+from .stage_responsibilities import current_correction_contract
 from .util import digest
 
 
@@ -51,12 +52,12 @@ class ReferenceCatalog:
 
     def contract(self, roots):
         return {"version": 5, "roots": sorted(roots), "observation_id": self.observation_id,
-                "protocol_roots": ["controller_stage_contract"] if self.protocol else [],
+                "protocol_roots": sorted({self.entries[ref].path.split(".")[0] for ref in self.protocol}),
                 "provenance": self.provenance,
                 "syntax": "Cite an existing dot path with [index], a supplied artifact hash or a controller-indexed alias. "
                           "Root paths are valid. Proposal paths describe unverified suggestions only; "
                           "include a factual controller record when proposing an action. Controller protocols support workflow "
-                          "timing only, not project facts or acceptance. Citations never establish acceptance."}
+                          "timing and stage ownership only, not project facts or acceptance. Citations never establish acceptance."}
 
 
 def reference_catalog(value, *, prefixes=("",), provenance=None, observation_id=""):
@@ -93,6 +94,9 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
     protocol = context.get("controller_stage_contract")
     if "controller_stage_contract" in context and not current_stage_contract(protocol):
         context.pop("controller_stage_contract")
+    correction = context.get("controller_correction_contract")
+    if "controller_correction_contract" in context and not current_correction_contract(correction):
+        context.pop("controller_correction_contract")
     origins = {}
     failure = context.get("failure") or {}
     if isinstance(failure, dict):
@@ -112,6 +116,10 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
     if current_stage_contract(protocol) and origins.get("controller_stage_contract") != "proposal":
         for alias, entry in list(refs.entries.items()):
             if entry.path == "controller_stage_contract" or entry.path.startswith("controller_stage_contract."):
+                refs.add(alias, entry.path, "controller_protocol", status="protocol")
+    if current_correction_contract(correction) and origins.get("controller_correction_contract") != "proposal":
+        for alias, entry in list(refs.entries.items()):
+            if entry.path == "controller_correction_contract" or entry.path.startswith("controller_correction_contract."):
                 refs.add(alias, entry.path, "controller_protocol", status="protocol")
     registered = list(aliases)
     if isinstance(failure, dict):

@@ -65,6 +65,8 @@ Ground a proposed action or timing correction in separate actual project evidenc
 Only supplied current records are referenceable; a prompt heading does not mint an evidence ID.
 """
     if purpose == 'plan_patch':
+        from .contract_corrections import CONTRACT_CORRECTION_INSTRUCTIONS
+        text += CONTRACT_CORRECTION_INSTRUCTIONS
         text += """
 For a proven scheduling defect in accepted task.acceptance, use PlanPatch.timing_corrections.
 Each item identifies task_id, zero-based acceptance_index, exact previous text, full replacement,
@@ -79,7 +81,7 @@ Align document and descriptions with the corrected timing without hiding old obl
 If a separate scope/check change is necessary, request a separate ordinary amendment first.
 Never use timing_corrections to move an actual user-required prerequisite or missing source
 material out of the prerequisite stage. Unknown semantics require diagnosis or clarification.
-Without timing_corrections, the existing literal acceptance-preservation rule still applies.
+Without timing_corrections or explicit contract_corrections, literal acceptance preservation still applies.
 """
         if stage == 'review':
             text += """

@@ -92,6 +92,7 @@ from .resources import ResourceManager
 from .review_evidence import ReviewEvidence, consumer_key, review_consumer
 from .sandbox import SandboxRunner
 from .source_history import SourceHistory
+from .stage_responsibilities import prepare_reentry, validate_stage_writes
 from .store import Store
 from .task_baselines import refresh_task_baseline
 from .test_reports import test_runner
@@ -448,6 +449,10 @@ class WorkflowEngine:
 
     async def _resume_replan(self, rid):
         pending = await self._grant_replan(rid, self.store.get(rid, "replanning/pending"))
+        work = self.store.root / "worktrees" / rid / "integration"
+        if not work.is_dir():
+            work = self.project
+        pending = prepare_reentry(self.store, rid, pending, work)
         # Include already archived refs when recovering an interruption mid-archive.
         archived = self.archive_workers(rid, pending["generation"])
         self.store.supersede_questions(rid, f"replan-stalled/{pending['evaluation']}")
@@ -1115,6 +1120,7 @@ class WorkflowEngine:
             self.store.checkpoint(rid, key, pending)
         self._replan_contract(rid, "prototype_scope", True)
         if "fingerprint" not in pending:
+            validate_stage_writes("prototype", pending["prepared"], specification.prototype_paths or ["design/prototypes", "DESIGN.md"])
             apply_prepared(work, pending["prepared"])
             pending["fingerprint"] = self._prototype_hash(work)
             self.store.checkpoint(rid, key, pending)
@@ -1481,6 +1487,7 @@ class WorkflowEngine:
                     raise Replan("readme", str(exc)) from exc
                 docs = docs.model_copy(update={"files": files})
             self.store.checkpoint(rid, "candidate/readme", {"document": docs.model_dump(), "patch": patch})
+            validate_stage_writes("readme", patch, ["README.md", "docs", ".env.example"])
             apply_prepared(work, patch)
             self.store.checkpoint(rid, "readme", docs.model_dump())
         self._agent_instructions(work, plan)
@@ -1910,6 +1917,7 @@ class WorkflowEngine:
                     self._task_progress(rid, task, saved)
                     self.store.checkpoint(rid, key, saved)
                     raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="proposal", step="candidate"))
+                validate_stage_writes("develop", prepared, task.allowed_paths)
                 saved["patch"] = prepared
                 self.store.checkpoint(rid, key, saved)
                 apply_prepared(work, prepared)
@@ -2467,7 +2475,8 @@ class WorkflowEngine:
             try:
                 if pending.get("patch") is None:
                     changes, pending["patch"] = await self.patch_repair.prepare(rid, work, proposal.changes, scopes,
-                        stage="implement", context=context, operation=f"delivery-repair/{count}", contracts=contracts)
+                        stage="implement", context=context, operation=f"delivery-repair/{count}", contracts=contracts,
+                        artifact_owner="prototype" if contracts else "develop")
                     proposal = proposal.model_copy(update={"changes": changes})
                     pending["proposal"] = proposal.model_dump()
             except (PolicyViolation, PatchRepairExhausted) as exc:
@@ -2486,6 +2495,7 @@ class WorkflowEngine:
             self.store.checkpoint(rid, pending_key, pending)
             if pending.get("base_head", git(work, "rev-parse", "HEAD")) != git(work, "rev-parse", "HEAD"):
                 raise StateConflict("Delivery repair HEAD changed before publication; preserving user commits")
+            validate_stage_writes("prototype" if contracts else "develop", pending["patch"], scopes)
             apply_prepared(work, pending["patch"])
             pending["commit_intent"] = self.workspaces.checkpoint_intent(work, f"refs/aa2/{rid}/candidate")
             self.store.checkpoint(rid, pending_key, pending)

@@ -4,6 +4,7 @@ from .execution_stages import STAGE_CONTRACT_VERSION, current_stage_contract, st
 from .faults import StateConflict
 from .recovery import check_rows
 from .source_history import SourceHistory
+from .stage_responsibilities import correction_contract
 from .util import digest
 from .workspace import tree_hash
 
@@ -43,6 +44,10 @@ class RecoveryProgress:
         protocol = context.get('controller_stage_contract')
         if action == 'plan_patch' and current_stage_contract(protocol):
             materials['controller_stage_contract'] = protocol
+        if action == 'plan_patch':
+            materials['controller_correction_contract'] = correction_contract()
+            facts['observations'] = {name: evidence.get(name) for name in ('environment_error', 'candidate_error')}
+            facts['checks'] = check_rows(evidence)
         return digest([STAGE_CONTRACT_VERSION, action, source_hash, facts, materials])
 
     def record(self, rid, owner, action, basis, operation, outcome):
@@ -106,7 +111,7 @@ class RecoveryProgress:
             if saved and len(saved['operations']) >= NO_PROGRESS_LIMIT:
                 excluded[action] = {**saved, 'evidence_ref': key,
                     'reason': 'Two inconclusive diagnoses on identical facts' if action == 'diagnose' else
-                              'Two rejected timing-only amendments on identical facts',
+                              'Two rejected contract amendments on identical facts',
                     'resume_condition': 'New relevant source, plan, specification, design or supplied evidence; '
                                         'another wording, permission or invocation is not new evidence.'}
         return excluded

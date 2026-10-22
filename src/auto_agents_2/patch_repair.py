@@ -11,6 +11,7 @@ from .errors import (
     ReplacementMismatch,
 )
 from .models import Change, Record
+from .stage_responsibilities import validate_stage_writes
 from .util import digest
 from .workspace import prepare_changes, tree_hash
 
@@ -26,7 +27,7 @@ class PatchRepairService:
     def __init__(self, engine):
         self.engine = engine
 
-    async def prepare(self, rid, work, changes, scopes, *, stage, context, operation, contracts=False):
+    async def prepare(self, rid, work, changes, scopes, *, stage, context, operation, contracts=False, artifact_owner=None):
         """Return corrected proposals and a validated patch, without writing source.
 
         Only the failed replace's two text fields may change. All other operations,
@@ -34,6 +35,7 @@ class PatchRepairService:
         the caller. Prepared/applied patches must bypass this service on recovery.
         """
         engine = self.engine
+        validate_stage_writes(artifact_owner or stage, changes, scopes)
         original = [c.model_dump() for c in changes]
         key = "patch-repair/" + digest([operation, original, scopes, contracts,
                                         engine.store.get(rid, "replan_feedback")])
@@ -44,6 +46,7 @@ class PatchRepairService:
         current = [Change.model_validate(c) for c in state.get("candidate", original)]
         while True:
             try:
+                validate_stage_writes(artifact_owner or stage, current, scopes)
                 prepared = prepare_changes(work, current, scopes, protected=False, contracts=contracts)
             except ReplacementMismatch as exc:
                 failure = exc.details

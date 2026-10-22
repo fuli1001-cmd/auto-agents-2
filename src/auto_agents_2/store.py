@@ -273,6 +273,8 @@ class Store:
                 raise AA2Error("Plan activation CAS failed; preserving proposal and recovery snapshots")
             from .plan_revision import validate_timing_journal
             validate_timing_journal(journal)
+            from .contract_corrections import validate_contract_journal
+            validate_contract_journal(journal, rows.get)
             self._put(db, rid, f"plan_revision/history/{revision}", {
                 "plan": rows["plan"], "tasks": {k: v for k, v in rows.items() if k.startswith(("develop/", "task_state/"))}})
             origins = dict(rows.get("task_origins", {}))
@@ -510,6 +512,11 @@ class Store:
             body["replans"] = pending["generation"] + 1
             records = {r["key"]: json.loads(r["data"]) for r in db.execute(
                 "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
+            request = pending.get("correction_request")
+            if request:
+                from .stage_responsibilities import validate_correction_request
+                validate_correction_request(request, records.get, action=(
+                    "plan_patch" if pending["stage"] == "plan" else pending["stage"]))
             removed = {key: value for key, value in records.items() if any(
                 key == prefix + stage or key.startswith(prefix + stage + "/")
                 for stage in stages for prefix in ("", "candidate/", "invocation/", "provider-result/"))}
@@ -527,6 +534,9 @@ class Store:
                 db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR substr(key,1,?)=?)",
                            (rid, stage, len(stage) + 1, stage + "/"))
             feedback = {"stage": pending["stage"], "reason": pending["reason"], "recovery_refs": recovery_refs}
+            if request:
+                feedback.update(correction_request=request, preserved_specification=records.get("clarify"),
+                                preserved_plan=records.get("plan"))
             if pending.get("verification_recheck"):
                 feedback["verification_recheck"] = pending["verification_recheck"]
             db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",

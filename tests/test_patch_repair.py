@@ -54,26 +54,29 @@ async def prepare(workflow, rid, work, changes, *, stage="implement", scopes=Non
 @pytest.mark.parametrize("stage", ["prototype", "readme", "implement"])
 @pytest.mark.parametrize("mode", ["not_found", "empty"])
 async def test_correction_preserves_batch_and_requires_exact_revalidation(tmp_path, stage, mode):
+    prefix = {"prototype": "design/prototypes/", "readme": "docs/", "implement": ""}[stage]
+    app, other = prefix + "app.txt", prefix + "other.txt"
+    (tmp_path / app).parent.mkdir(parents=True, exist_ok=True)
     original = "one=old\ntwo=old\n"
-    (tmp_path / "app.txt").write_text(original)
-    changes = [replacement("app.txt", "one=old", "one=middle"),
-               replacement("app.txt", {"not_found": "one = middle", "empty": ""}[mode], "done"),
-               replacement("other.txt", "before", "after")]
-    (tmp_path / "other.txt").write_text("before")
+    (tmp_path / app).write_text(original)
+    changes = [replacement(app, "one=old", "one=middle"),
+               replacement(app, {"not_found": "one = middle", "empty": ""}[mode], "done"),
+               replacement(other, "before", "after")]
+    (tmp_path / other).write_text("before")
     workflow, agent, rid = setup(tmp_path, [{"old_text": "one=middle", "content": "fixed=done"}])
-    repaired, patch = await prepare(workflow, rid, tmp_path, changes, stage=stage)
+    repaired, patch = await prepare(workflow, rid, tmp_path, changes, stage=stage, scopes=[app, other], contracts=stage == "prototype")
     assert len(agent.repairs) == 1
     assert agent.repairs[0][0] == stage
     assert agent.repairs[0][1]["patch_repair"]["failure"]["change_index"] == 1
     assert changes[0] == repaired[0] and changes[2] == repaired[2]
     assert repaired[1].path == changes[1].path and repaired[1].operation == "replace"
-    assert (tmp_path / "app.txt").read_text() == original
-    assert (tmp_path / "other.txt").read_text() == "before"
+    assert (tmp_path / app).read_text() == original
+    assert (tmp_path / other).read_text() == "before"
     apply_prepared(tmp_path, patch[:1])
     apply_prepared(tmp_path, patch)
-    assert (tmp_path / "app.txt").read_text() == "fixed=done\ntwo=old\n"
+    assert (tmp_path / app).read_text() == "fixed=done\ntwo=old\n"
     apply_prepared(tmp_path, patch)
-    assert (tmp_path / "other.txt").read_text() == "after"
+    assert (tmp_path / other).read_text() == "after"
 
 
 async def test_ambiguous_anchor_can_expand_context_without_dropping_surroundings(tmp_path):
