@@ -1524,7 +1524,7 @@ class WorkflowEngine:
         context["verification_observation"] = self._require_candidate_evidence(
             rid, commands, evidence, work, environment, phase="final", expected_source=candidate_hash)
         context.update(self._task_design_context(rid, work))
-        context["source_history"] = SourceHistory(self).collect(rid, work)
+        context["source_history"] = SourceHistory(self).collect_plan(rid, work, plan)
         context["preview_contracts"] = PreviewEvidence(self).contracts(rid, plan)
         review_key = digest([verify_key, [r.model_dump() for r in evidence], visuals,
                              context["design_review"], context["source_history"], context["preview_contracts"],
@@ -2124,7 +2124,7 @@ class WorkflowEngine:
         verification_observation = self._require_candidate_evidence(
             rid, checks, evidence, work, environment, phase="reuse", expected_source=candidate_hash)
         review = await self._invoke("verify", {**approval_context, "project": self.contexts.build(work),
-                                    "source_history": SourceHistory(self).collect(rid, work),
+                                    "source_history": SourceHistory(self).collect_plan(rid, work, plan),
                                     "preview_contracts": PreviewEvidence(self).contracts(source_run or rid, plan),
                                     "verification_contract": self._verification_contract(checks),
                                     "verification_observation": verification_observation,
@@ -2301,7 +2301,7 @@ class WorkflowEngine:
             review = await self._invoke("verify", {**approval_context, "project": self.contexts.build(work), "specification": self.store.get(rid, "clarify"),
                 "design_review": DesignDocuments(self).context(rid, work),
                 "preview_contracts": PreviewEvidence(self).contracts(rid, plan),
-                "source_history": SourceHistory(self).collect(rid, work),
+                "source_history": SourceHistory(self).collect_plan(rid, work, plan),
                 "verification_contract": self._verification_contract(checks),
                 "approved_prototype_visuals": self.store.get(rid, "prototype_approval", {}).get("visuals", []),
                 "evidence": [c.model_dump() for c in evidence], "implemented_visuals": visuals, "incoming": incoming},

@@ -198,6 +198,15 @@ class SourceHistory:
                                 "diff": self.engine.artifacts.put(patch, "source_diff")})
         return comparisons
 
+    def collect_plan(self, rid, work, plan):
+        """Use the reviewed plan's task scopes for integrated read-only review.
+
+        Callers supply their active, inherited or journal-bound plan. This does
+        not infer scope from model citations or expand any task's write policy.
+        """
+        scopes = sorted({path for task in plan.tasks for path in task.allowed_paths}) if plan else []
+        return self.collect(rid, work, scopes)
+
     def collect(self, rid, work, scopes=()):
         source = tree_hash(work)
         extra = self.engine.config.load().sensitive_paths
