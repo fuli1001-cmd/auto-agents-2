@@ -56,6 +56,7 @@ async def test_reconstruction_constrains_pip_and_preserves_original_resolution(t
         if "create" in argv:
             (prefix / "bin").mkdir()
             (prefix / "bin/python").write_text("fixture")
+            (prefix / "bin/python").chmod(0o755)
         if "-c" in argv and "import sys; print(sys.prefix)" in argv:
             return str(prefix)
         if "freeze" in argv:

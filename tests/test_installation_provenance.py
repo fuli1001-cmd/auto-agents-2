@@ -165,6 +165,7 @@ def fake_installer(tmp_path, monkeypatch, *, missing_report=False, fail_install=
             prefix = Path(argv[argv.index("-p") + 1])
             (prefix / "bin").mkdir()
             (prefix / "bin/python").write_text("fixture interpreter")
+            (prefix / "bin/python").chmod(0o755)
         elif "install" in argv:
             assert "--report" in argv and "--verbose" in argv
             assert "--dry-run" not in argv and "--ignore-installed" not in argv

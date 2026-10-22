@@ -83,6 +83,21 @@ def node_dependency_inputs(workspace):
     return dependency_inputs
 
 
+def conda_toolchain_dependencies(dependencies, python_version):
+    """Add only the controller's missing preparation tools; keep project specs intact.
+
+    Recognize package names before MatchSpec constraints, including channel-qualified
+    and bracket forms. This does not parse or relax the solver's version constraints.
+    """
+    names = set()
+    for spec in dependencies:
+        name = re.match(r"([a-zA-Z0-9_.-]+)(?=[\s=<>!~\[]|$)", spec.rsplit("::", 1)[-1].strip())
+        if name:
+            names.add(name[1])
+    return [spec for name, spec in (("python", f"python={python_version}"), ("pip", "pip"))
+            if name not in names]
+
+
 class EnvironmentManager:
     async def install_browser(self, workspace, cache, scratch):
         """One project-local install. The recovery controller decides subsequent attempts."""
@@ -121,7 +136,7 @@ class EnvironmentManager:
             conda_file = workspace / "environment.yml"
         if conda_file and (not conda_file.resolve().is_relative_to(workspace.resolve()) or not conda_file.is_file()):
             raise AA2Error("environment_file must refer to an existing file inside the execution workspace")
-        conda_document, extra_pip = None, []
+        conda_document, extra_pip, controller_dependencies = None, [], []
         if conda_file:
             try:
                 conda_document = yaml.safe_load(conda_file.read_text())
@@ -140,6 +155,8 @@ class EnvironmentManager:
                 if not all(isinstance(line, str) for line in extra_pip):
                     raise ValueError("Invalid pip entries")
                 conda_document["dependencies"] = [d for d in dependencies if isinstance(d, str)]
+                controller_dependencies = conda_toolchain_dependencies(conda_document["dependencies"], cfg.python_version)
+                conda_document["dependencies"].extend(controller_dependencies)
             except (ValueError, AttributeError, yaml.YAMLError) as exc:
                 raise AA2Error("Invalid Conda environment document") from exc
         inputs = pip_inputs(workspace, pip_name, extra_pip, protected=self.config.load().sensitive_paths)
@@ -149,6 +166,8 @@ class EnvironmentManager:
                               "resolver_configuration": digest({k: v for k, v in os.environ.items()
                                                                   if k.startswith(("PIP_", "CONDA_"))}),
                               "conda": conda_file.read_text() if conda_file else "",
+                              **({"controller_dependencies": {"version": 1, "added": controller_dependencies}}
+                                 if controller_dependencies else {}),
                               "requirements": inputs.requirements, "constraints": inputs.constraints,
                               "local_paths": inputs.local_paths, "source_paths": inputs.source_paths,
                               "private_source": [str(workspace), tree_hash(workspace)] if local else None,
@@ -304,6 +323,9 @@ class EnvironmentManager:
                     reads.append(records)
                 await self._command(argv, workspace, env, [prefix, cache, scratch], reads,
                                     conda_manifest=bool(conda_file) and not replay_lock, cache_writes=list(caches.values()))
+                if not shutil.which(str(prefix / "bin/python"), path=env["PATH"]):
+                    raise ToolchainUnavailable("project Python", "missing",
+                        "Conda 安装后缺少该项目环境的可执行 Python；保留安装记录，核对环境清单和安装结果后重建独立实例")
                 install_workspace = workspace
                 if local:
                     # Editable bindings live in this private environment and never point into another task.

@@ -286,6 +286,8 @@ aa2 使用 autoagents 或本项目 Conda 环境，目标依赖不装进 aa2 环�
 
 PlanResult 的 `environment_file`、`requirements_file` 仅表示工作区根目录相对路径，例如 `environment.yml`、`requirements.txt`；空字符串表示自动发现，不能填写 YAML 正文或包列表。规划阶段验证路径格式并将错误反馈给规划任务，文件可由后续负责的实现任务创建；环境准备时再检查文件存在与工作区边界。清单选择字段不会触发源码写入，也不会按内容猜测或回退到其他清单。
 
+EnvironmentManager 的安装后依赖检查和环境证据采集需要目标前缀内的 Python 与 pip。项目 Conda 清单可以只声明 Node 等业务依赖；控制器在临时清单中仅补充缺失的 python=<environment.python_version> 和 pip，不改项目文件，不覆盖项目已有的 Python/pip 版本、渠道或构建约束。实际解析结果仍须通过原有安装、完整性、来源和业务检查。补充工具的版本化声明参与环境指纹，不能复用旧的未补工具解析锁；未受影响的完整清单沿用原指纹。安装后缺少目标 Python 可执行文件属于环境工具链故障，不得从宿主 PATH 借用解释器，也不应误报源码状态冲突；失败实例和日志保留，新实例核验通过前不发布就绪记录。
+
 原生 Python、Conda base、全局 npm 和全局 shell 配置保持隔离。缓存和浏览器资源位于受管理目录。Docker 不属于首期必要运行条件。
 
 环境准备还将当前安装前缀的完整 pip/Conda 锁、Python 安装包的版本、Requires-Python、Requires-Dist 与 extras，以及 Conda 的 depends/constrains 归档为 environment_resolution 证据。记录绑定 installed environment hash 和原始锁摘要，公开文本沿用凭证脱敏；不执行新的解析或安装，不把元数据当作兼容性批准。每条真实 CheckResult 携带该引用，任务、最终、复用、重集成审查及恢复沿现有检查证据通道读取；缺失、损坏或环境身份不匹配不能复用。旧环境无需重装即可读取实际安装元数据，旧检查在 verification-v13 下保留为历史并重新执行，不补写其成功记录。
