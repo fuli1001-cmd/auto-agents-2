@@ -53,7 +53,7 @@ async def test_real_browser_feedback_must_be_visible_at_both_callers(browser_cac
         assert not list((root / 'tmp').glob('preview-*'))
 
 
-@pytest.mark.parametrize('old_version', [6, 7])
+@pytest.mark.parametrize('old_version', [6, 7, 8])
 async def test_previous_text_only_browser_evidence_rechecks_without_replacing_human_consent(
         tmp_path, monkeypatch, old_version):
     from test_prototype_approvals import approval_fixture
@@ -63,7 +63,7 @@ async def test_previous_text_only_browser_evidence_rechecks_without_replacing_hu
     workflow, rid, document, question, contexts, browser_calls = approval_fixture(tmp_path, monkeypatch, legacy=False)
     await workflow._ensure_prototype_approval(rid, tmp_path)
     old = workflow.store.get(rid, 'prototype_approval')
-    old['browser_version'] = old_version  # Text-only and separate visibility/text observations.
+    old['browser_version'] = old_version  # All earlier visible-text semantics require fresh automation.
     workflow.store.checkpoint(rid, 'prototype_approval', old)
     before = tree_hash(tmp_path)
     assert workflow.approvals.current(rid, tmp_path, document.model_dump()['browser_actions'],

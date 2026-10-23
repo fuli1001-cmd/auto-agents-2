@@ -25,7 +25,7 @@ from .safe_files import directory_fd, regular_file
 from .sandbox import SandboxRunner
 from .util import atomic_write, digest, scrub_text
 
-PROTOTYPE_BROWSER_VERSION = 8
+PROTOTYPE_BROWSER_VERSION = 9
 BROWSER_RUNTIME = {}
 APPLICATION_VIEWPORTS = ((1440, 900), (390, 844))
 
@@ -139,6 +139,65 @@ class PreviewServer:
         self.server.server_close()
 
 
+async def _expect_rendered_text(locator, expected):
+    """One atomic layout/text observation per retry; not a pixel visibility proof."""
+    observation = None
+    try:
+        async with asyncio.timeout(10):
+            while True:
+                observation = await locator.evaluate_all(r"""(elements, expected) => {
+                    const normalize = s => s.replace(/[\u200b\u00ad]/g, '').trim().replace(/\s+/g, ' ');
+                    const hasBox = rects => [...rects].some(r => r.width > 0 && r.height > 0);
+                    const textBox = node => {
+                        const range = node.ownerDocument.createRange();
+                        range.selectNodeContents(node);
+                        return hasBox(range.getClientRects());
+                    };
+                    const visible = element => {
+                        if (!element.isConnected) return false;
+                        const style = getComputedStyle(element);
+                        if (style.display === 'contents') {
+                            return [...element.childNodes].some(node =>
+                                node.nodeType === Node.TEXT_NODE ? style.visibility === 'visible' && textBox(node) :
+                                node.nodeType === Node.ELEMENT_NODE && visible(node));
+                        }
+                        if (style.visibility !== 'visible') return false;
+                        if (element.checkVisibility && !element.checkVisibility({visibilityProperty:true})) return false;
+                        return hasBox(element.getClientRects());
+                    };
+                    if (elements.length !== 1) return {count:elements.length, matches:false};
+                    const element = elements[0];
+                    if (!visible(element)) return {count:1, visible:false, matches:false};
+                    let text;
+                    if (element instanceof HTMLInputElement && ['button', 'submit', 'reset'].includes(element.type)) {
+                        text = element.value;
+                    } else if (element instanceof HTMLElement) {
+                        text = element.innerText;
+                    } else if (element instanceof SVGElement) {
+                        // SVG has no innerText. Read only layout-bearing text nodes,
+                        // excluding non-rendered title/desc and hidden descendants.
+                        text = '';
+                        const walker = element.ownerDocument.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+                        while (walker.nextNode()) {
+                            const node = walker.currentNode;
+                            if (getComputedStyle(node.parentElement).visibility === 'visible' && textBox(node))
+                                text += node.textContent;
+                        }
+                    } else {
+                        return {count:1, visible:true, unsupported:element.namespaceURI, matches:false};
+                    }
+                    return {count:1, visible:true, text:text.slice(0, 500),
+                            matches:normalize(text) === normalize(expected)};
+                }""", expected)
+                if observation["count"] > 1:
+                    raise AssertionError("expect_text requires one element; selector matched multiple elements")
+                if observation["matches"]:
+                    return
+                await asyncio.sleep(.1)
+    except TimeoutError:
+        raise AssertionError(f"Expected visible rendered text {expected!r}; last observation: {observation}") from None
+
+
 async def exercise(page, actions, route, completed=None):
     if completed is None:
         completed = []
@@ -149,11 +208,7 @@ async def exercise(page, actions, route, completed=None):
         if step.action == "expect_visible":
             await locator.wait_for(state="visible", timeout=10000)
         elif step.action == "expect_text":
-            from playwright.async_api import expect
-            # Resolve visibility and rendered text in the same assertion retry;
-            # a previous visible state or hidden descendant text is not evidence.
-            await expect(locator.locator(":scope:visible")).to_have_text(
-                step.value, use_inner_text=True, timeout=10000)
+            await _expect_rendered_text(locator, step.value)
         elif step.action in {"fill", "press"}:
             await getattr(locator, step.action)(step.value, timeout=10000)
         else:

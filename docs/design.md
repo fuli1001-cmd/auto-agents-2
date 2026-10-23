@@ -497,15 +497,19 @@ permits are not rewritten. None of these representations by itself proves a
 check passed or permits a stage transition, source edit, or budget reset.
 ### Visible UI assertions
 
-Controller browser protocol version 8 gives `expect_text` one retrying assertion:
-the selector's visible element must have the expected rendered `innerText` in that
-same browser observation. A visible ancestor's hidden descendant text and an earlier
-visible state followed by hidden expected text cannot satisfy it. Both prototype
-and implemented preview execution use this shared action. Automatic browser records
-from versions 6 (text only) and 7 (separate visibility/text assertions) must be
-rechecked under the new version; unchanged, correctly bound human consent remains
-valid. This catches hidden feedback, but is not a proof of contrast, occlusion,
-all user states or business semantics. Independent review still examines source,
+Controller browser protocol version 9 gives `expect_text` one retrying observation:
+a unique element's current layout visibility and text must match simultaneously.
+HTML uses rendered `innerText`; native input button/submit/reset labels use `value`;
+SVG uses visible, layout-bearing text nodes, excluding hidden descendants and
+non-rendered title/desc. Other namespaces are not silently read as raw textContent.
+String matching is exact and case sensitive, with Playwright-compatible whitespace
+normalization (including removal of U+200B/U+00AD). Display-contents elements use
+child layout visibility. An earlier visible state cannot validate later hidden text.
+Both prototype and implemented preview use this shared action and the existing
+10-second action deadline. Automatic records from versions 6, 7 and 8 must be
+rechecked; unchanged, correctly bound human consent remains valid. This is not a
+pixel-rendering engine or proof of contrast, opacity, occlusion, clipping, SVG glyph
+transforms, all user states or business semantics. Independent review examines source,
 assertions and actual browser/state evidence. Planning and review guidance asks for
 visible feedback, real file round trips, persistence and unchanged data on failure
 or cancellation only where required by the accepted product contract; it does not
