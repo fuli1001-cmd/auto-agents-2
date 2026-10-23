@@ -279,7 +279,7 @@ async def test_reverification_never_dispatches_implementation_or_consumes_busine
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("detected_by", ["T3", "T4"])
+@pytest.mark.parametrize("detected_by", ["T3", "T4", "final_review", "final_checks", "application_browser"])
 async def test_repair_t3_preserves_t1_t2_and_rechecks_t4_without_implementation(tmp_path, detected_by):
     from auto_agents_2.models import Change, ReviewResult
 
@@ -291,6 +291,7 @@ async def test_repair_t3_preserves_t1_t2_and_rechecks_t4_without_implementation(
                 self.implementations.append(context["task"]["id"])
                 return ImplementationResult(summary="repair part3", changes=[Change(path="part3.py", content="value = 3\n")])
             if schema is Diagnosis:
+                assert "repair" in context["allowed_actions"]
                 return Diagnosis(action="repair", task_ids=["T3"], evidence_refs=context["failure"]["evidence_refs"], reason="part3 regression",
                     repair_targets=[RepairTarget(task_id="T3", paths=["part3.py"], evidence_refs=["part3.py"], reason="owns implementation")])
             assert fresh
@@ -311,9 +312,16 @@ async def test_repair_t3_preserves_t1_t2_and_rechecks_t4_without_implementation(
         **{f"develop/task/T{i}": {"commit": base, "checks": []} for i in range(1, 5)},
         **{f"task_state/T{i}": {"version": 1, "revision": 1, "implementation": "accepted", "evidence": "valid"} for i in range(1, 5)},
         **{f"rounds/T{i}": {"round": 1, "stalled": 0, "failure": ""} for i in range(1, 5)}})
-    workflow.recovery.submit(rid, failure(kind="checks", task_id=detected_by, origin_id=detected_by))
+    final = detected_by not in {"T3", "T4"}
+    workflow.store.checkpoint(rid, "verify/identity", "previous-final-evidence")
+    workflow.recovery.submit(rid, failure(kind="review" if detected_by == "final_review" else "checks",
+        task_id="" if final else detected_by, origin_id="final" if final else detected_by, step=detected_by))
     await workflow.recovery.resume(rid)
     assert workflow.store.get(rid, "develop/done") == ["T1", "T2"]
+    assert workflow.store.get(rid, "verify/identity") is None
+    assert workflow.store.get(rid, "develop/task/T3")["previous_evidence"]["commit"] == base
+    assert workflow.store.get(rid, "task_state/T3")["implementation"] == "needs_repair"
+    assert workflow.store.get(rid, "task_state/T4")["evidence"] == "stale"
     await workflow._develop(rid, integration, original, {"specification": {}})
     assert agent.implementations == ["T3"]
     assert workflow.store.get(rid, "rounds/T3")["round"] == 2

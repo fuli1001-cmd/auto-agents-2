@@ -117,6 +117,15 @@ class RecoveryPolicy:
             budget_owner=failure.origin_id, evidence_refs=failure.evidence_refs, reason="Assess current recovery actions")
         choices, _, _ = self.available_actions(rid, failure, work, plan, suggested, include_declared_checks=True)
         if not (self.store.get(rid, "delivery/journal") or {}).get("publication_started"):
+            if plan and plan.tasks and failure.origin_id == "final" and not failure.task_id:
+                # Final observations have no task owner yet. Advertise the existing
+                # diagnosis contract, NOT an executable unscoped action: adjudicate
+                # requires named tasks and evidenced, owned RepairTargets before
+                # authorize can reserve a concrete repair. Keep candidates unchanged
+                # so old questions/permits and decision-only choices retain scope.
+                choices["repair"] = suggested.model_copy(update={"action": "repair", "reason":
+                    "定位最终故障的既有责任任务；逐项提供 repair_targets 的公开路径和事实证据，"
+                    "经范围校验及正式授权后修复并复验；空目标不授予执行权限"})
             # Re-entry still goes through route_action and its original human gates.
             for action in sorted(STAGE_REENTRY_ACTIONS):
                 choices[action] = suggested.model_copy(update={"action": action,
