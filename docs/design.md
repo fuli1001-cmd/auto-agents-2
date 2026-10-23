@@ -495,9 +495,12 @@ permits are not rewritten. None of these representations by itself proves a
 check passed or permits a stage transition, source edit, or budget reset.
 ### Visible UI assertions
 
-Controller browser protocol version 7 gives `expect_text` two assertions:
-Playwright visibility, followed by the expected text. Both prototype and implemented
-preview execution use this shared action. Old automatic browser records must be
+Controller browser protocol version 8 gives `expect_text` one retrying assertion:
+the selector's visible element must have the expected rendered `innerText` in that
+same browser observation. A visible ancestor's hidden descendant text and an earlier
+visible state followed by hidden expected text cannot satisfy it. Both prototype
+and implemented preview execution use this shared action. Automatic browser records
+from versions 6 (text only) and 7 (separate visibility/text assertions) must be
 rechecked under the new version; unchanged, correctly bound human consent remains
 valid. This catches hidden feedback, but is not a proof of contrast, occlusion,
 all user states or business semantics. Independent review still examines source,

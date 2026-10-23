@@ -25,7 +25,7 @@ from .safe_files import directory_fd, regular_file
 from .sandbox import SandboxRunner
 from .util import atomic_write, digest, scrub_text
 
-PROTOTYPE_BROWSER_VERSION = 7
+PROTOTYPE_BROWSER_VERSION = 8
 BROWSER_RUNTIME = {}
 APPLICATION_VIEWPORTS = ((1440, 900), (390, 844))
 
@@ -150,8 +150,10 @@ async def exercise(page, actions, route, completed=None):
             await locator.wait_for(state="visible", timeout=10000)
         elif step.action == "expect_text":
             from playwright.async_api import expect
-            await expect(locator).to_be_visible(timeout=10000)
-            await expect(locator).to_have_text(step.value, timeout=10000)
+            # Resolve visibility and rendered text in the same assertion retry;
+            # a previous visible state or hidden descendant text is not evidence.
+            await expect(locator.locator(":scope:visible")).to_have_text(
+                step.value, use_inner_text=True, timeout=10000)
         elif step.action in {"fill", "press"}:
             await getattr(locator, step.action)(step.value, timeout=10000)
         else:

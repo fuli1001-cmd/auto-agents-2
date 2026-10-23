@@ -53,7 +53,9 @@ async def test_real_browser_feedback_must_be_visible_at_both_callers(browser_cac
         assert not list((root / 'tmp').glob('preview-*'))
 
 
-async def test_previous_text_only_browser_evidence_rechecks_without_replacing_human_consent(tmp_path, monkeypatch):
+@pytest.mark.parametrize('old_version', [6, 7])
+async def test_previous_text_only_browser_evidence_rechecks_without_replacing_human_consent(
+        tmp_path, monkeypatch, old_version):
     from test_prototype_approvals import approval_fixture
 
     from auto_agents_2.util import digest
@@ -61,13 +63,13 @@ async def test_previous_text_only_browser_evidence_rechecks_without_replacing_hu
     workflow, rid, document, question, contexts, browser_calls = approval_fixture(tmp_path, monkeypatch, legacy=False)
     await workflow._ensure_prototype_approval(rid, tmp_path)
     old = workflow.store.get(rid, 'prototype_approval')
-    old['browser_version'] = 6  # The actual previously released text-only check identity.
+    old['browser_version'] = old_version  # Text-only and separate visibility/text observations.
     workflow.store.checkpoint(rid, 'prototype_approval', old)
     before = tree_hash(tmp_path)
     assert workflow.approvals.current(rid, tmp_path, document.model_dump()['browser_actions'],
                                      workflow.browser_check_version()) is None
     receipt = await workflow._ensure_prototype_approval(rid, tmp_path)
-    assert receipt['browser_version'] != 6 and len(browser_calls) == 1
+    assert receipt['browser_version'] > old_version and len(browser_calls) == 1
     assert receipt['human']['question_id'] == question['id'] and receipt['human']['answer'] == '1'
     assert workflow.store.get(rid, 'candidate/prototype-approval-history/' + digest(old)) == old
     assert tree_hash(tmp_path) == before and not workflow.store.pending(rid)
