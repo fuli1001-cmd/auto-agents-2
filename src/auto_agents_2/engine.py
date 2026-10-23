@@ -152,7 +152,8 @@ class WorkflowEngine:
         self.toolchain = ToolchainPreflight(self.config, self.sandbox)
         self.verifier = VerificationService(self.store.root, self.sandbox, self.resources)
         self.delivery = DeliveryCoordinator(self.store, self.workspaces, self.resources, self.environments,
-                                            self._reintegrate_delivery, self._runtime_checks)
+                                            self._reintegrate_delivery, self._runtime_checks,
+                                            browser_version=lambda: self.browser_check_version())
         self.question_handler = question_handler
         self.question_lock = asyncio.Lock()
         self.recovery = RecoveryController(self)
@@ -2361,6 +2362,7 @@ class WorkflowEngine:
             raise RuntimeVerificationError(failure.evidence)
         if plan and plan.preview:
             await self._ensure_browser(rid, self.project)
+            evidence["browser_version"] = self.browser_check_version()
             try:
                 with observe_activity(self.store, rid, "交付界面运行检查"):
                     evidence["visuals"] = await inspect_application(plan.preview, self.project,
@@ -2371,6 +2373,9 @@ class WorkflowEngine:
                 raise RuntimeVerificationError(evidence) from exc
         if "visuals" in evidence:
             evidence["visuals"] = self._archive_visuals(evidence["visuals"])
+            if evidence["browser_version"] != self.browser_check_version():
+                self.store.checkpoint(rid, "delivery/runtime-browser-stale", evidence)
+                raise StateConflict("Application browser checker changed during runtime verification", phase="runtime")
         failure = self._verification_problem(rid, commands, checks, self.project, environment,
                                              phase="runtime", expected_source=journal.get("runtime_source_hash", journal.get("source_hash")))
         if failure:

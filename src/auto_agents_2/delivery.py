@@ -19,9 +19,16 @@ class RuntimeVerificationError(AA2Error):
 class DeliveryCoordinator:
     """Durable publication; no provider transport, dependency installation or GC policy."""
 
-    def __init__(self, store, workspaces, resources, environments, verify, runtime):
+    def __init__(self, store, workspaces, resources, environments, verify, runtime, *, browser_version=None):
         self.store, self.workspaces, self.resources = store, workspaces, resources
         self.environments, self.verify, self.runtime = environments, verify, runtime
+        self.browser_version = browser_version
+
+    def application_browser_version(self):
+        version = self.browser_version() if self.browser_version else None
+        if not isinstance(version, (str, int)) or not version or isinstance(version, bool):
+            raise StateConflict("Application browser checker identity is unavailable", phase="completion")
+        return version
 
     def save(self, rid, journal, phase=None):
         if phase:
@@ -253,9 +260,12 @@ class DeliveryCoordinator:
         if plan and plan.preview:
             commands = verification_commands([*commands, plan.preview.command], project)
         integrity = self.environments.integrity(env.prefix) if env.prefix.is_relative_to(self.store.root / "environments") else None
-        return digest([tree_hash(project), journal["environment"], integrity, plan.preview.model_dump() if plan and plan.preview else None,
+        inputs = [tree_hash(project), journal["environment"], integrity, plan.preview.model_dump() if plan and plan.preview else None,
             [(c.model_dump(), input_identity(project, c), runtime_configuration(project, c, env),
-              [(p, generated_entry(contained(project, p), project)) for p in c.outputs]) for c in commands]])
+              [(p, generated_entry(contained(project, p), project)) for p in c.outputs]) for c in commands]]
+        if plan and plan.preview:
+            inputs.append({"application_browser_version": self.application_browser_version()})
+        return digest(inputs)
 
     def complete_pending(self, rid, journal):
         from .artifacts import ArtifactStore
@@ -277,6 +287,9 @@ class DeliveryCoordinator:
         rows = [CheckResult.model_validate(row) for row in evidence.get("checks", [])]
         env = Environment(prefix, journal["environment"]["fingerprint"], journal["environment"].get("resolution", {}))
         plan = PlanResult.model_validate(journal["plan"]) if journal["plan"] else None
+        if plan and plan.preview and evidence.get("browser_version") != self.application_browser_version():
+            self._invalidate_completion(rid, journal, {"code": "application_browser_version_changed", "category": "evidence"})
+            return None
         assessment = reusable(runtime_commands(plan, self.workspaces.project, env), rows,
                               self.workspaces.project, env, artifacts)
         if not assessment.allowed:

@@ -510,3 +510,12 @@ assertions and actual browser/state evidence. Planning and review guidance asks 
 visible feedback, real file round trips, persistence and unchanged data on failure
 or cancellation only where required by the accepted product contract; it does not
 add features or substitute screenshots for assertions.
+
+Pending delivery also binds the application browser checker identity, including
+the existing configured browser cache identity, in runtime reuse inputs and the
+actual application observation. Prototype reapproval cannot substitute for this
+application check. Missing or changed automatic browser identity invalidates the
+pending completion through the existing runtime path, preserving the published
+candidate, human consent and consumed budget. A change during the check retains
+the stale observation and stops completion. Non-preview identities and already
+successful runs remain unchanged; normal successful cleanup is not redesigned.
