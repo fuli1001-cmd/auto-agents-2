@@ -1,14 +1,18 @@
 import asyncio
 
 import pytest
+from evidence_test_fixtures import evidence_plan, seed_requirements
 from test_decisions import ApprovingAgent, setup
+from test_recovery_contracts import plan as source_plan
 from test_runtime import configured
 
 from auto_agents_2.decisions import DecisionResult
 from auto_agents_2.errors import InvalidStructuredResponse, PostCommitError, ProviderError
+from auto_agents_2.evidence_admission import admission_context
 from auto_agents_2.issues import IssueLedger
 from auto_agents_2.models import (
     DocumentResult,
+    EvidencePlanReview,
     Finding,
     ImplementationResult,
     IntakeResult,
@@ -45,7 +49,11 @@ async def test_invalid_response_enters_action_decision_without_authentication_qu
     agent = MalformedOnce()
     workflow, rid = setup(tmp_path, agent)
     workflow.store.checkpoint(rid, "rounds/T1", {"round": 8})
-    result = await workflow._invoke(stage, {}, schema, tmp_path, rid, "fixture", fresh=True)
+    context = {}
+    if stage == "plan":
+        seed_requirements(workflow, rid, source_plan())
+        context = admission_context(lambda key: workflow.store.get(rid, key))
+    result = await workflow._invoke(stage, context, schema, tmp_path, rid, "fixture", fresh=True)
     assert isinstance(result, schema) and len(agent.responses) == 2
     assert [s for s, _ in agent.calls].count("decision") == 1
     assert not workflow.store.pending(rid)
@@ -54,7 +62,7 @@ async def test_invalid_response_enters_action_decision_without_authentication_qu
     request = workflow.store.decision_requests(rid)[0][1]["request"]
     assert request["evidence"]["failure"]["component"] == "provider_response"
     assert "no checks or file writes" in request["evidence"]["failure"]["evidence"]["response_contract"]["action_effect"]
-    again = await workflow._invoke(stage, {}, schema, tmp_path, rid, "fixture", fresh=True)
+    again = await workflow._invoke(stage, context, schema, tmp_path, rid, "fixture", fresh=True)
     assert again == result and len(agent.responses) == 2
 
 
@@ -83,12 +91,14 @@ async def test_pause_and_resume_do_not_repeat_an_invalid_response(tmp_path):
 async def test_format_recovery_preserves_review_scope_and_logical_result_checkpoint(tmp_path):
     agent = MalformedOnce()
     workflow, rid = setup(tmp_path, agent)
-    context = {"review_kind": "plan"}
+    seed_requirements(workflow, rid, source_plan())
+    context = {"review_kind": "plan", **admission_context(lambda key: workflow.store.get(rid, key))}
+    context["plan"] = evidence_plan(source_plan(), context).model_dump()
     ledger = IssueLedger(workflow.store, workflow.artifacts)
     ledger.record(rid, "plan-review", ReviewResult(approved=False, summary="Missing verification", findings=[Finding(
         severity="blocking", location="plan", description="Missing check", evidence="No test command",
         resolution="Declare the existing acceptance checks")]), context)
-    result = await workflow._invoke("review", context, ReviewResult, tmp_path, rid, "plan-review", fresh=True)
+    result = await workflow._invoke("review", context, EvidencePlanReview, tmp_path, rid, "plan-review", fresh=True)
     assert result.approved and not ledger.unresolved(rid)
     saved = workflow.store.get(rid, "invocation/plan-review")
     assert saved["result"] == result.model_dump() and saved["recovered_from"].startswith("plan-review/response-retry/")

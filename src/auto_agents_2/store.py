@@ -279,6 +279,11 @@ class Store:
                 from .artifacts import ArtifactStore
                 contexts = legacy_contract_contexts(journal, journal_id, rows, ArtifactStore(self.root).json)
             validate_contract_journal(journal, rows.get, legacy_contexts=contexts)
+            from .evidence_admission import requires_admission, validate_admission_journal
+            if requires_admission(journal):
+                from .config import ConfigStore
+                validate_admission_journal(journal, rows.get,
+                    shared_browsers=ConfigStore(self.root.parent).load().shared_cache.enabled)
             self._put(db, rid, f"plan_revision/history/{revision}", {
                 "plan": rows["plan"], "tasks": {k: v for k, v in rows.items() if k.startswith(("develop/", "task_state/"))}})
             origins = dict(rows.get("task_origins", {}))

@@ -3,12 +3,15 @@ import copy
 import json
 
 import pytest
+from evidence_test_fixtures import seed_requirements
 from test_plan_lineage import ReachedDevelopment, pending_run
+from test_recovery_contracts import plan as source_plan
 from test_workflow import CodingAgent, engine
 
 from auto_agents_2.context_plan import ContextPlanner
 from auto_agents_2.design_documents import DesignDocuments, DesignQuestions
 from auto_agents_2.engine import STAGES
+from auto_agents_2.evidence_admission import admission_context
 from auto_agents_2.faults import StateConflict
 from auto_agents_2.models import Change, DocumentResult, UserQuestion
 from auto_agents_2.source_history import SourceHistory
@@ -184,11 +187,13 @@ async def test_task_review_receives_applied_candidate_history_and_architecture_r
 
     workflow = engine(tmp_path, Agent())
     rid = workflow.store.admit("task receipt", {})["id"]
+    seed_requirements(workflow, rid, source_plan())
     await reviewed(workflow, rid, tmp_path)
     commit(tmp_path, "reviewed architecture")
     base = workflow.workspaces.committed_baseline(rid, "main")
     workflow.store.checkpoint(rid, "baseline", base)
-    contract = await CodingAgent().invoke("plan", {}, None, tmp_path, rid, "plan")
+    context = admission_context(lambda key: workflow.store.get(rid, key))
+    contract = await CodingAgent().invoke("plan", context, None, tmp_path, rid, "plan")
     await workflow._task(rid, contract.tasks[0], base, contract, {"specification": {}})
 
 

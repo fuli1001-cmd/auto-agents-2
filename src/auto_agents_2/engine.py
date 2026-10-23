@@ -43,6 +43,14 @@ from .errors import (
     VerificationPreparationError,
 )
 from .evidence import CHECKER_VERSION, invocation_identity, reusable
+from .evidence_admission import (
+    admission_context,
+    admission_record,
+    capability_catalog,
+    current_catalog,
+    validate_admission_review,
+    validate_obligations,
+)
 from .faults import (
     ApprovalBoundary,
     HumanIntervention,
@@ -57,6 +65,7 @@ from .issues import IssueLedger
 from .models import (
     CheckResult,
     DocumentResult,
+    EvidencePlanReview,
     ImplementationResult,
     IntakeResult,
     PlanResult,
@@ -793,6 +802,18 @@ class WorkflowEngine:
         return answer
 
     async def _invoke(self, stage, context, schema, workspace, rid, key, fresh=False, *, interactive_retry=True):
+        if stage in {"implement", "verify", "recovery_diagnosis"} or (stage == "review" and
+                context.get("review_kind", "implementation") in {
+                    "plan", "plan_patch", "implementation", "test_changes", "recovery_diagnosis"}):
+            catalog = capability_catalog(shared_browsers=self.config.load().shared_cache.enabled)
+            if stage == "recovery_diagnosis":
+                frozen = self.store.get(rid, "recovery/invocation-inputs/" + digest([stage, key]))
+                if frozen:
+                    # Additive protocol guidance must not mutate an already frozen
+                    # diagnosis (including interrupted calls predating this catalog).
+                    catalog = frozen["context"].get("controller_evidence_capabilities")
+            if catalog is not None:
+                context = {"controller_evidence_capabilities": catalog, **context}
         if not interactive_retry or stage in {"decision", "recovery_diagnosis", "material_probe"} or context.get("patch_repair"):
             return await self._invoke_once(stage, context, schema, workspace, rid, key, fresh,
                                            interactive_retry=interactive_retry)
@@ -829,6 +850,15 @@ class WorkflowEngine:
         if stage == "recovery_diagnosis":
             old_execution = self.agent.execution_identity("review") if isinstance(self.agent, ProviderRouter) else None
             compatible.add(invocation_identity("review", context, schema, workspace, self.config.load(), source_before, old_execution))
+            if current_catalog(context.get("controller_evidence_capabilities")):
+                # Completed pre-catalog receipts still require the exact original
+                # source, schema, config and all factual inputs. Only this known
+                # controller protocol may be absent; no evidence is discarded.
+                legacy = {k: v for k, v in context.items() if k != "controller_evidence_capabilities"}
+                compatible.add(invocation_identity("review", legacy, schema, workspace,
+                    invocation_config, source_before, old_execution))
+                compatible.add(invocation_identity(stage, legacy, schema, workspace,
+                    invocation_config, source_before, execution))
         if saved.get("identity") in compatible and saved.get("result"):
             if saved.get("cleanup_record"):
                 self.sandbox.confirm_record(saved["cleanup_record"])
@@ -1314,6 +1344,8 @@ class WorkflowEngine:
         spec_dir = work / "docs/requirements"
         acceptance = "\n\n".join(f"### {r.id}: {r.description}\n" + "\n".join(f"- {a}" for a in r.acceptance) for r in result.requirements)
         atomic_write(spec_dir / f"{rid}.md", result.document + "\n\n## 验收条目\n\n" + acceptance + f"\n\n原始输入指纹：`{raw['hash']}`\n")
+        context.update(admission_context(lambda key: self.store.get(rid, key),
+                                         shared_browsers=self.config.load().shared_cache.enabled))
         for stage in ("provider_research", "prototype", "design", "plan"):
             if stage == "prototype" and not result.frontend:
                 continue
@@ -1415,6 +1447,8 @@ class WorkflowEngine:
                     if verification_only and document.mode != "verification_only":
                         raise AA2Error("Satisfied coverage requires a verification-only contract without implementation tasks")
                     validate_plan(document, unmet, coverage_verified=verification_only)
+                    unsupported = validate_obligations(document, context)
+                    context["unsupported_evidence_obligations"] = unsupported
                     for task in document.tasks:
                         verification_commands(task.checks, work, document.runtime_prepare)
                     context["verification_contract"] = self._verification_contract(verification_commands(
@@ -1446,12 +1480,26 @@ class WorkflowEngine:
                 if result.frontend and document.preview is None:
                     raise Replan("plan", "Frontend plan requires a runnable preview and route mapping")
                 self._replan_contract(rid, "plan", True)
-                review = await self._invoke("review", {**context, "plan": document.model_dump(), "review_kind": "plan"}, ReviewResult,
+                review_context = {**context, "plan": document.model_dump(), "review_kind": "plan",
+                                  "evidence_candidate_hash": digest(document.model_dump())}
+                review = await self._invoke("review", review_context, EvidencePlanReview,
                                             work, rid, "plan-review", fresh=True)
-                if not review.approved:
-                    details = "".join(f"\n\n[{f.severity}] {f.location}\n{f.description}\n证据：{f.evidence}\n修复要求：{f.resolution}"
-                                      for f in review.findings)
-                    raise Replan("plan", review.summary + details)
+                details = "".join(f"\n\n[{f.severity}] {f.location}\n{f.description}\n证据：{f.evidence}\n修复要求：{f.resolution}"
+                                  for f in review.findings)
+                try:
+                    current_admission = admission_context(lambda key: self.store.get(rid, key),
+                        shared_browsers=self.config.load().shared_cache.enabled)
+                    if any(review_context.get(key) != value for key, value in current_admission.items()):
+                        raise AA2Error("Plan admission source/capability changed during review; retain the stale candidate")
+                    validate_admission_review(document, review, review_context)
+                except HumanIntervention:
+                    self.store.checkpoint(rid, "evidence_admission/blocked", {
+                        "plan": document.model_dump(), "review": review.model_dump(), "context": review_context})
+                    raise
+                except AA2Error as exc:
+                    raise Replan("plan", str(exc) + "\n" + review.summary + details) from exc
+                self.store.checkpoint(rid, "evidence_admission/initial",
+                                      admission_record(document, review, review_context))
             if stage != "design":
                 atomic_write(work / "docs/aa2" / f"{stage}.md", document.document)
             stage_data = document.model_dump()

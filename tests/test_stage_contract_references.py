@@ -16,7 +16,6 @@ from auto_agents_2.faults import StateConflict
 from auto_agents_2.interaction import choice_spec
 from auto_agents_2.plan_revision import (
     PlanPatch,
-    TimingPlanReview,
     apply_patch,
     timing_review_binding,
     validate_timing_references,
@@ -146,17 +145,18 @@ class ReferenceTimingAgent(TimingAgent):
         self.reference_roles = []
 
     async def invoke(self, stage, context, schema, workspace, rid, operation, fresh=False):
-        if schema in {Diagnosis, PlanPatch, TimingPlanReview} or stage == 'decision':
+        from auto_agents_2.plan_revision import EvidencePatchReview
+        if schema in {Diagnosis, PlanPatch, EvidencePatchReview} or stage == 'decision':
             evidence = context['decision_request']['evidence'] if stage == 'decision' else context
             assert evidence['controller_stage_contract'] == stage_contract()
             assert 'controller_stage_contract' in context['evidence_reference_contract']['roots']
-            self.reference_roles.append(stage if schema is not TimingPlanReview else 'timing_review')
+            self.reference_roles.append(stage if schema is not EvidencePatchReview else 'timing_review')
         response = await super().invoke(stage, context, schema, workspace, rid, operation, fresh)
         if schema is Diagnosis or stage == 'decision':
             response.evidence_refs.append('controller_stage_contract')
         elif schema is PlanPatch:
             response.timing_corrections[0].evidence_refs.append('controller_stage_contract')
-        elif schema is TimingPlanReview:
+        elif schema is EvidencePatchReview:
             response.timing_reviews[0].evidence_refs.append(stage_contract()['hash'])
         return response
 

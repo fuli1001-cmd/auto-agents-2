@@ -2,6 +2,7 @@
 import re
 from dataclasses import dataclass, field
 
+from .evidence_admission import current_catalog
 from .execution_stages import current_stage_contract
 from .stage_responsibilities import current_correction_contract
 from .util import digest
@@ -57,7 +58,7 @@ class ReferenceCatalog:
                 "syntax": "Cite an existing dot path with [index], a supplied artifact hash or a controller-indexed alias. "
                           "Root paths are valid. Proposal paths describe unverified suggestions only; "
                           "include a factual controller record when proposing an action. Controller protocols support workflow "
-                          "timing and stage ownership only, not project facts or acceptance. Citations never establish acceptance."}
+                          "timing, stage ownership and declared capabilities only, not project facts or acceptance. Citations never establish acceptance."}
 
 
 def reference_catalog(value, *, prefixes=("",), provenance=None, observation_id=""):
@@ -97,6 +98,9 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
     correction = context.get("controller_correction_contract")
     if "controller_correction_contract" in context and not current_correction_contract(correction):
         context.pop("controller_correction_contract")
+    capabilities = context.get("controller_evidence_capabilities")
+    if "controller_evidence_capabilities" in context and not current_catalog(capabilities):
+        context.pop("controller_evidence_capabilities")
     origins = {}
     failure = context.get("failure") or {}
     if isinstance(failure, dict):
@@ -120,6 +124,10 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
     if current_correction_contract(correction) and origins.get("controller_correction_contract") != "proposal":
         for alias, entry in list(refs.entries.items()):
             if entry.path == "controller_correction_contract" or entry.path.startswith("controller_correction_contract."):
+                refs.add(alias, entry.path, "controller_protocol", status="protocol")
+    if current_catalog(capabilities) and origins.get("controller_evidence_capabilities") != "proposal":
+        for alias, entry in list(refs.entries.items()):
+            if entry.path == "controller_evidence_capabilities" or entry.path.startswith("controller_evidence_capabilities."):
                 refs.add(alias, entry.path, "controller_protocol", status="protocol")
     registered = list(aliases)
     if isinstance(failure, dict):

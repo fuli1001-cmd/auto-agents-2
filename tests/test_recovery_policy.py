@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from evidence_test_fixtures import seed_requirements
 from test_decisions import ApprovingAgent, configure, setup
 from test_recovery_contracts import failure, plan
 
@@ -28,6 +29,7 @@ def ready(tmp_path, agent=None, record=None):
     base = workflow.workspaces.committed_baseline(rid, "main")
     work = workflow.workspaces.allocate(rid, "integration", base)
     contract = plan()
+    seed_requirements(workflow, rid, contract)
     workflow.store.checkpoint(rid, "plan", contract.model_dump())
     record = record or failure()
     workflow.recovery.submit(rid, record)

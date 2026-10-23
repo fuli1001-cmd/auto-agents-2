@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 
 class Record(BaseModel):
@@ -109,6 +109,31 @@ class PreviewSpec(Record):
         return self
 
 
+EvidenceStage = Literal["plan", "implementation", "environment", "verification", "final_review"]
+
+
+class EvidenceObligation(Record):
+    id: str = Field(min_length=1)
+    target: Literal["acceptance", "checks", "final_checks", "runtime_prepare", "runtime_probes"]
+    task_id: str = ""
+    index: int = Field(ge=0)
+    value: str | Command
+    origin: Literal["user", "model_derived", "unknown"]
+    requirement_ids: list[str] = Field(min_length=1)
+    capability: str = Field(min_length=1)
+    capability_version: int = Field(ge=1)
+    producer: str = Field(min_length=1)
+    production_stage: EvidenceStage
+    required_stage: EvidenceStage
+
+
+class EvidenceContract(Record):
+    version: Literal[1] = 1
+    catalog_hash: str = Field(min_length=1)
+    source_binding: str = Field(min_length=1)
+    obligations: list[EvidenceObligation]
+
+
 class PlanResult(Record):
     summary: str
     document: str
@@ -124,6 +149,16 @@ class PlanResult(Record):
     preview: PreviewSpec | None = None
     runtime_prepare: list[Command] = []
     runtime_probes: list[Command] = []
+    evidence_contract: EvidenceContract | None = Field(default=None, description=(
+        "Required for new proposals, including an explicit empty obligations list when appropriate. "
+        "None is retained only for reading previously approved legacy plans."))
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_shape(self, handler):
+        data = handler(self)
+        if self.evidence_contract is None:
+            data.pop("evidence_contract", None)
+        return data
 
     @model_validator(mode="after")
     def task_mode(self):
@@ -166,6 +201,22 @@ class ReviewResult(Record):
         if self.approved and any(f.severity in {"blocking", "major"} for f in self.findings):
             raise ValueError("An approved review cannot contain blocking or major findings")
         return self
+
+
+class EvidenceAssessment(Record):
+    candidate_hash: str
+    catalog_hash: str
+    source_binding: str
+    mapping_complete: bool
+    origins_accurate: bool
+    capabilities_sufficient: bool
+    requirements_preserved: bool
+    unsupported_user_obligations: list[str] = []
+    explanation: str = Field(min_length=1)
+
+
+class EvidencePlanReview(ReviewResult):
+    evidence_assessment: EvidenceAssessment
 
 
 class CheckResult(Record):

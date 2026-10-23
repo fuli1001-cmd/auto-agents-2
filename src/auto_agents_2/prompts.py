@@ -200,5 +200,7 @@ class PromptCompiler:
         task += stage_instructions(stage, context, purpose)
         from .environment_contract import environment_evidence_instructions
         task += environment_evidence_instructions(purpose)
+        from .evidence_admission import evidence_instructions
+        task += evidence_instructions(purpose)
         prompt = f"{instructions(stage, context, purpose)}\n{style}\n<context>\n{data}\n</context>\n<task stage=\"{stage}\">\n{task}\n</task>"
         return prompt, family

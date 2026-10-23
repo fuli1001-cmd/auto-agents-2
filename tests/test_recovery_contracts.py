@@ -3,6 +3,7 @@ import sqlite3
 import sys
 
 import pytest
+from evidence_test_fixtures import empty_contract, seed_requirements
 from test_workflow import CodingAgent, engine
 
 from auto_agents_2.errors import AA2Error
@@ -262,7 +263,10 @@ async def test_reverification_never_dispatches_implementation_or_consumes_busine
     agent = CodingAgent()
     workflow = engine(tmp_path, agent)
     rid = workflow.store.admit("addition", {})["id"]
-    original = await agent.invoke("plan", {}, PlanResult, tmp_path, rid, "plan")
+    from auto_agents_2.evidence_admission import admission_context
+    seed_requirements(workflow, rid, plan())
+    context = admission_context(lambda key: workflow.store.get(rid, key))
+    original = await agent.invoke("plan", context, PlanResult, tmp_path, rid, "plan")
     base = workflow.workspaces.committed_baseline(rid, "main")
     commit = await workflow._task(rid, original.tasks[0], base, original, {"specification": {}})
     saved = workflow.store.get(rid, "develop/task/T1")
@@ -468,7 +472,7 @@ async def test_local_patch_recovers_each_side_effect_boundary(tmp_path, monkeypa
 
         async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
             if schema is PlanPatch:
-                return patch_for(PlanResult.model_validate(context["plan"]))
+                return patch_for(PlanResult.model_validate(context["plan"]), evidence_contract=empty_contract(context))
             if boundary == "review" and context.get("review_kind") == "plan_patch" and not self.interrupted:
                 self.interrupted = True
                 raise asyncio.CancelledError()
@@ -482,6 +486,7 @@ async def test_local_patch_recovers_each_side_effect_boundary(tmp_path, monkeypa
     worker = workflow.workspaces.allocate(rid, "T3-retained", base)
     (worker / "part3.py").write_text("unfinished = True\n")
     original = plan()
+    seed_requirements(workflow, rid, original)
     workflow.store.checkpoints(rid, {"plan": original.model_dump(), "develop/done": ["T1", "T2"],
         "task_origins": {t.id: t.origin_id for t in original.tasks}, "rounds/T3": {"round": 3},
         "develop/task/T3": {"workspace": str(worker), "phase": "implementing"}})

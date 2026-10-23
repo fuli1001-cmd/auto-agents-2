@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import test_recovery_contracts as contracts
+from evidence_test_fixtures import empty_contract, seed_requirements
 from test_runtime import configured
 from test_workflow import CodingAgent, engine
 
@@ -210,13 +211,14 @@ async def test_plan_patch_rejects_whole_operation_baseline_drift(tmp_path, monke
                     git(workspace, "-c", "user.name=fixture", "-c", "user.email=fixture@localhost",
                         "commit", "--allow-empty", "-qm", "concurrent commit")
             if schema is PlanPatch:
-                return contracts.patch_for(PlanResult.model_validate(context["plan"]))
+                return contracts.patch_for(PlanResult.model_validate(context["plan"]), evidence_contract=empty_contract(context))
             return await super().invoke(actual, context, schema, workspace, *args, **kw)
     workflow = engine(tmp_path, Agent())
     rid = workflow.store.admit("fixture", {})["id"]
     base = workflow.workspaces.committed_baseline(rid, "main")
     work = workflow.workspaces.allocate(rid, "integration", base)
     plan = contracts.plan()
+    seed_requirements(workflow, rid, plan)
     workflow.store.checkpoints(rid, {"plan": plan.model_dump(), "task_origins": {t.id: t.origin_id for t in plan.tasks}})
     async def grant(*a):
         pass

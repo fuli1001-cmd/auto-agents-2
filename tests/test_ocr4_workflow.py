@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from browser_fixtures import prototype_rows
+from evidence_test_fixtures import empty_contract
 from manual_recovery_snapshot import snapshot
 from test_ocr_manual_tools import paused_project
 from test_workflow import CodingAgent, engine
@@ -35,7 +36,7 @@ async def test_first_satisfied_frontend_gets_contracts_and_approval_without_impl
                 self.calls.append((stage, fresh))
                 assert context['planning_mode'] == 'verification_only' and context['coverage_verification']
                 assert context['prototype_approval']['status'] == 'approved'
-                return PlanResult(mode='verification_only', summary='Verify existing application', document='Verification contract', tasks=[],
+                return PlanResult(evidence_contract=empty_contract(context), mode='verification_only', summary='Verify existing application', document='Verification contract', tasks=[],
                     final_checks=[Command(argv=[sys.executable, '-m', 'pytest', '-q', 'tests'], expected_tests=1)],
                     runtime_probes=[Command(argv=[sys.executable, '-c', 'from calc import add; assert add(2,3)==5'])],
                     preview=PreviewSpec(command=Command(argv=[sys.executable, '-m', 'http.server', '{port}'])))

@@ -3,6 +3,7 @@ import asyncio
 import copy
 
 import pytest
+from evidence_test_fixtures import empty_contract, evidence_review
 from test_decisions import ApprovingAgent
 from test_recovery_contracts import failure
 from test_recovery_policy import ready
@@ -49,13 +50,13 @@ class HandoffAgent(ApprovingAgent):
                 plan = PlanResult.model_validate(context["plan"])
                 task = plan.tasks[2].model_copy(deep=True)
                 task.checks[0].expected_tests = 40
-                return PlanPatch(base_revision=context["base_revision"], failure_ids=[context["failure"]["id"]],
+                return PlanPatch(evidence_contract=empty_contract(context), base_revision=context["base_revision"], failure_ids=[context["failure"]["id"]],
                                  reason=REASON, document="structurally restored checks", upsert_tasks=[task])
             assert context["plan"]["tasks"][2]["checks"][0]["expected_tests"] == 40
             if self.interrupt:
                 self.interrupt = False
                 raise asyncio.CancelledError()
-            return ReviewResult(approved=not self.reject, summary="Independent contract review")
+            return evidence_review(context, ReviewResult(approved=not self.reject, summary="Independent contract review"))
         return await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
 
 

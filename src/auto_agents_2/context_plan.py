@@ -28,7 +28,7 @@ LINKED_INLINE = 4000
 # Known workflow slots must be explicitly admitted for each purpose. Unknown
 # extension fields remain mandatory; a new purpose must always be registered.
 SHARED = {"task", "mandatory", "constraints", "global_constraints", "prototype_approval", "design_review", "source_history", "feedback",
-          "controller_feedback", "evidence_reference_contract", "controller_stage_contract", "validation_feedback"}
+          "controller_feedback", "controller_evidence_capabilities", "evidence_requirement_source", "evidence_candidate_hash", "unsupported_evidence_obligations", "evidence_reference_contract", "controller_stage_contract", "validation_feedback"}
 CONTRACTS = {
     "clarify": {"raw_requirements", "raw_requirements_truncated", "history", "project", "decisions",
                 "review_feedback", "additional_evidence", "regression_evidence", "coverage_verification"},

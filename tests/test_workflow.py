@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from browser_fixtures import prototype_rows
+from evidence_test_fixtures import empty_contract, evidence_review
 
 from auto_agents_2.config import ConfigStore
 from auto_agents_2.engine import Replan, WorkflowEngine
@@ -56,7 +57,7 @@ class CodingAgent:
         if stage in {"provider_research", "design"}:
             return DocumentResult(summary=stage, document=f"# {stage}\nNo external services required.")
         if stage == "plan":
-            return PlanResult(summary="one task", document="# Plan", tasks=[TaskSpec(
+            return PlanResult(evidence_contract=empty_contract(context), summary="one task", document="# Plan", tasks=[TaskSpec(
                 id="T1", title="addition", description="implement addition", requirement_ids=["R1"],
                 allowed_paths=["calc.py", "tests"], acceptance=["sum"], checks=[check])], final_checks=[check],
                 runtime_probes=[Command(argv=[sys.executable, "-c", "from calc import add; assert add(2,3)==5"])])
@@ -71,6 +72,8 @@ class CodingAgent:
             self.interrupt_review = False
             raise asyncio.CancelledError()
         assert fresh
+        if context.get("review_kind") in {"plan", "plan_patch"}:
+            return evidence_review(context)
         return ReviewResult(approved=True, summary="verified")
 
 
@@ -311,7 +314,7 @@ async def test_partial_iteration_only_plans_and_changes_the_gap(tmp_path):
             if stage == "plan":
                 assert context["specification"]["coverage"][0]["status"] == "satisfied"
                 check = Command(argv=[sys.executable, "-m", "pytest", "-q", "tests"], expected_tests=2)
-                return PlanResult(summary="delta", document="Only implement double", tasks=[TaskSpec(
+                return PlanResult(evidence_contract=empty_contract(context), summary="delta", document="Only implement double", tasks=[TaskSpec(
                     id="T2", title="double", description="Double an input", requirement_ids=["R2"], allowed_paths=["double.py", "tests/test_double.py"],
                     acceptance=["double(3)==6"], checks=[check])], final_checks=[check],
                     runtime_probes=[Command(argv=[sys.executable, "-c", "from double import double; assert double(3)==6"])])
@@ -351,7 +354,7 @@ async def test_replan_renaming_preserves_budget_and_reclaims_previous_worker(tmp
                 task.id = "T1_REVISED"
                 task.origin_id = "T1"
                 assert context["task_origins"]["budgets"]["T1"]["round"] == 1
-                return PlanPatch(base_revision=context["base_revision"], failure_ids=[context["failure"]["id"]],
+                return PlanPatch(evidence_contract=empty_contract(context), base_revision=context["base_revision"], failure_ids=[context["failure"]["id"]],
                                  reason="Explicit import contract", document="# Revised plan", upsert_tasks=[task], remove_tasks=["T1"])
             result = await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
             return result

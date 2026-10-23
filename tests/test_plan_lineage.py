@@ -1,6 +1,7 @@
 import copy
 
 import pytest
+from evidence_test_fixtures import evidence_review
 from test_workflow import CodingAgent, engine
 
 from auto_agents_2.engine import STAGES, Replan
@@ -82,7 +83,8 @@ async def test_replan_supplies_full_open_findings_and_current_budget_evidence(tm
                 assert context["task_origin_validation"]["registration"] == "existing"
                 self.reviews += 1
                 if self.reviews == 1:
-                    return ReviewResult(approved=False, summary="Plan needs correction", findings=[finding])
+                    return evidence_review(context, ReviewResult(
+                        approved=False, summary="Plan needs correction", findings=[finding]))
             return await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
 
     agent = Agent()

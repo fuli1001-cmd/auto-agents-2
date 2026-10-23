@@ -1,14 +1,17 @@
 import asyncio
 
 import pytest
+from evidence_test_fixtures import seed_requirements
 from test_patch_repair import Corrector, replacement, setup
 from test_plan_lineage import ReachedDevelopment, pending_run
+from test_recovery_contracts import plan as source_plan
 from test_workflow import CodingAgent, engine
 
 from auto_agents_2.context_plan import ContextPlanner
 from auto_agents_2.design_documents import DesignDocuments
 from auto_agents_2.engine import STAGES, Replan
 from auto_agents_2.errors import AA2Error, PolicyViolation
+from auto_agents_2.evidence_admission import admission_context
 from auto_agents_2.faults import StateConflict
 from auto_agents_2.models import Change, DocumentResult, Finding, ReviewResult
 from auto_agents_2.planning import validate_plan
@@ -207,7 +210,11 @@ async def test_legacy_unapplied_design_returns_to_owning_gate_with_history(tmp_p
 @pytest.mark.parametrize("path", ["docs/aa2/design-feature.md", "docs/aa2", "./docs/aa2/design/*.md",
     "docs/requirements/spec.md", "design/prototypes/page.html", "DESIGN.md"])
 async def test_planning_rejects_stage_owned_implementation_paths(tmp_path, path):
-    plan = await CodingAgent().invoke("plan", {}, None, tmp_path, "fixture", "fixture")
+    workflow = engine(tmp_path, CodingAgent())
+    rid = workflow.store.admit("Fixture original path-protection requirements", {})["id"]
+    seed_requirements(workflow, rid, source_plan())
+    context = admission_context(lambda key: workflow.store.get(rid, key))
+    plan = await CodingAgent().invoke("plan", context, None, tmp_path, rid, "fixture")
     plan.tasks[0].allowed_paths.append(path)
     with pytest.raises(AA2Error, match="stage-owned"):
         validate_plan(plan, {"R1"})

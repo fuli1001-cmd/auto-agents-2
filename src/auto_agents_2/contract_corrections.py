@@ -144,7 +144,12 @@ def validate_contract_references(patch, context):
 def validate_contract_review(patch, review, context=None):
     if not patch.contract_corrections:
         return
-    verdict = ContractPlanReview.model_validate(review.model_dump() if hasattr(review, 'model_dump') else review)
+    data = review.model_dump() if hasattr(review, 'model_dump') else review
+    if "evidence_assessment" in data:
+        from .plan_revision import EvidencePatchReview
+        verdict = EvidencePatchReview.model_validate(data)
+    else:
+        verdict = ContractPlanReview.model_validate(data)
     expected = {key(row) for row in patch.contract_corrections}
     if not verdict.approved or len(verdict.contract_reviews) != len(expected) or {key(r) for r in verdict.contract_reviews} != expected:
         raise AA2Error('Contract correction lacks complete independent semantic review')
@@ -252,13 +257,8 @@ def validate_contract_journal(journal, get, *, legacy_contexts=None):
     validate_contract_review(patch, journal['review'], context)
     coverage_verified = False
     if previous.mode == 'verification_only':
-        from .models import CheckResult
-        from .verification import passed
-        coverage = journal.get('contract_coverage', {})
-        rows = get('coverage_checks') or []
-        coverage_verified = (coverage.get('verified') is True and coverage.get('checks_hash') == digest(rows)
-                             and passed([CheckResult.model_validate(row) for row in rows])
-                             and all(row.get('source_hash') == journal['source_hash'] for row in rows))
+        from .plan_revision import valid_coverage_receipt
+        coverage_verified = valid_coverage_receipt(journal, get, journal.get('contract_coverage', {}))
         if not coverage_verified:
             raise AA2Error('Contract correction coverage proof changed before activation')
     candidate, affected, reopen = apply_patch(previous, patch, journal['base_revision'],

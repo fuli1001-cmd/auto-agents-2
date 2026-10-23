@@ -3,6 +3,7 @@ import asyncio
 import copy
 
 import pytest
+from evidence_test_fixtures import empty_contract, evidence_review
 from pydantic import ValidationError
 from test_decisions import ApprovingAgent
 from test_recovery_contracts import failure, plan
@@ -165,20 +166,22 @@ class TimingAgent(ApprovingAgent):
                              reason='Correct the candidate review timing without changing obligations.')
         if schema is PlanPatch:
             _, patch = fixture_patch()
+            patch.evidence_contract = empty_contract(context)
             return patch
         if context.get('review_kind') == 'plan_patch':
-            assert schema is TimingPlanReview
+            from auto_agents_2.plan_revision import EvidencePatchReview
+            assert schema is EvidencePatchReview
             self.views.append(copy.deepcopy(context))
             if self.interrupt:
                 self.interrupt = False
                 raise asyncio.CancelledError()
             if self.verdict == 'reject':
-                return TimingPlanReview(approved=False, summary='The original user requires this order.')
+                return evidence_review(context, TimingPlanReview(approved=False, summary='The original user requires this order.'))
             if self.verdict == 'weakening':
-                return review(obligations_preserved=False)
+                return evidence_review(context, review(obligations_preserved=False))
             if self.verdict == 'empty':
-                return TimingPlanReview(approved=True, summary='Unsupported blanket approval')
-            return review()
+                return evidence_review(context, TimingPlanReview(approved=True, summary='Unsupported blanket approval'))
+            return evidence_review(context, review())
         return await super().invoke(stage, context, schema, workspace, rid, operation, fresh)
 
 

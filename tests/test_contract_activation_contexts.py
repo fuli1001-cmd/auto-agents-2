@@ -6,10 +6,10 @@ import pytest
 from test_stage_contract_corrections import setup_correction
 
 from auto_agents_2.context_plan import ContextPlanner
-from auto_agents_2.contract_corrections import ContractPlanReview, contract_review_binding
+from auto_agents_2.contract_corrections import contract_review_binding
 from auto_agents_2.errors import AA2Error
 from auto_agents_2.evidence_refs import controller_context_catalog
-from auto_agents_2.plan_revision import PlanPatch
+from auto_agents_2.plan_revision import EvidencePatchReview, PlanPatch
 from auto_agents_2.util import digest
 from auto_agents_2.workspace import tree_hash
 
@@ -21,7 +21,7 @@ def cite_roles(agent, *, author=(), reviewer=()):
         if schema is PlanPatch:
             for row in result.contract_corrections:
                 row.evidence_refs += list(author)
-        if schema is ContractPlanReview:
+        if schema is EvidencePatchReview:
             for row in result.contract_reviews:
                 row.evidence_refs += list(reviewer)
         return result

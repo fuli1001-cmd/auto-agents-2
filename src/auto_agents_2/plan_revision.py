@@ -3,13 +3,22 @@ from __future__ import annotations
 
 from pathlib import PurePosixPath
 
-from pydantic import Field
+from pydantic import Field, model_serializer
 
-from .contract_corrections import ContractCorrection, validate_contract_structure
+from .contract_corrections import ContractCorrection, ContractPlanReview, validate_contract_structure
 from .errors import AA2Error
 from .evidence_refs import controller_context_catalog
 from .execution_stages import TimingProducer, current_stage_contract
-from .models import Command, PlanResult, PreviewSpec, Record, ReviewResult, TaskSpec
+from .models import (
+    Command,
+    EvidenceContract,
+    EvidencePlanReview,
+    PlanResult,
+    PreviewSpec,
+    Record,
+    ReviewResult,
+    TaskSpec,
+)
 from .planning import validate_plan
 from .util import atomic_write, digest
 
@@ -45,6 +54,10 @@ class TimingReview(Record):
 
 class TimingPlanReview(ReviewResult):
     timing_reviews: list[TimingReview] = []
+
+
+class EvidencePatchReview(EvidencePlanReview, TimingPlanReview, ContractPlanReview):
+    pass
 
 
 def _timing_acceptance(plan, patch):
@@ -94,7 +107,11 @@ def validate_timing_review(patch, review, context=None):
     """Require explicit independent semantic judgments; these are not machine proofs."""
     if not patch.timing_corrections:
         return
-    verdict = TimingPlanReview.model_validate(review.model_dump() if hasattr(review, 'model_dump') else review)
+    data = review.model_dump() if hasattr(review, 'model_dump') else review
+    if "evidence_assessment" in data:
+        verdict = EvidencePatchReview.model_validate(data)
+    else:
+        verdict = TimingPlanReview.model_validate(data)
     expected = {(c.task_id, c.acceptance_index) for c in patch.timing_corrections}
     actual = [(r.task_id, r.acceptance_index) for r in verdict.timing_reviews]
     if not verdict.approved or len(actual) != len(expected) or set(actual) != expected:
@@ -110,6 +127,16 @@ def timing_review_binding(previous, patch, candidate, review, controller_stage_c
     if controller_stage_contract is None:
         return digest(['timing-review-v1', previous, patch, candidate, review])
     return digest(['timing-review-v2', previous, patch, candidate, review, controller_stage_contract])
+
+
+def valid_coverage_receipt(journal, get, receipt):
+    """A verification-only patch must keep fresh passing coverage on this source."""
+    from .models import CheckResult
+    from .verification import passed
+    rows = get("coverage_checks") or []
+    return (receipt.get("verified") is True and receipt.get("checks_hash") == digest(rows)
+            and passed([CheckResult.model_validate(row) for row in rows])
+            and all(row.get("source_hash") == journal["source_hash"] for row in rows))
 
 
 def validate_timing_journal(journal):
@@ -150,6 +177,15 @@ class PlanPatch(Record):
     preview: PreviewSpec | None = None
     environment_file: str | None = None
     requirements_file: str | None = None
+    evidence_contract: EvidenceContract | None = Field(default=None, description=(
+        "Complete evidence contract for the candidate after this patch; required on new proposals."))
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_shape(self, handler):
+        data = handler(self)
+        if self.evidence_contract is None:
+            data.pop("evidence_contract", None)
+        return data
 
 
 def descendants(plan, seeds):
@@ -222,6 +258,10 @@ def apply_patch(plan: PlanResult, patch: PlanPatch, revision: int, failures: set
     changes = {k: getattr(patch, k) for k in ("final_checks", "runtime_prepare", "runtime_probes", "preview", "environment_file", "requirements_file")
                if getattr(patch, k) is not None}
     candidate = plan.model_copy(update={"tasks": list(tasks.values()), "document": patch.document, **changes}).model_copy(deep=True)
+    if patch.evidence_contract is not None:
+        candidate.evidence_contract = patch.evidence_contract.model_copy(deep=True)
+    from .evidence_admission import preserve_obligations
+    preserve_obligations(plan, candidate, patch)
     if not contract:
         _retain_checks(plan.final_checks, candidate.final_checks)
         _retain_checks(plan.runtime_prepare, candidate.runtime_prepare)
@@ -229,7 +269,9 @@ def apply_patch(plan: PlanResult, patch: PlanPatch, revision: int, failures: set
     validate_plan(candidate, {r for t in plan.tasks for r in t.requirement_ids}, coverage_verified=coverage_verified)
     changed = {k for k, v in updates.items() if k not in old or v != old[k]} | set(patch.remove_tasks)
     affected = descendants(candidate, changed) | descendants(plan, changed)
-    if changes:
+    old_obligations = plan.evidence_contract.obligations if plan.evidence_contract else []
+    new_obligations = candidate.evidence_contract.obligations if candidate.evidence_contract else []
+    if changes or old_obligations != new_obligations:
         affected |= tasks.keys()  # preparation/verification contract: conservative recheck
     reopen = set()
     for key, task in updates.items():

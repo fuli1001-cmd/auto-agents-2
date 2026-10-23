@@ -3,6 +3,7 @@ import asyncio
 import copy
 
 import pytest
+from evidence_test_fixtures import empty_contract, evidence_review
 from test_decisions import ApprovingAgent
 from test_recovery_contracts import failure, plan
 from test_recovery_policy import ready
@@ -19,7 +20,7 @@ from auto_agents_2.errors import AA2Error, PolicyViolation
 from auto_agents_2.evidence_refs import controller_context_catalog
 from auto_agents_2.faults import StateConflict
 from auto_agents_2.models import Change, Command, PlanResult
-from auto_agents_2.plan_revision import PlanPatch, apply_patch
+from auto_agents_2.plan_revision import EvidencePatchReview, PlanPatch, apply_patch
 from auto_agents_2.recovery import Diagnosis
 from auto_agents_2.stage_responsibilities import (
     correction_contract,
@@ -136,6 +137,7 @@ class CorrectionAgent(ApprovingAgent):
             self.views.append((stage, copy.deepcopy(context)))
             old = PlanResult.model_validate(context['plan'])
             _, patch = fixture_patch(old)
+            patch.evidence_contract = empty_contract(context)
             patch.base_revision = context['base_revision']
             patch.failure_ids = [context['failure']['id']]
             if self.weaken:
@@ -144,7 +146,7 @@ class CorrectionAgent(ApprovingAgent):
                 patch.upsert_tasks[0].checks[0] = new
                 patch.contract_corrections[0].replacement = new
             return patch
-        if schema is ContractPlanReview:
+        if schema is EvidencePatchReview:
             self.views.append((stage, copy.deepcopy(context)))
             assert context['original_requirements'] == 'Keep the business assertions; choose a compatible tool version.'
             assert context['correction_request']['owner'] == 'plan'
@@ -152,8 +154,8 @@ class CorrectionAgent(ApprovingAgent):
             if self.interrupt:
                 self.interrupt = False
                 raise asyncio.CancelledError()
-            return review_for(PlanPatch.model_validate(context['patch']), approve=self.approve,
-                              flag='assertions_preserved' if self.weaken else self.flag)
+            return evidence_review(context, review_for(PlanPatch.model_validate(context['patch']), approve=self.approve,
+                              flag='assertions_preserved' if self.weaken else self.flag))
         return await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
 
 
@@ -398,7 +400,8 @@ async def test_coarse_reentry_source_drift_preserves_pending_request(tmp_path, m
 
 
 @pytest.mark.parametrize('drift', [False, True])
-async def test_verification_only_correction_requires_fresh_bound_coverage(tmp_path, monkeypatch, drift):
+@pytest.mark.parametrize('kind', ['contract', 'ordinary'])
+async def test_verification_only_correction_requires_fresh_bound_coverage(tmp_path, monkeypatch, drift, kind):
     import sys
 
     from auto_agents_2.models import Coverage, IntakeResult, Requirement
@@ -415,10 +418,11 @@ async def test_verification_only_correction_requires_fresh_bound_coverage(tmp_pa
                 row = ContractCorrection(target='final_checks', index=0, previous=command, replacement=replacement,
                     reason='Equivalent expression fixture', derived_decision='Plan expression',
                     preserved_obligations=['Addition assertion'], evidence_refs=['failure'])
-                return PlanPatch(base_revision=1, failure_ids=[context['failure']['id']], reason='Correct expression',
-                    document='reviewed expression', final_checks=[replacement], contract_corrections=[row])
-            if schema is ContractPlanReview:
-                return review_for(PlanPatch.model_validate(context['patch']))
+                return PlanPatch(evidence_contract=empty_contract(context), base_revision=1, failure_ids=[context['failure']['id']], reason='Correct expression',
+                    document='reviewed expression', final_checks=[replacement] if kind == 'contract' else [command, replacement],
+                    contract_corrections=[row] if kind == 'contract' else [])
+            if schema is EvidencePatchReview:
+                return evidence_review(context, review_for(PlanPatch.model_validate(context['patch'])) if kind == 'contract' else None)
             return await super().invoke(stage, context, schema, *args, **kwargs)
     record = failure(task_id='', origin_id='final', step='final')
     workflow, rid, work, _, _ = ready(tmp_path, VerificationAgent(), record=record)
@@ -443,7 +447,10 @@ async def test_verification_only_correction_requires_fresh_bound_coverage(tmp_pa
         await workflow.recovery.resume(rid)
         assert workflow.store.get(rid, 'plan_revision/current')['revision'] == 2
         journal = workflow.store.get(rid, f'plan_revision/journal/{record.id}/1')
-        assert journal['contract_coverage']['verified']
+        if kind == 'contract':
+            assert journal['contract_coverage']['verified']
+        else:
+            assert journal['evidence_admission']['coverage']['verified']
         assert workflow.store.get(rid, 'coverage_checks')[0]['process_exit_code'] == 0
         assert not workflow.store.get(rid, 'develop/done')
 
