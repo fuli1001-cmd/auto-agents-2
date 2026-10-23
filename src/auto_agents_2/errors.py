@@ -36,6 +36,10 @@ class DependencyResolutionError(AA2Error):
 
     code = "DEPENDENCY_RESOLUTION_ERROR"
 
+    def __init__(self, message, *, evidence=None):
+        self.evidence = evidence or {}
+        super().__init__(message)
+
 
 class DependencySolverError(DependencyResolutionError):
     """A recognized external resolver crash, not proof of invalid dependencies."""

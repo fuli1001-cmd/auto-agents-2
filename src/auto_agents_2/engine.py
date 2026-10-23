@@ -1738,6 +1738,8 @@ class WorkflowEngine:
         current = saved if any(k in saved for k in ("checks", "review", "environment_error", "candidate_error")) else feedback
         evidence = {k: current.get(k) for k in
                     ("checks", "review", "environment_error", "candidate_error")}
+        if current.get("environment_failure"):
+            evidence["environment_failure"] = current["environment_failure"]
         evidence["checks"] = evidence["checks"] or []
         evidence["task"] = task.model_dump()
         if verification_error is not None:
@@ -1774,7 +1776,8 @@ class WorkflowEngine:
     @staticmethod
     def _task_failure_evidence(task, saved):
         return {"task": task.model_dump(), "review": saved.get("review"),
-                "environment_error": saved.get("environment_error"), "candidate_error": saved.get("candidate_error")}
+                "environment_error": saved.get("environment_error"), "candidate_error": saved.get("candidate_error"),
+                **({"environment_failure": saved["environment_failure"]} if saved.get("environment_failure") else {})}
 
     def _verification_problem(self, rid, commands, checks, work, environment, *, phase, task=None, expected_source=None):
         """Shared gate assessment. Stage adapters own the recovery dispatch, never its classification."""
@@ -1901,11 +1904,11 @@ class WorkflowEngine:
                     "recovery_permit": saved.get("recovery_permit"),
                     "observation_id": ["implementation", task.origin_id or task.id, counters["round"]], "feedback": {
                     **saved.get("feedback", {}), **{k: v for k, v in saved.items() if k in {
-                        "checks", "review", "environment_error", "candidate_error", "controller_recheck", "controller_approval_recheck"}}}}
+                        "checks", "review", "environment_error", "environment_failure", "candidate_error", "controller_recheck", "controller_approval_recheck"}}}}
                 self.store.checkpoints(rid, {key: saved, counter_key: counters,
                     state_key: {**state, "implementation": "in_progress"}})
             previous_feedback = saved.get("feedback", saved)
-            feedback = {k: previous_feedback[k] for k in ("phase", "checks", "review", "environment_error", "candidate_error", "controller_recheck", "controller_approval_recheck", "controller_recovery", "upstream_recovery", "failure", "baseline_refresh") if k in previous_feedback}
+            feedback = {k: previous_feedback[k] for k in ("phase", "checks", "review", "environment_error", "environment_failure", "candidate_error", "controller_recheck", "controller_approval_recheck", "controller_recovery", "upstream_recovery", "failure", "baseline_refresh") if k in previous_feedback}
             feedback = json.loads(json.dumps(feedback))
             task_context = {**approval_context, **design_context, "task": task.model_dump(), "specification": context["specification"],
                             "verification_contract": self._verification_contract(commands),
@@ -1977,6 +1980,9 @@ class WorkflowEngine:
                 environment = await self._environment(work, rid, plan)
             except DependencyResolutionError as exc:
                 saved.update(phase="rejected", environment_error=str(exc), source_hash=tree_hash(work))
+                saved.pop("environment_failure", None)
+                if exc.evidence:
+                    saved["environment_failure"] = {**exc.evidence, "source_hash": saved["source_hash"]}
                 self._task_progress(rid, task, saved)
                 counters = self.store.get(rid, counter_key)
                 # Retain the failed proposal even when replanning invalidates develop/.

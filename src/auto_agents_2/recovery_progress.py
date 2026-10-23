@@ -36,6 +36,13 @@ class RecoveryProgress:
             facts['observations'] = {name: evidence.get(name) for name in
                                      ('review', 'environment_error', 'candidate_error')}
             facts['checks'] = check_rows(evidence)
+        if evidence.get('environment_failure'):
+            from .diagnostics import references
+            detail = evidence['environment_failure']
+            facts['installation_diagnostics'] = {
+                'logs': sorted({ref['hash'] for ref in references(detail)}),
+                'runtime_identity': detail.get('runtime_identity'),
+                'capture_status': detail.get('npm_debug', {}).get('status')}
         materials = {name: context.get(name) for name in
                      ('plan', 'specification', 'design', 'prototype_approval', 'source_history')}
         # The newly supplied citation contract changes what a timing amendment can

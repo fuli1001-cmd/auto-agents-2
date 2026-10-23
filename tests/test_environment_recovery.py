@@ -55,6 +55,11 @@ async def test_conda_failure_classification_uses_manifest_and_actual_error(tmp_p
     assert isinstance(caught.value, DependencyResolutionError) == repairable
     assert message in str(caught.value)
     if repairable:
+        from auto_agents_2.artifacts import ArtifactStore
+        assert caught.value.evidence["exit_code"] == 1
+        assert any(message in ArtifactStore(store.root).read(r) for r in caught.value.evidence["logs"])
+
+    if repairable:
         assert "Conda manifest environment.yml" in str(caught.value)
     assert not list((store.root / "environments").glob("*/aa2-ready.json"))
     with store.connect() as db:

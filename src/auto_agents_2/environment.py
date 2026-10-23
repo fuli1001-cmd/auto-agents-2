@@ -207,7 +207,7 @@ class EnvironmentManager:
                 try:
                     await self._prepare(prefix, ready, fingerprint, profile, selected_conda, pip_file, workspace, [], local, inputs)
                 except DependencyResolutionError as exc:
-                    raise DependencyResolutionError(f"Conda manifest {conda_file.relative_to(workspace)}: {exc}") from exc
+                    raise DependencyResolutionError(f"Conda manifest {conda_file.relative_to(workspace)}: {exc}", evidence=exc.evidence) from exc
             write_json(location, {"prefix": str(prefix)})
         return Environment(prefix, self.installed_identity(prefix))
 
@@ -241,6 +241,7 @@ class EnvironmentManager:
 
     async def _command(self, argv, workspace, env, writes, reads=(), timeout=1800, *, conda_manifest=False, npm_resolution=False, machine=False, cache_writes=()):
         options = {"cache_writes": list(cache_writes)} if cache_writes else {}
+        logs = []
         process = await self.sandbox.spawn(argv, workspace, env, [p for p in writes if p not in cache_writes], list(reads), **options)
         try:
             async with asyncio.timeout(timeout):
@@ -281,7 +282,13 @@ class EnvironmentManager:
                 if failure is DependencySolverError:
                     detail = "Npm resolver crashed on declared package.json/lock inputs; not proof that " \
                              "the manifest is invalid. Diagnose the resolver and dependency graph before repair.\n" + detail
-                raise failure("Dependency preparation failed: " + detail)
+                message = "Dependency preparation failed: " + detail
+                if issubclass(failure, DependencyResolutionError):
+                    secrets = [v for k, v in env.items() if SECRET.search(k)] + sensitive_values(workspace, self.config.load().sensitive_paths)
+                    raise failure(message, evidence={"version": 1,
+                        "argv": [scrub_text(str(arg), secrets) for arg in argv],
+                        "cwd": str(workspace), "exit_code": process.returncode, "logs": logs})
+                raise failure(message)
             return stdout.decode(errors="replace")
         except TimeoutError as exc:
             raise RetryableInfrastructureError("Dependency preparation timed out") from exc
@@ -383,6 +390,25 @@ class EnvironmentManager:
                                    "pip_hash": digest(frozen), "conda_hash": digest(explicit),
                                    "integrity": self.integrity(prefix)})
 
+    async def _npm_command(self, argv, workspace, env, writes, reads, environment, **options):
+        # One owned directory per command, not a path named by untrusted stderr.
+        # Preserve logs-max (including an explicit 0), registry/TLS and solve settings.
+        from .installation_failure import npm_debug_logs
+        with self.resources.temporary("npm-diagnostics") as directory:
+            variables = {**env, "npm_config_logs_dir": str(directory)}
+            try:
+                return await self._command(argv, workspace, variables, [*writes, directory], reads,
+                                           npm_resolution=True, **options)
+            except DependencyResolutionError as exc:
+                secrets = [v for k, v in variables.items() if SECRET.search(k)] + sensitive_values(workspace, self.config.load().sensitive_paths)
+                debug = npm_debug_logs(directory, ArtifactStore(self.root), secrets)
+                operation = current_diagnostics.get()
+                if operation:
+                    operation.capture(debug["logs"])
+                exc.evidence = {**exc.evidence, "runtime_identity": environment.fingerprint,
+                                "npm_debug": debug}
+                raise
+
     async def install_node(self, workspace: Path, environment: Environment, *, frozen: bool = False):
         if not (workspace / "package.json").is_file():
             return
@@ -417,8 +443,9 @@ class EnvironmentManager:
                     staging = scratch / "resolve"
                     staging.mkdir()
                     copy_execution_source(workspace, staging)
-                    await self._command([npm, "install", "--package-lock-only", "--ignore-scripts"], staging,
-                                        variables, [scratch, package_cache], [environment.prefix], timeout=900, npm_resolution=True, cache_writes=list(caches.values()))
+                    await self._npm_command([npm, "install", "--package-lock-only", "--ignore-scripts"], staging,
+                                        variables, [scratch, package_cache], [environment.prefix], environment,
+                                        timeout=900, cache_writes=list(caches.values()))
                     lock_inputs(workspace, staging / "package-lock.json")
                     atomic_write(lock, (staging / "package-lock.json").read_bytes(), 0o644)
                 dependency_inputs += lock_inputs(workspace, lock)
@@ -445,7 +472,8 @@ class EnvironmentManager:
                     if not frozen:
                         await self.prepare_generated_types(workspace, environment)
                     return
-                await self._command([npm, "ci"], workspace, variables, [modules, scratch, package_cache], [environment.prefix], timeout=900, npm_resolution=True, cache_writes=list(caches.values()))
+                await self._npm_command([npm, "ci"], workspace, variables, [modules, scratch, package_cache],
+                                        [environment.prefix], environment, timeout=900, cache_writes=list(caches.values()))
                 if digest([node_dependency_inputs(workspace) + lock_inputs(workspace, lock), lock.read_bytes().hex()]) != locked_inputs:
                     raise AA2Error("Npm installation inputs changed; installed files retained for reconciliation")
                 await self.prepare_node_browsers(workspace, environment)

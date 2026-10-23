@@ -14,7 +14,7 @@ def refresh_task_baseline(engine, rid, task, saved, work, base, revision):
     key = f"recovery/task-baselines/{task.id}/{identity}"
     record = store.get(rid, key)
     prior_feedback = {**saved.get("feedback", {}), **{k: saved[k] for k in (
-        "checks", "review", "environment_error", "candidate_error") if k in saved}}
+        "checks", "review", "environment_error", "environment_failure", "candidate_error") if k in saved}}
     at_base = manager.is_ancestor(base, git(work, "rev-parse", "HEAD"))
     if record and record["phase"] in {"merged", "repair"} and not at_base:
         raise AA2Error("Completed dependency refresh no longer matches the task workspace; preserve its history")
