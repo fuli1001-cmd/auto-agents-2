@@ -32,9 +32,14 @@ class ToolchainUnavailable(AA2Error):
 
 
 class DependencyResolutionError(AA2Error):
-    """The resolver rejected a workspace dependency manifest."""
+    """Resolution of declared workspace dependencies failed; diagnosis owns the cause."""
 
     code = "DEPENDENCY_RESOLUTION_ERROR"
+
+
+class DependencySolverError(DependencyResolutionError):
+    """A recognized external resolver crash, not proof of invalid dependencies."""
+    code = "DEPENDENCY_SOLVER_ERROR"
 
 
 class RetryableInfrastructureError(AA2Error):

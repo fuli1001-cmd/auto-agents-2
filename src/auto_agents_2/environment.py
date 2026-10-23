@@ -20,6 +20,7 @@ from .diagnostics import DiagnosticOperation, current_diagnostics
 from .errors import (
     AA2Error,
     DependencyResolutionError,
+    DependencySolverError,
     PolicyViolation,
     RetryableInfrastructureError,
     ToolchainUnavailable,
@@ -238,7 +239,7 @@ class EnvironmentManager:
         except (OSError, ValueError, KeyError, RecursionError):
             return False
 
-    async def _command(self, argv, workspace, env, writes, reads=(), timeout=1800, *, conda_manifest=False, machine=False, cache_writes=()):
+    async def _command(self, argv, workspace, env, writes, reads=(), timeout=1800, *, conda_manifest=False, npm_resolution=False, machine=False, cache_writes=()):
         options = {"cache_writes": list(cache_writes)} if cache_writes else {}
         process = await self.sandbox.spawn(argv, workspace, env, [p for p in writes if p not in cache_writes], list(reads), **options)
         try:
@@ -258,16 +259,28 @@ class EnvironmentManager:
             if process.returncode:
                 diagnostic = scrub_text((stdout + b"\n" + stderr).decode(errors="replace"),
                                         [v for k, v in env.items() if SECRET.search(k)] + sensitive_values(workspace, self.config.load().sensitive_paths))
-                # Only explicit solver failures from a workspace manifest are repairable
-                # proposals. Network, permissions, locks and configured defaults stay blocked.
+                # Only recognized failures in a declared resolver context reach diagnosis.
+                # This grants no edit/retry authority; other failures keep their boundary.
                 resolution = re.search(r"(?m)^(?:ResolvePackageNotFound|PackagesNotFoundError|"
                                        r"UnsatisfiableError|LibMambaUnsatisfiableError):[^\n]*", diagnostic)
                 failure = DependencyResolutionError if conda_manifest and resolution else AA2Error
+                if npm_resolution:
+                    codes = set(re.findall(r"(?m)^npm (?:error|ERR!) code (\S+)[ \t]*$", diagnostic))
+                    rejection = re.search(r"(?m)^npm (?:error|ERR!) code (?:ERESOLVE|ETARGET)\s*$", diagnostic)
+                    crash = re.search(r"(?m)^npm (?:error|ERR!) Cannot read properties of null "
+                                      r"\(reading 'edgesOut'\)\s*$", diagnostic)
+                    if rejection and codes <= {"ERESOLVE", "ETARGET"}:
+                        failure, resolution = DependencyResolutionError, rejection
+                    elif crash and not codes:
+                        failure = DependencySolverError
                 if not resolution and re.search(r"CondaHTTPError|ConnectionError|ConnectionResetError|ReadTimeout|ETIMEDOUT|ECONNRESET|EAI_AGAIN", diagnostic):
                     failure = RetryableInfrastructureError
                 detail = diagnostic[-2000:]
                 if failure is DependencyResolutionError and resolution.group() not in detail:
                     detail = resolution.group() + "\n" + detail
+                if failure is DependencySolverError:
+                    detail = "Npm resolver crashed on declared package.json/lock inputs; not proof that " \
+                             "the manifest is invalid. Diagnose the resolver and dependency graph before repair.\n" + detail
                 raise failure("Dependency preparation failed: " + detail)
             return stdout.decode(errors="replace")
         except TimeoutError as exc:
@@ -405,7 +418,7 @@ class EnvironmentManager:
                     staging.mkdir()
                     copy_execution_source(workspace, staging)
                     await self._command([npm, "install", "--package-lock-only", "--ignore-scripts"], staging,
-                                        variables, [scratch, package_cache], [environment.prefix], timeout=900, cache_writes=list(caches.values()))
+                                        variables, [scratch, package_cache], [environment.prefix], timeout=900, npm_resolution=True, cache_writes=list(caches.values()))
                     lock_inputs(workspace, staging / "package-lock.json")
                     atomic_write(lock, (staging / "package-lock.json").read_bytes(), 0o644)
                 dependency_inputs += lock_inputs(workspace, lock)
@@ -432,7 +445,7 @@ class EnvironmentManager:
                     if not frozen:
                         await self.prepare_generated_types(workspace, environment)
                     return
-                await self._command([npm, "ci"], workspace, variables, [modules, scratch, package_cache], [environment.prefix], timeout=900, cache_writes=list(caches.values()))
+                await self._command([npm, "ci"], workspace, variables, [modules, scratch, package_cache], [environment.prefix], timeout=900, npm_resolution=True, cache_writes=list(caches.values()))
                 if digest([node_dependency_inputs(workspace) + lock_inputs(workspace, lock), lock.read_bytes().hex()]) != locked_inputs:
                     raise AA2Error("Npm installation inputs changed; installed files retained for reconciliation")
                 await self.prepare_node_browsers(workspace, environment)

@@ -3,7 +3,14 @@ from __future__ import annotations
 
 from typing import Literal
 
-from .errors import AA2Error, ConfigurationError, PolicyViolation, ProviderError, ToolchainUnavailable
+from .errors import (
+    AA2Error,
+    ConfigurationError,
+    DependencyResolutionError,
+    PolicyViolation,
+    ProviderError,
+    ToolchainUnavailable,
+)
 from .models import Record
 
 
@@ -63,6 +70,13 @@ def known_exception(error, phase):
     if isinstance(error, ToolchainUnavailable):
         return HumanIntervention(HumanRequirement(kind="external_input", reason=str(error),
             action=error.action, resume_condition="在相同执行环境重新预检通过；回答本身不会跳过工具链核对。"),
+            reason_code=error.code, phase=phase)
+    if isinstance(error, DependencyResolutionError):
+        # Tasks consume this as RecoveryNeeded. Other callers have no implicit
+        # authority to edit manifests or retry; keep a concrete external boundary.
+        return HumanIntervention(HumanRequirement(kind="external_input", reason=str(error),
+            action="核对已声明依赖、锁文件和求解器；通过原职责阶段修订，保留失败材料。",
+            resume_condition="原范围内修订或工具恢复完成后重新核验；确认不跳过安装和验收。"),
             reason_code=error.code, phase=phase)
     if isinstance(error, (ConfigurationError, ProviderError)):
         return HumanIntervention(HumanRequirement(kind="external_input",
