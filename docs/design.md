@@ -481,6 +481,8 @@ PlanResult.mode 默认 implementation，要求非空任务；verification_only �
 环境命令的外部非零退出、启动失败和超时产生版本化 `CommandFailureObservation`：受控命令、cwd、实际结果、脱敏原件引用、采集状态与有限分类分别记录。未知输出是 `EnvironmentCommandError`，不是仅凭未匹配文本就认定的内部异常，也不因此获得依赖修改或自动重试权。已识别依赖故障沿原任务诊断，暂时基础设施故障沿原重试授权；内部异常、身份不变量和权限核对仍保留原严格边界。
 
 npm 两种安装入口对上述失败共同采集命令自有 debug 日志；完整输出引用沿任务、基础设施重试和阶段外 prerequisite 移交。机器输出成功时不改变解析内容；失败时归档脱敏原件。超时明确采集不完整，正常取消不计作命令失败。原型浏览器使用同一观察，保留原有重试规则。旧无证据异常和空 prerequisite 的序列化身份保持兼容，旧问题、许可和次数不迁移改写。细节和验证边界见 [Demo5 优化设计](demo5-recovery-contract-optimization.md)。
+
+并发任务的未知安装失败在批次聚合或取消前逐任务持久化原始观察和计划/任务/候选绑定；多个任务不能共用一次答复。启动先恢复当前原问题，再处理其它原始等待，全部处理前不重跑任务。确认原子消费对应等待并累计次数，失败原件和已成功任务保留；确认只允许原范围重核，不授予依赖编辑权。已识别依赖故障和内部异常保持各自原路由。
 ### Diagnosis proposal authority
 
 `RecoveryPolicy.diagnosis_actions` publishes `RecoveryProposal` entries under the

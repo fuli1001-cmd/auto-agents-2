@@ -30,6 +30,7 @@ from .environment import EnvironmentManager
 from .errors import (
     AA2Error,
     DependencyResolutionError,
+    EnvironmentCommandError,
     IncompleteIteration,
     InvalidStructuredResponse,
     PatchRepairExhausted,
@@ -223,15 +224,7 @@ class WorkflowEngine:
                             self.store.checkpoint(rid, "environment/preflight", report)
                             self.store.event(rid, "environment.preflight_passed", report)
                             preflight_complete = True
-                        pending_environment = self.store.get(rid, "environment/prerequisite-wait")
-                        if pending_environment:
-                            requirement = HumanRequirement.model_validate(pending_environment["requirement"])
-                            boundary = HumanIntervention(requirement, reason_code=pending_environment["reason_code"],
-                                                         phase=pending_environment["phase"])
-                            if (pending_environment.get("version") != 1 or pending_environment.get("identity") !=
-                                    digest([boundary.reason_code, boundary.phase, requirement.model_dump()])):
-                                raise StateConflict("Pending environment observation changed; preserve its original question")
-                            await self._wait_prerequisite(rid, boundary)
+                        await self._resume_environment_waits(rid)
                         if self.store.get(rid, "recovery/active"):
                             await self.recovery.resume(rid)
                             if self.store.get(rid, "recovery/active"):
@@ -316,6 +309,39 @@ class WorkflowEngine:
                     from .progress import safe_event
                     safe_event(self.store, rid, "cleanup.pending", {"errors": errors})
 
+    @staticmethod
+    def _environment_boundary(pending):
+        try:
+            requirement = HumanRequirement.model_validate(pending["requirement"])
+            boundary = HumanIntervention(requirement, reason_code=pending["reason_code"], phase=pending["phase"])
+            valid = (pending["version"] == 1 and pending["identity"] ==
+                     digest([boundary.reason_code, boundary.phase, requirement.model_dump()]) and
+                     requirement.evidence.get("authority") == "external_command_observation")
+        except (KeyError, TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise StateConflict("Pending environment observation changed; preserve its original question")
+        return boundary
+
+    def _environment_waits(self, rid):
+        pending = self.store.get(rid, "environment/prerequisite-queue", {})
+        if not isinstance(pending, dict):
+            raise StateConflict("Invalid pending environment observations; preserve their original questions")
+        for identity, item in pending.items():
+            self._environment_boundary(item)
+            if identity != item["identity"]:
+                raise StateConflict("Pending environment observation identity changed")
+        return pending
+
+    async def _resume_environment_waits(self, rid):
+        # Keep the legacy current pointer/question unchanged, including after a
+        # crash between answer persistence and consuming that answer.
+        current = self.store.get(rid, "environment/prerequisite-wait")
+        if current:
+            await self._wait_prerequisite(rid, self._environment_boundary(current))
+        while pending := self._environment_waits(rid):
+            await self._wait_prerequisite(rid, self._environment_boundary(next(iter(pending.values()))))
+
     async def _wait_prerequisite(self, rid, error):
         requirement = error.requirement.model_dump()
         identity = digest([error.reason_code, error.phase, requirement])
@@ -338,7 +364,14 @@ class WorkflowEngine:
         interaction = choice_spec(["已处理，重新核对", "暂停，稍后续跑"], ["retry", "pause"], yes_no=True)
         interaction["pause_on"] = "n"
         await self._ask(rid, f"{key}/{attempt}", error.requirement.prompt(), identity, interaction)
-        self.store.checkpoints(rid, {key: attempt + 1, **({wait_key: None} if observed_environment else {})})
+        updates = {key: attempt + 1}
+        if observed_environment:
+            queued = self._environment_waits(rid)
+            if identity in queued and queued[identity] != pending:
+                raise StateConflict("Queued environment observation no longer matches its original answer")
+            queued.pop(identity, None)
+            updates.update({wait_key: None, "environment/prerequisite-queue": queued})
+        self.store.checkpoints(rid, updates)
 
     def _internal_error(self, rid, error):
         import traceback
@@ -1723,7 +1756,7 @@ class WorkflowEngine:
                     "task": task.id, "title": task.title,
                     "index": positions[task.id], "total": len(plan.tasks),
                 })
-            outcomes = await collect_batch([self._task(rid, task, base, plan, context) for task in batch])
+            outcomes = await collect_batch([self._observed_task(rid, task, base, plan, context) for task in batch])
             failures = []
             for task, outcome in zip(batch, outcomes):
                 if isinstance(outcome, BaseException):
@@ -1744,6 +1777,36 @@ class WorkflowEngine:
             self.workspaces.checkpoint(integration, f"refs/aa2/{rid}/integration", "aa2: integrated tasks")
             if failures:
                 raise failures[0]
+
+    async def _observed_task(self, rid, task, base, plan, context):
+        try:
+            return await self._task(rid, task, base, plan, context)
+        except EnvironmentCommandError as exc:
+            # Declared resolution failures belong to task diagnosis. An unknown
+            # external failure only permits rechecking the original prerequisite.
+            if isinstance(exc, DependencyResolutionError) or exc.evidence.get("authority") != "external_command_observation":
+                raise
+            boundary = known_exception(exc, "develop")
+            saved = self.store.get(rid, "develop/task/" + task.id, {})
+            binding = {"task_id": task.id, "origin_id": task.origin_id or task.id,
+                       "plan_hash": digest(plan.model_dump()), "task_hash": digest(task.model_dump()),
+                       "base": base, "source_hash": saved.get("source_hash"),
+                       "workspace": saved.get("workspace"),
+                       "task_revision": self.store.get(rid, "task_state/" + task.id, {}).get("revision")}
+            requirement = boundary.requirement.model_copy(update={
+                "reason": f"Task {task.id}: {boundary.requirement.reason}",
+                "evidence": {**boundary.requirement.evidence, "controller_task": binding}})
+            boundary = HumanIntervention(requirement, reason_code=boundary.reason_code, phase=boundary.phase)
+            identity = digest([boundary.reason_code, boundary.phase, requirement.model_dump()])
+            observation = {"version": 1, "identity": identity, "reason_code": boundary.reason_code,
+                           "phase": boundary.phase, "requirement": requirement.model_dump()}
+            queued = self._environment_waits(rid)
+            queued[identity] = observation
+            # No await between catching and persisting: aggregation/cancellation
+            # must not discard another task's independently observed failure.
+            self.store.checkpoints(rid, {"environment/prerequisite-queue": queued,
+                "environment/prerequisite-observations/" + identity: observation})
+            raise boundary from exc
 
     def _task_progress(self, rid, task, saved, *, checked=False, approved=False):
         owner = task.origin_id or task.id
