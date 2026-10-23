@@ -497,7 +497,7 @@ permits are not rewritten. None of these representations by itself proves a
 check passed or permits a stage transition, source edit, or budget reset.
 ### Visible UI assertions
 
-Controller browser protocol version 9 gives `expect_text` one retrying observation:
+Controller browser protocol version 10 gives `expect_text` one retrying observation:
 a unique element's current layout visibility and text must match simultaneously.
 HTML uses rendered `innerText`; native input button/submit/reset labels use `value`;
 SVG uses visible, layout-bearing text nodes, excluding hidden descendants and
@@ -506,7 +506,7 @@ String matching is exact and case sensitive, with Playwright-compatible whitespa
 normalization (including removal of U+200B/U+00AD). Display-contents elements use
 child layout visibility. An earlier visible state cannot validate later hidden text.
 Both prototype and implemented preview use this shared action and the existing
-10-second action deadline. Automatic records from versions 6, 7 and 8 must be
+10-second action deadline. Automatic records from versions 6, 7, 8 and 9 must be
 rechecked; unchanged, correctly bound human consent remains valid. This is not a
 pixel-rendering engine or proof of contrast, opacity, occlusion, clipping, SVG glyph
 transforms, all user states or business semantics. Independent review examines source,
@@ -523,3 +523,14 @@ pending completion through the existing runtime path, preserving the published
 candidate, human consent and consumed budget. A change during the check retains
 the stale observation and stops completion. Non-preview identities and already
 successful runs remain unchanged; normal successful cleanup is not redesigned.
+
+The shared visible-text observation retries only canonical Playwright driver
+context-destroyed-by-navigation and frame-detached errors, re-resolving the full
+locator under the same original 10-second deadline. A transient error is not an
+observation or a completed action. Missing targets/frames remain nonmatches;
+permanent loss or repeated navigation must eventually fail. Closed page/browser,
+invalid or ambiguous selectors, JavaScript evaluation failures, unknown driver
+errors and cancellation are not swallowed. Matching error text in a page-thrown
+JavaScript exception does not grant retry semantics. The HTML/native-label/SVG
+visibility and text predicate is unchanged. See the narrowly scoped navigation
+follow-up in [Demo5 optimization](demo5-recovery-contract-optimization.md).
