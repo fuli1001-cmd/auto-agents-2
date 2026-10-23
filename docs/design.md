@@ -493,3 +493,15 @@ unchanged controller rules. It rejects proposal objects before any state writes.
 Old frozen diagnosis catalogs remain membership-only inputs; old questions and
 permits are not rewritten. None of these representations by itself proves a
 check passed or permits a stage transition, source edit, or budget reset.
+### Visible UI assertions
+
+Controller browser protocol version 7 gives `expect_text` two assertions:
+Playwright visibility, followed by the expected text. Both prototype and implemented
+preview execution use this shared action. Old automatic browser records must be
+rechecked under the new version; unchanged, correctly bound human consent remains
+valid. This catches hidden feedback, but is not a proof of contrast, occlusion,
+all user states or business semantics. Independent review still examines source,
+assertions and actual browser/state evidence. Planning and review guidance asks for
+visible feedback, real file round trips, persistence and unchanged data on failure
+or cancellation only where required by the accepted product contract; it does not
+add features or substitute screenshots for assertions.
