@@ -84,6 +84,19 @@ class Diagnosis(Record):
     repair_targets: list[RepairTarget] = []
 
 
+class RecoveryProposal(Record):
+    """A diagnosis catalog entry, not a validated decision or an execution permit."""
+    version: Literal[1] = 1
+    authority: Literal["proposal_only"] = "proposal_only"
+    action: Action
+    owner: str
+    task_ids: list[str] = []
+    repair_targets: list[RepairTarget] = []
+    reason: str
+    requires: list[str] = ["factual_reference_and_owned_scope_validation", "current_source_and_plan_binding",
+                          "existing_action_eligibility_and_authorization", "fresh_required_verification"]
+
+
 class RecoveryNeeded(AA2Error):
     def __init__(self, failure: FailureRecord):
         self.failure = failure

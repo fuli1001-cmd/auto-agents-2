@@ -191,8 +191,8 @@ class RecoveryController:
                 "diagnosis_feedback": saved.get("diagnosis_feedback"),
                 "specification": self.store.get(rid, "clarify"), "delivery_journal": self.store.get(rid, "delivery/journal"),
                 "constraint": "Delivery may only repair within supplied allowed_paths or recheck. Gate/plan changes require user reconciliation; never invalidate a published journal.",
-                "allowed_actions": {name: action.model_dump() for name, action in
-                    self._delivery_candidates(failure, adjudicate(failure), diagnosed=True).items()}}
+                "allowed_actions": policy.proposal_actions(
+                    self._delivery_candidates(failure, adjudicate(failure), diagnosed=True))}
             diagnosis = policy.completed_diagnosis(rid, permit, failure, active, work, None,
                 authorization_failure=authorization_failure)
             schema_error = None
@@ -449,7 +449,8 @@ class RecoveryController:
                     if completed_diagnosis and diagnosis.action in {"diagnose", "blocked"}:
                         # A validated inconclusive outcome remains a fact; it does not authorize another call.
                         assessment_context = {**diagnosis_context, "allowed_actions": {
-                            **diagnosis_context["allowed_actions"], "diagnose": self.store.get(rid, permit)["action"]}}
+                            **diagnosis_context["allowed_actions"], **policy.proposal_actions({
+                                "diagnose": RecoveryDecision.model_validate(self.store.get(rid, permit)["action"])})}}
                     suggested = adjudicate(failure, attempts=active["attempt"] - 1, diagnosis=diagnosis,
                         plan=plan, evidence_context=assessment_context, workspace=work)
                 except AA2Error as exc:

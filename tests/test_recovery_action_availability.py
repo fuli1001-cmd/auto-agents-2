@@ -84,7 +84,9 @@ async def test_diagnosis_and_authorization_share_preview_prerequisites(tmp_path,
     allowed = policy.diagnosis_actions(rid, failure, work, plan)
     assert {"prototype_recheck", "preview_recheck"} <= allowed.keys()
     choices, _, _ = policy.available_actions(rid, failure, work, plan, adjudicate(failure), include_declared_checks=True)
-    assert all(allowed[key] == value.model_dump() for key, value in choices.items() if key != "diagnose")
+    expected = policy.proposal_actions(choices)
+    assert all(allowed[key] == expected[key] for key in choices if key != "diagnose")
+    assert all(row["authority"] == "proposal_only" for row in allowed.values())
     view = ContextPlanner(workflow.artifacts).prepare("recovery_diagnosis", {"allowed_actions": allowed}, work)
     assert view.payload["allowed_actions"] == allowed
     workflow.store.checkpoint(rid, "develop/task/T1", {"phase": "implementing", "workspace": str(work)})

@@ -10,9 +10,17 @@ from .faults import HumanIntervention, HumanRequirement, StateConflict, route_fa
 from .interaction import choice_spec
 from .models import PlanResult, Record
 from .preview_evidence import PreviewEvidence
-from .recovery import Diagnosis, RecoveryDecision, check_rows, failure_summary, implemented_candidate
+from .recovery import (
+    Diagnosis,
+    RecoveryDecision,
+    RecoveryProposal,
+    check_rows,
+    failure_summary,
+    implemented_candidate,
+)
 from .recovery_identity import authorization_binding, binding_matches_failure, failure_contract
 from .recovery_progress import RecoveryProgress
+from .stage_responsibilities import ACTION_OWNERS
 from .util import digest
 from .workspace import tree_hash
 
@@ -80,7 +88,7 @@ class RecoveryPolicy:
         return choices
 
     def available_actions(self, rid, failure, work, plan, suggested, *, include_declared_checks=False):
-        """Compute executable choices from controller state before a model recommends one."""
+        """Compute concrete choices eligible for authorization, not issued permissions."""
         choices = self.candidates(failure, plan, suggested, include_declared_checks=include_declared_checks)
         # A proposal cannot make an evidence-refresh action eligible by naming it.
         for action in ("prototype_recheck", "preview_recheck"):
@@ -112,10 +120,18 @@ class RecoveryPolicy:
             choices.pop(action, None)
         return choices, prototype_binding, preview_binding
 
+    @staticmethod
+    def proposal_actions(choices):
+        """One projection for task/final/delivery diagnosis; no authorization fields."""
+        return {name: RecoveryProposal(action=value.action, owner=ACTION_OWNERS[value.action],
+            task_ids=value.task_ids, repair_targets=value.repair_targets, reason=value.reason).model_dump()
+            for name, value in choices.items()}
+
     def diagnosis_actions(self, rid, failure, work, plan):
         suggested = RecoveryDecision(failure_id=failure.id, action="diagnose", task_ids=[failure.task_id] if failure.task_id else [],
             budget_owner=failure.origin_id, evidence_refs=failure.evidence_refs, reason="Assess current recovery actions")
         choices, _, _ = self.available_actions(rid, failure, work, plan, suggested, include_declared_checks=True)
+        proposals = self.proposal_actions(choices)
         if not (self.store.get(rid, "delivery/journal") or {}).get("publication_started"):
             if plan and plan.tasks and failure.origin_id == "final" and not failure.task_id:
                 # Final observations have no task owner yet. Advertise the existing
@@ -123,16 +139,17 @@ class RecoveryPolicy:
                 # requires named tasks and evidenced, owned RepairTargets before
                 # authorize can reserve a concrete repair. Keep candidates unchanged
                 # so old questions/permits and decision-only choices retain scope.
-                choices["repair"] = suggested.model_copy(update={"action": "repair", "reason":
+                proposals["repair"] = RecoveryProposal(action="repair", owner=ACTION_OWNERS["repair"], reason=
                     "定位最终故障的既有责任任务；逐项提供 repair_targets 的公开路径和事实证据，"
-                    "经范围校验及正式授权后修复并复验；空目标不授予执行权限"})
+                    "经范围校验及正式授权后修复并复验；空目标不授予执行权限").model_dump()
             # Re-entry still goes through route_action and its original human gates.
             for action in sorted(STAGE_REENTRY_ACTIONS):
-                choices[action] = suggested.model_copy(update={"action": action,
-                    "reason": "Return to the owning stage without approving its outputs"})
+                proposals[action] = RecoveryProposal(action=action, owner=ACTION_OWNERS[action],
+                    task_ids=suggested.task_ids,
+                    reason="Return to the owning stage without approving its outputs").model_dump()
         else:
-            choices.pop("plan_patch", None)
-        return {name: action.model_dump() for name, action in choices.items()}
+            proposals.pop("plan_patch", None)
+        return proposals
 
     def legacy_questions(self, rid, failure, active):
         progress = self.engine.convergence.state(rid, failure.origin_id)
@@ -156,6 +173,9 @@ class RecoveryPolicy:
                         established=False, correction=False, force_decision=False, candidates=None, controller_owned=False,
                         diagnosis_assessment=False, prerequisite_resolved=False, supersede_keys=()):
         """Reserve a concrete action and its audit receipt in one CAS transaction."""
+        if (not isinstance(suggested, RecoveryDecision) or candidates is not None and
+                any(not isinstance(value, RecoveryDecision) for value in candidates.values())):
+            raise StateConflict("Authorization requires validated recovery decisions, never diagnosis catalog proposals")
         if suggested.action == "blocked" and not route_failure(failure).human_requirement:
             suggested = suggested.model_copy(update={"action": "diagnose"})
             diagnosis_assessment = True
