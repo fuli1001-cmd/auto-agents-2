@@ -8,7 +8,12 @@ from test_workflow import CodingAgent, engine
 from auto_agents_2.artifacts import ArtifactStore
 from auto_agents_2.engine import WorkflowEngine
 from auto_agents_2.environment import Environment, EnvironmentManager
-from auto_agents_2.errors import AA2Error, DependencyResolutionError, RetryableInfrastructureError
+from auto_agents_2.errors import (
+    AA2Error,
+    DependencyResolutionError,
+    EnvironmentCommandError,
+    RetryableInfrastructureError,
+)
 from auto_agents_2.faults import known_exception
 from auto_agents_2.models import Change, ImplementationResult
 from auto_agents_2.recovery import RecoveryNeeded
@@ -85,7 +90,8 @@ async def test_other_npm_failures_are_not_declared_manifest_defects(tmp_path, me
     manager = EnvironmentManager(config, SandboxRunner(store.root, _test_unconfined=True))
     with pytest.raises(expected) as caught:
         await manager.install_node(work, installer(tmp_path / 'runtime', message))
-    assert type(caught.value) is expected
+    assert type(caught.value) is (EnvironmentCommandError if expected is AA2Error else expected)
+    assert not isinstance(caught.value, DependencyResolutionError)
 
 
 async def test_solver_text_requires_installer_context_and_failed_exit(tmp_path):
@@ -95,7 +101,8 @@ async def test_solver_text_requires_installer_context_and_failed_exit(tmp_path):
     binary = str(environment.prefix / 'bin/npm')
     with pytest.raises(AA2Error) as caught:
         await manager._command([binary], tmp_path, environment.variables(tmp_path), [tmp_path])
-    assert type(caught.value) is AA2Error
+    assert type(caught.value) is EnvironmentCommandError
+    assert not isinstance(caught.value, DependencyResolutionError)
     installer(environment.prefix, code=0)
     await manager._command([binary], tmp_path, environment.variables(tmp_path), [tmp_path], npm_resolution=True)
 

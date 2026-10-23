@@ -55,7 +55,8 @@ async def test_failed_installer_hands_actual_debug_and_streams_to_caller(tmp_pat
     with pytest.raises(DependencyResolutionError) as caught:
         await manager.install_node(work, environment)
     evidence = caught.value.evidence
-    assert evidence['version'] == 1 and evidence['exit_code'] == 1
+    assert evidence['version'] == 2 and evidence['exit_code'] == 1
+    assert evidence['authority'] == 'external_command_observation' and evidence['capture_status'] == 'complete'
     assert evidence['runtime_identity'] == environment.fingerprint
     assert evidence['npm_debug']['status'] == 'captured'
     assert evidence['argv'][1] == ('ci' if locked else 'install')

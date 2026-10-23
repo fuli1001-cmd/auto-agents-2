@@ -21,12 +21,14 @@ from .errors import (
     AA2Error,
     DependencyResolutionError,
     DependencySolverError,
+    EnvironmentCommandError,
     PolicyViolation,
     RetryableInfrastructureError,
     ToolchainUnavailable,
 )
 from .evidence import RUNTIME_CACHES
 from .installation_evidence import has_installation_record, save_installation
+from .installation_failure import command_failure
 from .logs import capture_diagnostics
 from .progress import capture_output
 from .readview import sensitive_values
@@ -103,22 +105,20 @@ class EnvironmentManager:
     async def install_browser(self, workspace, cache, scratch):
         """One project-local install. The recovery controller decides subsequent attempts."""
         env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(cache), "TMPDIR": str(scratch)}
-        try:
-            process = await self.sandbox.spawn([sys.executable, "-m", "playwright", "install", "chromium"],
-                                               workspace, env, [cache, scratch])
-        except OSError as exc:
-            raise RetryableInfrastructureError("Browser installer could not start") from exc
-        try:
-            async with asyncio.timeout(900):
-                await capture_output(process)
-            if process.returncode:
-                raise RetryableInfrastructureError(f"Browser installer exited with code {process.returncode}")
+        argv = [sys.executable, "-m", "playwright", "install", "chromium"]
+        with DiagnosticOperation(self.store, self.resources, "prototype-browser/" + str(cache)) as operation:
+            start = len(operation.logs)
+            try:
+                await self._command(argv, workspace, env, [cache, scratch], timeout=900)
+            except EnvironmentCommandError as exc:
+                # Preserve this caller's existing bounded installer-retry policy;
+                # the shared observation itself grants no such authority.
+                raise RetryableInfrastructureError(str(exc), evidence=exc.evidence) from exc
             if not any(cache.glob("chromium-*/chrome-linux*/chrome")):
-                raise RetryableInfrastructureError("Browser installation produced no usable executable")
-        except TimeoutError as exc:
-            raise RetryableInfrastructureError("Browser installation timed out") from exc
-        finally:
-            await self.sandbox.stop(process)
+                secrets = [v for k, v in env.items() if SECRET.search(k)] + sensitive_values(workspace, self.config.load().sensitive_paths)
+                raise RetryableInfrastructureError("Browser installation produced no usable executable",
+                    evidence=command_failure(argv, workspace, outcome="postcondition_failed", exit_code=0,
+                        capture_status="complete", logs=operation.logs[start:], secrets=secrets))
 
     def __init__(self, config: ConfigStore, sandbox: SandboxRunner):
         self.config, self.sandbox = config, sandbox
@@ -242,29 +242,41 @@ class EnvironmentManager:
     async def _command(self, argv, workspace, env, writes, reads=(), timeout=1800, *, conda_manifest=False, npm_resolution=False, machine=False, cache_writes=()):
         options = {"cache_writes": list(cache_writes)} if cache_writes else {}
         logs = []
-        process = await self.sandbox.spawn(argv, workspace, env, [p for p in writes if p not in cache_writes], list(reads), **options)
+        secrets = [v for k, v in env.items() if SECRET.search(k)] + sensitive_values(workspace, self.config.load().sensitive_paths)
+        artifacts = ArtifactStore(self.root)
+        def retain(refs):
+            run = self.store.current(unfinished=True)
+            operation = current_diagnostics.get()
+            if operation:
+                operation.capture(refs)
+            elif run:
+                self.store.checkpoint(run["id"], "environment/logs/" + identifier("command"),
+                                      {"logs": refs, "exit_code": process.returncode})
+        try:
+            process = await self.sandbox.spawn(argv, workspace, env, [p for p in writes if p not in cache_writes], list(reads), **options)
+        except OSError as exc:
+            # The spawn boundary observed an OS failure; no untrusted exception
+            # text or assumed dependency diagnosis becomes a repair permission.
+            raise EnvironmentCommandError("Environment command could not start", evidence=command_failure(
+                argv, workspace, outcome="start_failed", capture_status="not_started", secrets=secrets)) from exc
         try:
             async with asyncio.timeout(timeout):
                 if machine:
                     stdout, stderr = await capture_output(process)
                 else:
-                    stdout, stderr, logs = await capture_diagnostics(process, self.resources, ArtifactStore(self.root),
-                        [v for k, v in env.items() if SECRET.search(k)] + sensitive_values(workspace, self.config.load().sensitive_paths))
-                    run = self.store.current(unfinished=True)
-                    operation = current_diagnostics.get()
-                    if operation:
-                        operation.capture(logs)
-                    elif run:
-                        self.store.checkpoint(run["id"], "environment/logs/" + identifier("command"),
-                                              {"logs": logs, "exit_code": process.returncode})
+                    stdout, stderr, logs = await capture_diagnostics(process, self.resources, artifacts, secrets)
+                    retain(logs)
             if process.returncode:
-                diagnostic = scrub_text((stdout + b"\n" + stderr).decode(errors="replace"),
-                                        [v for k, v in env.items() if SECRET.search(k)] + sensitive_values(workspace, self.config.load().sensitive_paths))
+                if machine:
+                    logs = [artifacts.put(scrub_text(stream.decode(errors="replace"), secrets), "dependency_log")
+                            for stream in (stdout, stderr)]
+                    retain(logs)
+                diagnostic = scrub_text((stdout + b"\n" + stderr).decode(errors="replace"), secrets)
                 # Only recognized failures in a declared resolver context reach diagnosis.
                 # This grants no edit/retry authority; other failures keep their boundary.
                 resolution = re.search(r"(?m)^(?:ResolvePackageNotFound|PackagesNotFoundError|"
                                        r"UnsatisfiableError|LibMambaUnsatisfiableError):[^\n]*", diagnostic)
-                failure = DependencyResolutionError if conda_manifest and resolution else AA2Error
+                failure = DependencyResolutionError if conda_manifest and resolution else EnvironmentCommandError
                 if npm_resolution:
                     codes = set(re.findall(r"(?m)^npm (?:error|ERR!) code (\S+)[ \t]*$", diagnostic))
                     rejection = re.search(r"(?m)^npm (?:error|ERR!) code (?:ERESOLVE|ETARGET)\s*$", diagnostic)
@@ -283,15 +295,16 @@ class EnvironmentManager:
                     detail = "Npm resolver crashed on declared package.json/lock inputs; not proof that " \
                              "the manifest is invalid. Diagnose the resolver and dependency graph before repair.\n" + detail
                 message = "Dependency preparation failed: " + detail
-                if issubclass(failure, DependencyResolutionError):
-                    secrets = [v for k, v in env.items() if SECRET.search(k)] + sensitive_values(workspace, self.config.load().sensitive_paths)
-                    raise failure(message, evidence={"version": 1,
-                        "argv": [scrub_text(str(arg), secrets) for arg in argv],
-                        "cwd": str(workspace), "exit_code": process.returncode, "logs": logs})
-                raise failure(message)
+                classification = {DependencyResolutionError: "declared_resolution", DependencySolverError: "solver_crash",
+                                  RetryableInfrastructureError: "transient_transport"}.get(failure, "unknown")
+                raise failure(message, evidence=command_failure(argv, workspace, outcome="nonzero_exit",
+                    exit_code=process.returncode, classification=classification, capture_status="complete",
+                    logs=logs, secrets=secrets))
             return stdout.decode(errors="replace")
         except TimeoutError as exc:
-            raise RetryableInfrastructureError("Dependency preparation timed out") from exc
+            raise RetryableInfrastructureError("Dependency preparation timed out", evidence=command_failure(
+                argv, workspace, outcome="timed_out", classification="transient_transport",
+                capture_status="incomplete", logs=logs, secrets=secrets)) from exc
         finally:
             await self.sandbox.stop(process)
 
@@ -399,7 +412,7 @@ class EnvironmentManager:
             try:
                 return await self._command(argv, workspace, variables, [*writes, directory], reads,
                                            npm_resolution=True, **options)
-            except DependencyResolutionError as exc:
+            except (EnvironmentCommandError, RetryableInfrastructureError) as exc:
                 secrets = [v for k, v in variables.items() if SECRET.search(k)] + sensitive_values(workspace, self.config.load().sensitive_paths)
                 debug = npm_debug_logs(directory, ArtifactStore(self.root), secrets)
                 operation = current_diagnostics.get()

@@ -31,14 +31,18 @@ class ToolchainUnavailable(AA2Error):
         return {"tool": self.tool, "status": self.status, "action": self.action}
 
 
-class DependencyResolutionError(AA2Error):
-    """Resolution of declared workspace dependencies failed; diagnosis owns the cause."""
-
-    code = "DEPENDENCY_RESOLUTION_ERROR"
+class EnvironmentCommandError(AA2Error):
+    """An observed external environment command failure, never a repair permit."""
+    code = "ENVIRONMENT_COMMAND_ERROR"
 
     def __init__(self, message, *, evidence=None):
         self.evidence = evidence or {}
         super().__init__(message)
+
+
+class DependencyResolutionError(EnvironmentCommandError):
+    """Resolution of declared workspace dependencies failed; diagnosis owns the cause."""
+    code = "DEPENDENCY_RESOLUTION_ERROR"
 
 
 class DependencySolverError(DependencyResolutionError):
@@ -50,6 +54,10 @@ class RetryableInfrastructureError(AA2Error):
     """An explicitly recognized transient transport/timeout failure, not a manifest defect."""
 
     code = "RETRYABLE_INFRASTRUCTURE_ERROR"
+
+    def __init__(self, message, *, evidence=None):
+        self.evidence = evidence or {}
+        super().__init__(message)
 
 
 class IntegrationConflict(AA2Error):

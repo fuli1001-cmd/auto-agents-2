@@ -223,6 +223,15 @@ class WorkflowEngine:
                             self.store.checkpoint(rid, "environment/preflight", report)
                             self.store.event(rid, "environment.preflight_passed", report)
                             preflight_complete = True
+                        pending_environment = self.store.get(rid, "environment/prerequisite-wait")
+                        if pending_environment:
+                            requirement = HumanRequirement.model_validate(pending_environment["requirement"])
+                            boundary = HumanIntervention(requirement, reason_code=pending_environment["reason_code"],
+                                                         phase=pending_environment["phase"])
+                            if (pending_environment.get("version") != 1 or pending_environment.get("identity") !=
+                                    digest([boundary.reason_code, boundary.phase, requirement.model_dump()])):
+                                raise StateConflict("Pending environment observation changed; preserve its original question")
+                            await self._wait_prerequisite(rid, boundary)
                         if self.store.get(rid, "recovery/active"):
                             await self.recovery.resume(rid)
                             if self.store.get(rid, "recovery/active"):
@@ -310,6 +319,18 @@ class WorkflowEngine:
     async def _wait_prerequisite(self, rid, error):
         requirement = error.requirement.model_dump()
         identity = digest([error.reason_code, error.phase, requirement])
+        # A recorded external failure must await its original answer before a
+        # restart runs the installer again and manufactures a second observation.
+        # Legacy unrelated prerequisite behavior is deliberately unchanged.
+        observed_environment = error.requirement.evidence.get("authority") == "external_command_observation"
+        wait_key = "environment/prerequisite-wait"
+        if observed_environment:
+            pending = {"version": 1, "identity": identity, "reason_code": error.reason_code,
+                       "phase": error.phase, "requirement": requirement}
+            previous = self.store.get(rid, wait_key)
+            if previous and previous != pending:
+                raise StateConflict("Another environment observation is awaiting its original answer")
+            self.store.checkpoint(rid, wait_key, pending)
         self.store.record_fault(rid, {"route": "human", "reason_code": error.reason_code,
                                      "phase": error.phase, "human_requirement": requirement})
         key = "prerequisite/" + identity
@@ -317,7 +338,7 @@ class WorkflowEngine:
         interaction = choice_spec(["已处理，重新核对", "暂停，稍后续跑"], ["retry", "pause"], yes_no=True)
         interaction["pause_on"] = "n"
         await self._ask(rid, f"{key}/{attempt}", error.requirement.prompt(), identity, interaction)
-        self.store.checkpoint(rid, key, attempt + 1)
+        self.store.checkpoints(rid, {key: attempt + 1, **({wait_key: None} if observed_environment else {})})
 
     def _internal_error(self, rid, error):
         import traceback
@@ -1651,9 +1672,11 @@ class WorkflowEngine:
                     self.recovery_policy.finish_cycle(rid, active, {"status": "verified"})
                 return environment
             except RetryableInfrastructureError as exc:
+                from .installation_failure import failure_evidence
                 self.store.checkpoints(rid, {key: failures + 1,
                     f"recovery/infrastructure/{digest(key)}/{failures + 1}": {
-                        "component": "environment", "workspace": str(work), "error": str(exc)}})
+                        "component": "environment", "workspace": str(work), "error": str(exc),
+                        **failure_evidence(exc)}})
                 self.store.event(rid, "environment.retrying", {"failure": failures + 1, "error": str(exc)})
                 self.recovery_policy.complete(rid, permit, {"status": "failed", "attempt": failures + 1})
                 if permit:
@@ -2095,7 +2118,9 @@ class WorkflowEngine:
             try:
                 await self._install_browser(workspace, cache)
             except RetryableInfrastructureError as exc:
-                result = {"attempts": attempt, "reason_code": "browser_install_failed", "error": str(exc)}
+                from .installation_failure import failure_evidence
+                result = {"attempts": attempt, "reason_code": "browser_install_failed", "error": str(exc),
+                          **failure_evidence(exc)}
                 self.store.checkpoint(rid, key, result)
                 self.recovery_policy.complete(rid, permit, {"status": "failed", "evidence": key, "attempt": attempt})
                 continue

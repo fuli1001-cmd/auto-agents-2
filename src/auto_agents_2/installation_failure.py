@@ -3,13 +3,47 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Literal
 
+from .diagnostics import references
+from .models import Record
 from .safe_files import directory_fd, regular_file
 from .util import scrub_text
 
 MAX_LOG_FILES = 16
 MAX_LOG_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_BYTES = 16 * 1024 * 1024
+
+
+class CommandFailureObservation(Record):
+    """Controller facts only; classification does not grant recovery authority."""
+    version: Literal[2] = 2
+    authority: Literal['external_command_observation'] = 'external_command_observation'
+    argv: list[str]
+    cwd: str
+    outcome: Literal['nonzero_exit', 'timed_out', 'start_failed', 'postcondition_failed']
+    exit_code: int | None
+    classification: Literal['unknown', 'declared_resolution', 'solver_crash', 'transient_transport']
+    capture_status: Literal['complete', 'incomplete', 'not_started', 'not_collected']
+    logs: list[dict]
+
+
+def command_failure(argv, workspace, *, outcome, exit_code=None, classification='unknown',
+                    capture_status='not_collected', logs=(), secrets=()):
+    return CommandFailureObservation(
+        argv=[scrub_text(str(arg), list(secrets)) for arg in argv],
+        cwd=scrub_text(str(workspace), list(secrets)), outcome=outcome, exit_code=exit_code,
+        classification=classification, capture_status=capture_status, logs=list(logs)).model_dump()
+
+
+def failure_evidence(error):
+    """Keep legacy absence explicit; never infer observations from an error string."""
+    evidence = getattr(error, 'evidence', None)
+    return {'environment_failure': evidence} if evidence else {}
+
+
+def failure_references(error):
+    return sorted({ref['hash'] for ref in references(getattr(error, 'evidence', {}))})
 
 
 def npm_debug_logs(directory, artifacts, secrets=()):

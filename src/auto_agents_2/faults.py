@@ -3,12 +3,16 @@ from __future__ import annotations
 
 from typing import Literal
 
+from pydantic import model_serializer
+
 from .errors import (
     AA2Error,
     ConfigurationError,
     DependencyResolutionError,
+    EnvironmentCommandError,
     PolicyViolation,
     ProviderError,
+    RetryableInfrastructureError,
     ToolchainUnavailable,
 )
 from .models import Record
@@ -20,6 +24,16 @@ class HumanRequirement(Record):
     action: str
     resume_condition: str
     evidence_refs: list[str] = []
+    evidence: dict = {}
+
+    @model_serializer(mode='wrap')
+    def serialize_evidence(self, handler):
+        # Preserve the exact identity of existing prerequisite questions. Only
+        # new observations add this field; old empty records remain unchanged.
+        value = handler(self)
+        if not self.evidence:
+            value.pop('evidence', None)
+        return value
 
     def prompt(self):
         return f"{self.reason}\n需要处理：{self.action}\n继续条件：{self.resume_condition}"
@@ -74,9 +88,18 @@ def known_exception(error, phase):
     if isinstance(error, DependencyResolutionError):
         # Tasks consume this as RecoveryNeeded. Other callers have no implicit
         # authority to edit manifests or retry; keep a concrete external boundary.
+        from .installation_failure import failure_references
         return HumanIntervention(HumanRequirement(kind="external_input", reason=str(error),
             action="核对已声明依赖、锁文件和求解器；通过原职责阶段修订，保留失败材料。",
-            resume_condition="原范围内修订或工具恢复完成后重新核验；确认不跳过安装和验收。"),
+            resume_condition="原范围内修订或工具恢复完成后重新核验；确认不跳过安装和验收。",
+            evidence_refs=failure_references(error), evidence=error.evidence),
+            reason_code=error.code, phase=phase)
+    if isinstance(error, EnvironmentCommandError) or isinstance(error, RetryableInfrastructureError) and error.evidence:
+        from .installation_failure import failure_references
+        return HumanIntervention(HumanRequirement(kind="external_input", reason=str(error),
+            action="读取本次命令的原始证据，核对外部工具、访问或安装前提；原因未定不授权改依赖、权限或安全设置。",
+            resume_condition="已确定并处理实际前提后，按原范围重新核对；不跳过安装、证据或验收。",
+            evidence_refs=failure_references(error), evidence=error.evidence),
             reason_code=error.code, phase=phase)
     if isinstance(error, (ConfigurationError, ProviderError)):
         return HumanIntervention(HumanRequirement(kind="external_input",
