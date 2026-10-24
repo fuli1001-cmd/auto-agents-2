@@ -25,7 +25,7 @@ from .safe_files import directory_fd, regular_file
 from .sandbox import SandboxRunner
 from .util import atomic_write, digest, scrub_text
 
-PROTOTYPE_BROWSER_VERSION = 11
+PROTOTYPE_BROWSER_VERSION = 12
 BROWSER_RUNTIME = {}
 APPLICATION_VIEWPORTS = ((1440, 900), (390, 844))
 
@@ -256,6 +256,8 @@ async def capture_page(page, image, row, actions=()):
 
     Preserve the immediate final-state image and record additional scroll positions
     for content below/outside it. Never resize, navigate, crop or stitch the evidence.
+    Keep the caret: Playwright hiding it edits field styles and can trigger the
+    application's mutation observers before its terminal state is rechecked.
     """
     async def geometry():
         return await page.evaluate("""() => ({x: scrollX, y: scrollY, width: innerWidth, height: innerHeight,
@@ -263,7 +265,7 @@ async def capture_page(page, image, row, actions=()):
             content_height: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0)})""")
 
     initial = await geometry()
-    await page.screenshot(path=str(image), full_page=False)
+    await page.screenshot(path=str(image), full_page=False, caret="initial")
     row.update(screenshot=str(image), viewport_height=initial["height"], capture_mode="viewport_tiles",
                capture_origin=initial, tiles=[])
     if row["errors"]:
@@ -295,7 +297,7 @@ async def capture_page(page, image, row, actions=()):
                     raise AA2Error("Page geometry changed during screenshot capture")
                 await exercise(page, terminal, row["route"])
                 tile = image.with_name(image.stem + f"-tile-{len(row['tiles'])}.png")
-                await page.screenshot(path=str(tile), full_page=False)
+                await page.screenshot(path=str(tile), full_page=False, caret="initial")
                 row["tiles"].append({"screenshot": str(tile), **current})
                 await exercise(page, terminal, row["route"])
     finally:
