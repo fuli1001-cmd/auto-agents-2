@@ -10,12 +10,13 @@ from auto_agents_2.decisions import DecisionResult
 from auto_agents_2.errors import AA2Error, PrototypeBrowserError
 from auto_agents_2.issues import IssueLedger
 from auto_agents_2.models import Finding, ReviewResult
+from auto_agents_2.prototype_review import PrototypeReview
 from auto_agents_2.recovery import Diagnosis, FailureRecord, adjudicate
 from auto_agents_2.util import digest
 from auto_agents_2.workspace import tree_hash
 
 
-async def ready(tmp_path, monkeypatch):
+async def ready(tmp_path, monkeypatch, *, legacy_review=True):
     workflow, rid, document, question, _, browser_calls = approval_fixture(tmp_path, monkeypatch, legacy=False)
     contract = plan()
     base = workflow.workspaces.committed_baseline(rid, "main")
@@ -28,7 +29,10 @@ async def ready(tmp_path, monkeypatch):
     finding = Finding(severity="minor", location="prototype screenshot", description="Image differs from assertions",
                       evidence="Original prototype image", resolution="Recapture and independently review the final state")
     old = workflow.store.get(rid, "prototype_approval")
-    old["review"] = ReviewResult(approved=True, summary="One open evidence concern", findings=[finding]).model_dump()
+    # Prototype-refresh tests deliberately start with a pre-authority review.
+    # Application-preview tests retain approval_fixture's current structured review.
+    if legacy_review:
+        old["review"] = ReviewResult(approved=True, summary="One open evidence concern", findings=[finding]).model_dump()
     review = ReviewResult(approved=False, summary="Prototype evidence prerequisite remains open",
                          findings=[finding.model_copy(update={"severity": "major"})])
     task = {"phase": "rejected", "workspace": str(work), "source_hash": tree_hash(work),
@@ -38,7 +42,8 @@ async def ready(tmp_path, monkeypatch):
         "develop/task/accepted-task": {"commit": base}, "rounds/T1": {"round": 8, "stalled": 3},
         "recovery/budgets/diagnosis/T1": {"round": 6}})
     ledger = IssueLedger(workflow.store, workflow.artifacts)
-    ledger.record(rid, "prototype-review", ReviewResult.model_validate(old["review"]), {})
+    review_type = ReviewResult if legacy_review else PrototypeReview
+    ledger.record(rid, "prototype-review", review_type.model_validate(old["review"]), {})
     ledger.record(rid, "develop/task/T1/review", review, {"task": contract.tasks[0].model_dump()})
     failure = FailureRecord.create(kind="review", component="review", origin_id="T1", task_id="T1",
         step="review", obligations=["R1"], evidence_refs=["develop/task/T1"],

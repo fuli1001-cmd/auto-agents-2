@@ -10,7 +10,7 @@ from test_prototype_evidence_recovery import ready as prototype_ready
 
 from auto_agents_2.context_plan import ContextPlanner
 from auto_agents_2.decisions import DecisionResult
-from auto_agents_2.errors import PrototypeBrowserError
+from auto_agents_2.errors import AA2Error, PrototypeBrowserError
 from auto_agents_2.faults import StateConflict
 from auto_agents_2.models import BrowserAction, Command, PreviewSpec, ReviewResult
 from auto_agents_2.preview_evidence import ActionMapping, PreviewComparison, PreviewEvidence
@@ -19,7 +19,10 @@ from auto_agents_2.workspace import tree_hash
 
 
 async def ready(tmp_path, monkeypatch):
-    workflow, rid, work, plan, base, failure, _, _, approval = await prototype_ready(tmp_path, monkeypatch)
+    workflow, rid, work, plan, base, failure, _, _, approval = await prototype_ready(
+        tmp_path, monkeypatch, legacy_review=False)
+    actions = workflow.store.get(rid, "prototype")["browser_actions"]
+    assert workflow.approvals.current(rid, work, actions, workflow.browser_check_version())
     previous = PreviewSpec(command=Command(argv=["python", "-m", "preview", "{port}"], inputs=["dist"]),
         actions=[BrowserAction(action="click", selector="#add"),
                  BrowserAction(action="expect_text", selector="#count", value="1"),
@@ -74,6 +77,49 @@ async def ready(tmp_path, monkeypatch):
 
     workflow.agent = Agent()
     return workflow, rid, work, plan, base, failure, calls, browsers, approval
+
+
+@pytest.mark.parametrize("review_approved", [True, False])
+async def test_legacy_prototype_review_must_be_refreshed_before_preview(tmp_path, monkeypatch, review_approved):
+    workflow, rid, work, plan, _, failure, calls, browsers, old = await prototype_ready(tmp_path, monkeypatch)
+    plan.preview = PreviewSpec(command=Command(argv=["python", "-m", "preview", "{port}"]),
+        actions=[BrowserAction(action="expect_text", selector="#count", value="0")])
+    workflow.store.checkpoint(rid, "plan", plan.model_dump())
+    service = PreviewEvidence(workflow)
+    actions = workflow.store.get(rid, "prototype")["browser_actions"]
+    human = workflow.approvals.human(rid, work, actions)
+    source = tree_hash(work)
+    original_task = workflow.store.get(rid, "develop/task/T1")
+    counters = {key: workflow.store.get(rid, key) for key in ("rounds/T1", "recovery/budgets/diagnosis/T1")}
+    assert human and service.binding(rid, work, plan) is None
+    allowed = workflow.recovery_policy.diagnosis_actions(rid, failure, work, plan)
+    assert "prototype_recheck" in allowed and "preview_recheck" not in allowed
+    with pytest.raises(AA2Error, match="人工审批证据"):
+        workflow._task_approval_context(rid, work, {"specification": {"frontend": True}})
+
+    async def no_application_preview(*args, **kwargs):
+        raise AssertionError("Refreshing a prototype cannot execute an application preview")
+
+    monkeypatch.setattr("auto_agents_2.preview_evidence.inspect_application", no_application_preview)
+    workflow.agent.approved = review_approved
+    await workflow.recovery.resume(rid)
+    assert [stage for stage, _ in calls] == ["decision", "review"] and len(browsers) == 1
+    assert workflow.approvals.human(rid, work, actions) == human
+    assert tree_hash(work) == source and workflow.store.get(rid, "plan") == plan.model_dump()
+    assert {key: workflow.store.get(rid, key) for key in counters} == counters
+    assert workflow.store.get(rid, "develop/task/T1")["checks"] == original_task["checks"]
+    assert not workflow.store.pending(rid)
+    if review_approved:
+        assert service.binding(rid, work, plan)
+        assert "preview_recheck" in workflow.recovery_policy.diagnosis_actions(rid, failure, work, plan)
+        assert workflow.store.get(rid, "recovery/active") is None
+        assert workflow.store.get(rid, "develop/task/T1")["phase"] == "tested"
+        assert workflow._task_approval_context(rid, work, {"specification": {"frontend": True}})
+    else:
+        assert service.binding(rid, work, plan) is None
+        assert workflow.store.get(rid, "prototype_approval") == old
+        assert workflow.store.get(rid, "develop/task/T1") == original_task
+        assert workflow.store.get(rid, "recovery/active")["failure"]["component"] == "prototype_verification"
 
 
 async def test_collects_historical_contract_and_preview_before_accepting_retained_task(tmp_path, monkeypatch):

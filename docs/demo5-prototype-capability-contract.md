@@ -88,3 +88,9 @@ recheck_prototype 仍由现有许可执行；合法产品问题产生现有失�
 独立真实重检探针确认：仅 artifacts.put 的旧审核在活跃运行中受 ownership 保护，但成功后因没有根引用会被 GC 删除。candidate/ 根也会在 finish_delivery 被压缩，因此初次 pending 与重检均改用 PrototypeApprovals.archive_review，先写 recovery/prototype-review-history/<hash> 引用，再清旧缓存。相同内容重入幂等；不改 GC 政策，不引入审计保留系统。
 
 四个回归组合覆盖初次/重检、归档根落盘后中断/正常路径，经过真实 finish_delivery 清理（仅夹具使用合成完成回执）后检查旧审核 JSON 和截图可读、候选清理确实执行、人工绑定和累计次数保留。旧代码四项均失败。两个复审问题分别测试提交，最终固定源码仍须全量和独立复审后才能恢复真实 demo5。
+
+## 全量复验：应用预览夹具的审核起点
+
+固定 186c56d 的 full2 正式结果为 2401 passed / 25 failed（2426项，2205.74秒，源码摘要前后一致）。三组失败共同来自应用预览 ready 复用原型重检 ready：后者刻意把当前审核降为旧 ReviewResult，却被前者当作已经具备有效原型审核。PreviewEvidence.binding 原本就要求 approvals.current；新权威协议使该旧记录正确失效。20项在测试代理强取 preview_recheck 时 KeyError，另5项是同一缺失资格导致的引用、等待或动作集合断言失败。
+
+仅拆清测试起点：原型重检夹具默认继续保留旧审核；应用预览夹具显式保留 approval_fixture 已构造的当前结构化审核，并调用真实 approvals.current 断言前提。原有预览合同、异常、取消、权限竞态和真实浏览器断言均不改，生产源码不放宽。补充通过真实 RecoveryController.resume 的批准/拒绝两条组合路径：旧审核不能提供预览动作或派发任务；仅在正常原型重检通过后恢复资格，拒绝仍阻塞；人工绑定、源码、计划、检查和累计次数保持原值。此测试修正不为真实旧项目补写审核，生产兼容语义仍是正常入口重审。
