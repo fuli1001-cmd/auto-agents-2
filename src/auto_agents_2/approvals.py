@@ -122,6 +122,14 @@ class PrototypeApprovals:
                 "decision": "approve", "artifact_hash": question["artifact_hash"], "binding": kind,
                 "content_hash": binding["hash"], "actions_hash": binding["actions_hash"]}
 
+    def archive_review(self, rid, value):
+        ref = self.artifacts.put(value, "prototype-review-history")
+        # Run ownership only lasts until success, and candidate/ is compacted
+        # at delivery. Keep the superseded review reachable before dropping
+        # its cache; identical retries reuse this content-addressed root.
+        self.store.checkpoint(rid, "recovery/prototype-review-history/" + ref["hash"], ref)
+        return ref
+
     def review_inputs(self, rid, work, actions, visuals):
         source = source_context(self.store, self.artifacts, rid)["prototype_requirement_source"]
         basis = review_basis(source, self.store.get(rid, "clarify", {}), prototype_identity(work, actions), visuals)

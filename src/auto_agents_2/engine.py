@@ -1291,7 +1291,7 @@ class WorkflowEngine:
                               source_hash=fingerprint)
         basis, source = self.approvals.review_inputs(rid, work, document.model_dump()["browser_actions"], pending["visuals"])
         if "review" in pending and not review_valid(pending["review"], basis, source):
-            self.artifacts.put(pending, "prototype-review-history")
+            self.approvals.archive_review(rid, pending)
             pending.pop("review")
             self.store.checkpoint(rid, key, pending)
         if "review" not in pending:

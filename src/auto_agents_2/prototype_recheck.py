@@ -46,7 +46,7 @@ async def recheck_prototype(engine, rid, work, permit_key, failure):
         raise StateConflict("Prototype recheck report no longer matches the approved contract or checker")
     basis, source = approvals.review_inputs(rid, work, actions, report["results"])
     if "review" in saved and not review_valid(saved["review"], basis, source):
-        engine.artifacts.put(saved, "prototype-review-history")
+        approvals.archive_review(rid, saved)
         saved.pop("review")
         saved.pop("phase", None)
         store.checkpoint(rid, key, saved)
