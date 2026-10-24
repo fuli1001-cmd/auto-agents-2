@@ -76,3 +76,9 @@ recheck_prototype 仍由现有许可执行；合法产品问题产生现有失�
 - 真实回放验证两个原始拒绝的哈希、124316 字节候选、258846 字节报告与64浏览器组合；新 Engine 在问题登记/产品回退前拒绝无依据响应。结果 demo5-review-authority-real-replay.json。未运行候选脚本，未改历史项目；这不等于真实模型已经复审通过。
 - 固定提交的全量测试和独立审查为恢复前门禁，完成记录写在本机 task 目录，不能沿用 b9885bd 的2380项结果。
 - 最终自查补全缺字段依据的严格拒绝：88 项相关测试通过，63.63 秒；不完整但重新哈希的依据不再触发目录 KeyError。记录 demo5-review-authority-final-targeted.xml。
+
+## 独立复审后：恢复转移修正
+
+固定 fceb7a0 的独立隔离探针确认：合法澄清拒绝从重检抛出 Replan 后，旧 recovery/active 保持 started，生产循环优先重放它而永远到不了澄清。现在在 prototype_recheck 的恢复责任层用既有 _finish / Store.finish_recovery 事务结束旧动作并登记未授权的 clarify pending。新阶段仍必须通过 _grant_replan；不复用重检许可，不清累计次数。
+
+新增普通、事务前中断和事务后中断三个真实调用回归，旧代码均因 Replan 逸出失败。验证浏览器/模型只执行一次、旧许可完成、新澄清尚未授权、原计划/人工批准/候选/预算保留。此修正不改变其它恢复动作或主循环优先级。

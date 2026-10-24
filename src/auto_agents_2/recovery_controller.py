@@ -509,8 +509,18 @@ class RecoveryController:
             self._finish(rid, active, {}, successor=failure.model_dump())
             return
         if decision.action == "prototype_recheck":
+            from .engine import Replan
             from .prototype_recheck import recheck_prototype
-            successor = await recheck_prototype(engine, rid, work, active["permit"], failure)
+            try:
+                successor = await recheck_prototype(engine, rid, work, active["permit"], failure)
+            except Replan as exc:
+                if exc.stage != "clarify":
+                    raise
+                # Rechecking evidence did not authorize editing requirements.
+                # Retire that action atomically; the normal replan gate must
+                # separately authorize the validated source clarification.
+                self._finish(rid, active, {}, replan=(exc.stage, exc.reason))
+                return
             if successor:
                 self._finish(rid, active, {}, successor=successor.model_dump())
                 return
