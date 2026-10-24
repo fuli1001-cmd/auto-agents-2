@@ -21,6 +21,7 @@ from .evidence import NODE_RUNTIME_CACHES
 from .network import OWNERSHIP_FAILURE, PreviewProxy, preview_owner
 from .process_ownership import PreviewOwnershipError
 from .progress import capture_output, current_activity
+from .prototype_contract import PROTOTYPE_VIEWPORTS
 from .safe_files import directory_fd, regular_file
 from .sandbox import SandboxRunner
 from .util import atomic_write, digest, scrub_text
@@ -426,7 +427,7 @@ async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[d
                 raise PrototypeBrowserError("Prototype browser startup failed: " + scrub_text(str(exc)), []) from exc
             try:
                 for route, resolved in routes:
-                    for width, height in ((1440, 900), (390, 844)):
+                    for width, height in PROTOTYPE_VIEWPORTS:
                         errors = []
                         completed = []
                         row = {"page": unquote(urlsplit(resolved).path).lstrip("/"), "route": route,

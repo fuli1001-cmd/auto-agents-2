@@ -2,6 +2,7 @@ import asyncio
 import copy
 
 import pytest
+from prototype_review_fixtures import prototype_verdict
 from test_manifest_references import plan
 from test_prototype_approvals import approval_fixture
 
@@ -64,7 +65,7 @@ async def ready(tmp_path, monkeypatch):
                 assert browser_calls and context["browser_evidence"]
                 assert context["unresolved_issues"]
                 assert context["feedback"]["previous_approval"] == old
-                return ReviewResult(approved=self.approved, summary="Fresh images reviewed")
+                return prototype_verdict(context, approved=self.approved, summary="Fresh images reviewed")
             assert context["prototype_approval"]["human"]["question_id"] == question["id"]
             return ReviewResult(approved=True, summary="Retained implementation and fresh prerequisite verified")
 

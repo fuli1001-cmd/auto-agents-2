@@ -79,6 +79,15 @@ from .preview_evidence import PreviewEvidence
 from .profiles import ProjectProfile
 from .progress import observe_activity, safe_event
 from .proposal_recovery import ProposalRecovery
+from .prototype_contract import prototype_context
+from .prototype_review import (
+    InvalidPrototypeReview,
+    PrototypeReview,
+    rejection,
+    review_basis,
+    review_valid,
+    validate_review,
+)
 from .providers import Agent, ProviderRouter
 from .recovery import (
     ExecutionContract,
@@ -856,7 +865,46 @@ class WorkflowEngine:
             raise asyncio.CancelledError()
         return answer
 
+    def _prototype_review_context(self, rid, work, context):
+        controlled = prototype_context(self, rid)
+        spec = self.store.get(rid, "clarify", {})
+        actions = context.get("prototype", {}).get("browser_actions", [])
+        basis = review_basis(controlled["prototype_requirement_source"], spec,
+                             prototype_identity(work, actions), context.get("browser_evidence", []))
+        return {**context, **controlled, "specification": spec, "prototype_review_basis": basis}
+
+    def _validate_stage_response(self, result, stage, context, rid):
+        if stage != "review" or context.get("review_kind") != "prototype":
+            return result
+        try:
+            return validate_review(result, context.get("prototype_review_basis"),
+                                   context.get("prototype_requirement_source", {}))
+        except InvalidPrototypeReview as exc:
+            ref = self.artifacts.put({"response": exc.response, "validation": exc.details,
+                "basis": context.get("prototype_review_basis")}, "invalid-prototype-review")
+            exc.details = {**exc.details, "response_ref": ref}
+            self.store.event(rid, "prototype.review_invalid", {"code": exc.details["code"], "artifact": ref})
+            raise
+
+    def _prototype_rejection(self, review, *, product_replan=True):
+        review = PrototypeReview.model_validate(review.model_dump() if hasattr(review, "model_dump") else review)
+        owner, reason = rejection(review)
+        if owner == "controller":
+            ref = self.artifacts.put(review.model_dump(), "prototype-capability-gap")
+            raise HumanIntervention(HumanRequirement(kind="external_input", reason=reason,
+                action="核对所引用的真实要求及当前阶段；通过正式职责修订或补足能力，不能执行候选采集脚本或忽略要求。",
+                resume_condition="重新核验要求来源、实际能力和原型证据；确认本身不替代验收。",
+                evidence_refs=[ref["hash"]], evidence={"review": ref}),
+                reason_code="prototype_evidence_capability_unavailable", phase="prototype")
+        if product_replan or owner != "prototype":
+            raise Replan(owner, reason)
+
     async def _invoke(self, stage, context, schema, workspace, rid, key, fresh=False, *, interactive_retry=True):
+        if stage == "prototype":
+            context = {**context, **prototype_context(self, rid)}
+        elif stage == "review" and context.get("review_kind") == "prototype":
+            context = self._prototype_review_context(rid, workspace, context)
+            schema = PrototypeReview
         if stage in {"implement", "verify", "recovery_diagnosis"} or (stage == "review" and
                 context.get("review_kind", "implementation") in {
                     "plan", "plan_patch", "implementation", "test_changes", "recovery_diagnosis"}):
@@ -917,7 +965,7 @@ class WorkflowEngine:
         if saved.get("identity") in compatible and saved.get("result"):
             if saved.get("cleanup_record"):
                 self.sandbox.confirm_record(saved["cleanup_record"])
-            return schema.model_validate(saved["result"])
+            return self._validate_stage_response(schema.model_validate(saved["result"]), stage, context, rid)
         self.store.update(rid, stage=stage)
         try:
             result = await self.agent.invoke(stage, context, schema, workspace, rid, key, fresh)
@@ -932,6 +980,7 @@ class WorkflowEngine:
             self.store.checkpoint(rid, "invocation-drift/" + key, {"source_hash": source_before,
                 "proposal": self.artifacts.put(result.model_dump(mode="json"), "unaccepted_proposal")})
             raise PolicyViolation("Workspace changed while generating or reviewing a candidate; preserving user changes")
+        result = self._validate_stage_response(result, stage, context, rid)
         artifact = self.artifacts.put(result.model_dump(mode="json"), stage)
         if isinstance(result, ReviewResult):
             IssueLedger(self.store, self.artifacts).record(rid, logical_operation or key, result, context)
@@ -1028,7 +1077,8 @@ class WorkflowEngine:
         actions = [action.model_dump() for action in document.browser_actions]
         identity = prototype_identity(work, actions)
         evidence = {**identity, "review": review, "visuals": visuals, "browser_version": self.browser_check_version()}
-        if not self.approvals.automation_current(evidence, identity, actions, self.browser_check_version(), expected_routes=self.approvals.routes(work, actions)):
+        if not self.approvals.automation_current(evidence, identity, actions, self.browser_check_version(), expected_routes=self.approvals.routes(work, actions),
+                review_inputs=self.approvals.review_inputs(rid, work, actions, visuals)):
             raise Replan("prototype", "原型审批缺少完整浏览器证据或独立审查，需要重新核验")
         human = self.approvals.human(rid, work, actions)
         if not human:
@@ -1057,9 +1107,11 @@ class WorkflowEngine:
         verification_key = "candidate/prototype-approval-checks/" + digest([
             binding["identity"], self.store.get(rid, "clarify", {}), self.browser_check_version()])
         checked = self.store.get(rid, verification_key, {})
-        if self.approvals.automation_current(checked, binding, actions, self.browser_check_version(), expected_routes=self.approvals.routes(work, actions)):
+        if self.approvals.automation_current(checked, binding, actions, self.browser_check_version(), expected_routes=self.approvals.routes(work, actions),
+                review_inputs=self.approvals.review_inputs(rid, work, actions, checked.get("visuals", []))):
             previous = checked
-        if self.approvals.automation_current(previous, binding, actions, self.browser_check_version(), expected_routes=self.approvals.routes(work, actions)):
+        if self.approvals.automation_current(previous, binding, actions, self.browser_check_version(), expected_routes=self.approvals.routes(work, actions),
+                review_inputs=self.approvals.review_inputs(rid, work, actions, previous.get("visuals", []))):
             review, visuals = previous["review"], previous["visuals"]
         else:
             report = await self._prototype_browser_report(rid, work, document)
@@ -1072,7 +1124,7 @@ class WorkflowEngine:
                 "project": self.contexts.build(work)}, ReviewResult, work, rid,
                 "prototype-approval-review/" + binding["identity"], fresh=True)).model_dump()
             if not review["approved"]:
-                raise Replan("prototype", review["summary"])
+                self._prototype_rejection(review)
             self.store.checkpoint(rid, verification_key, {**binding, "review": review, "visuals": visuals,
                                                          "browser_version": self.browser_check_version()})
         if prototype_identity(work, actions) != binding:
@@ -1237,12 +1289,17 @@ class WorkflowEngine:
         pending["visuals"] = self._archive_visuals(pending["visuals"])
         self._replan_evidence(rid, "prototype-browser", browser_criteria(document.browser_actions, pending["visuals"]),
                               source_hash=fingerprint)
+        basis, source = self.approvals.review_inputs(rid, work, document.model_dump()["browser_actions"], pending["visuals"])
+        if "review" in pending and not review_valid(pending["review"], basis, source):
+            self.artifacts.put(pending, "prototype-review-history")
+            pending.pop("review")
+            self.store.checkpoint(rid, key, pending)
         if "review" not in pending:
             review = await self._invoke("review", {"specification": assessment, "prototype": document.model_dump(),
                 "review_kind": "prototype", "design_evidence": pending["retrieved"], "browser_evidence": pending["visuals"],
                 "project": self.contexts.build(work)}, ReviewResult, work, rid, "prototype-review", fresh=True)
             if not review.approved:
-                raise Replan("prototype", review.summary)
+                self._prototype_rejection(review)
             pending["review"] = review.model_dump()
             self.store.checkpoint(rid, key, pending)
         if self._prototype_hash(work) != fingerprint:

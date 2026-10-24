@@ -4,6 +4,7 @@ import re
 import httpx
 import pytest
 from browser_fixtures import PNG, prototype_rows
+from prototype_review_fixtures import prototype_verdict
 from test_workflow import CodingAgent, engine
 
 from auto_agents_2.engine import Replan
@@ -13,7 +14,6 @@ from auto_agents_2.models import (
     Change,
     DocumentResult,
     IntakeResult,
-    ReviewResult,
     SourceEvidence,
 )
 from auto_agents_2.util import digest
@@ -37,7 +37,7 @@ def prototype_fixture(tmp_path, monkeypatch, *, empty=False):
                     Change(path="design/prototypes/index.html", content="<h1>Generated</h1>")]})
             assert stage == "review" and fresh
             assert (workspace / "design/prototypes").is_dir()
-            return ReviewResult(approved=True, summary="verified")
+            return prototype_verdict(context, summary="verified")
 
     workflow = engine(tmp_path, Agent())
     git(tmp_path, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-m", "baseline")
@@ -184,7 +184,7 @@ async def test_resume_refreshes_legacy_internal_question_with_actual_browser_rep
                 assert report["results"] == browser_rows
                 assert report["source_hash"] == workflow._prototype_hash(tmp_path)
                 return document.model_copy(update={"questions": ["是否需要导出？"] if genuine_question and fresh else []})
-            return ReviewResult(approved=True, summary="verified")
+            return prototype_verdict(context, summary="verified")
 
     workflow.agent = Agent()
 

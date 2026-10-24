@@ -4,6 +4,7 @@ from __future__ import annotations
 from .faults import StateConflict
 from .issues import IssueLedger
 from .models import DocumentResult, ReviewResult
+from .prototype_review import PrototypeReview, review_valid
 from .recovery import FailureRecord
 from .util import digest
 from .workspace import tree_hash
@@ -43,6 +44,12 @@ async def recheck_prototype(engine, rid, work, permit_key, failure):
     if (report.get("version") != engine.browser_check_version() or report.get("source_hash") != binding["hash"]
             or report.get("actions_hash") != binding["actions_hash"]):
         raise StateConflict("Prototype recheck report no longer matches the approved contract or checker")
+    basis, source = approvals.review_inputs(rid, work, actions, report["results"])
+    if "review" in saved and not review_valid(saved["review"], basis, source):
+        engine.artifacts.put(saved, "prototype-review-history")
+        saved.pop("review")
+        saved.pop("phase", None)
+        store.checkpoint(rid, key, saved)
     if saved.get("phase") == "verified":
         current = approvals.current(rid, work, actions, engine.browser_check_version())
         if current and current["review"] == saved["review"] and current["visuals"] == report["results"]:
@@ -62,10 +69,12 @@ async def recheck_prototype(engine, rid, work, permit_key, failure):
         saved["review"] = review.model_dump()
         store.checkpoint(rid, key, saved)
     review = saved.get("review", {})
+    if review and not review["approved"]:
+        engine._prototype_rejection(review, product_replan=False)
     evidence = {**binding, "review": review, "visuals": report["results"],
                 "browser_version": engine.browser_check_version()}
     if report["error"] or not approvals.automation_current(evidence, binding, actions,
-            engine.browser_check_version(), expected_routes=approvals.routes(work, actions)):
+            engine.browser_check_version(), expected_routes=approvals.routes(work, actions), review_inputs=(basis, source)):
         return FailureRecord.create(kind="review" if review else "evidence", component="prototype_verification",
             origin_id=failure.origin_id, task_id=failure.task_id, step="prototype_recheck",
             obligations=failure.obligations, evidence_refs=[key], evidence={"prototype_browser_report": saved["report"],
@@ -76,6 +85,6 @@ async def recheck_prototype(engine, rid, work, permit_key, failure):
     # own independent review; passing production checks cannot close these issues.
     ledger = IssueLedger(store, engine.artifacts)
     for scope in ("prototype-review", "prototype-approval-review/" + binding["identity"]):
-        ledger.record(rid, scope, ReviewResult.model_validate(review), context)
+        ledger.record(rid, scope, PrototypeReview.model_validate(review), context)
     store.checkpoint(rid, key, {**saved, "approval": approvals.context(record), "phase": "verified"})
     return None

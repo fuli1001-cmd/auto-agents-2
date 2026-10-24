@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from browser_fixtures import prototype_rows
 from evidence_test_fixtures import empty_contract, evidence_review
+from prototype_review_fixtures import prototype_verdict
 
 from auto_agents_2.config import ConfigStore
 from auto_agents_2.engine import Replan, WorkflowEngine
@@ -74,6 +75,8 @@ class CodingAgent:
         assert fresh
         if context.get("review_kind") in {"plan", "plan_patch"}:
             return evidence_review(context)
+        if context.get("review_kind") == "prototype":
+            return prototype_verdict(context)
         return ReviewResult(approved=True, summary="verified")
 
 

@@ -19,6 +19,9 @@ class IssueLedger:
         observed = set()
         proof = self.artifacts.put({"review": review.model_dump(), "context_identity": digest(evidence)}, "issue_observation")
         for finding in review.findings:
+            # Advisory observations stay in the archived review, not the open defect ledger.
+            if getattr(finding, "kind", None) == "advisory":
+                continue
             body = finding.model_dump()
             identity = digest([scope, finding.severity, finding.location, finding.description, finding.resolution])
             observed.add(identity)

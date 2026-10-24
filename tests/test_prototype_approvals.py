@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 from browser_fixtures import PNG
+from prototype_review_fixtures import prototype_verdict
 from test_manifest_references import plan
 from test_workflow import CodingAgent, engine
 
@@ -30,7 +31,7 @@ def approval_fixture(tmp_path, monkeypatch, *, legacy=True, answer="1"):
         async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
             contexts.append((stage, copy.deepcopy(context)))
             if stage == "review" and context.get("review_kind") == "prototype":
-                return ReviewResult(approved=True, summary="Browser evidence independently reviewed")
+                return prototype_verdict(context, summary="Browser evidence independently reviewed")
             if stage in {"implement", "review"}:
                 receipt = context["prototype_approval"]
                 assert receipt["status"] == "approved" and receipt["human"]["decision"] == "approve"
@@ -64,6 +65,11 @@ def approval_fixture(tmp_path, monkeypatch, *, legacy=True, answer="1"):
         **identity, "visuals": visuals, "review": review, "browser_version": PROTOTYPE_BROWSER_VERSION}
     workflow.store.checkpoints(rid, {"prototype": document.model_dump(), "prototype_approval": approval,
         "clarify": IntakeResult(summary="UI", document="UI", frontend=True).model_dump()})
+
+    if not legacy:
+        basis, _ = workflow.approvals.review_inputs(rid, tmp_path, actions, visuals)
+        approval["review"] = prototype_verdict({"prototype_review_basis": basis}).model_dump()
+        workflow.store.checkpoint(rid, "prototype_approval", approval)
 
     async def browser(*args):
         browser_calls.append(args)
@@ -318,8 +324,8 @@ async def test_legacy_consent_cannot_bypass_fresh_automated_gates(tmp_path, monk
 
         monkeypatch.setattr("auto_agents_2.engine.inspect_prototype", failed)
     else:
-        async def rejected(*args, **kwargs):
-            return ReviewResult(approved=False, summary="Interaction failed")
+        async def rejected(stage, context, *args, **kwargs):
+            return prototype_verdict(context, approved=False, summary="Interaction failed")
 
         workflow.agent.invoke = rejected
     with pytest.raises(AA2Error, match="历史原型审批复核未通过.*Interaction failed"):

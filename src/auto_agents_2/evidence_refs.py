@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 
 from .evidence_admission import current_catalog
 from .execution_stages import current_stage_contract
+from .prototype_contract import current_prototype_contract
+from .prototype_review import context_basis_current
 from .stage_responsibilities import current_correction_contract
 from .util import digest
 
@@ -101,6 +103,13 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
     capabilities = context.get("controller_evidence_capabilities")
     if "controller_evidence_capabilities" in context and not current_catalog(capabilities):
         context.pop("controller_evidence_capabilities")
+    prototype_protocols = {}
+    for name, check in (("controller_prototype_contract", current_prototype_contract), ("prototype_review_basis", lambda value: context_basis_current(value, context))):
+        value = context.get(name)
+        if name in context and not check(value):
+            context.pop(name)
+        elif name in context:
+            prototype_protocols[name] = value
     origins = {}
     failure = context.get("failure") or {}
     if isinstance(failure, dict):
@@ -129,6 +138,11 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
         for alias, entry in list(refs.entries.items()):
             if entry.path == "controller_evidence_capabilities" or entry.path.startswith("controller_evidence_capabilities."):
                 refs.add(alias, entry.path, "controller_protocol", status="protocol")
+    for name in prototype_protocols:
+        if origins.get(name) != "proposal":
+            for alias, entry in list(refs.entries.items()):
+                if entry.path == name or entry.path.startswith(name + "."):
+                    refs.add(alias, entry.path, "controller_protocol", status="protocol")
     registered = list(aliases)
     if isinstance(failure, dict):
         registered.extend(failure.get("evidence_refs", []))

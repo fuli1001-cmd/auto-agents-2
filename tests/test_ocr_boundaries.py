@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from browser_fixtures import PNG
+from prototype_review_fixtures import prototype_verdict
 
 from auto_agents_2.approvals import PrototypeApprovals, exact_actions
 from auto_agents_2.artifacts import ArtifactStore
@@ -21,6 +22,7 @@ from auto_agents_2.logs import SanitizedLog
 from auto_agents_2.models import Change, CheckResult, Command, TaskSpec
 from auto_agents_2.planning import conflict
 from auto_agents_2.prompts import PromptCompiler
+from auto_agents_2.prototype_review import review_basis
 from auto_agents_2.providers import EventDecoder
 from auto_agents_2.readview import create_view, public_files
 from auto_agents_2.requirements import TextExtractor, decode_response
@@ -48,8 +50,11 @@ def test_prototype_receipt_requires_validated_review_complete_routes_and_images(
             for route in ("/a.html", "/b.html") for width in (1440, 390)]
     record = {**binding, "browser_version": 3, "review": {"approved": True, "summary": "review"}, "visuals": rows}
     approvals = PrototypeApprovals(store, artifacts)
+    source = {"status": "unavailable"}
+    basis = review_basis(source, {}, binding, rows)
+    record["review"] = prototype_verdict({"prototype_review_basis": basis}).model_dump()
     def current():
-        return approvals.automation_current(record, binding, [], 3, expected_routes=["/a.html", "/b.html"])
+        return approvals.automation_current(record, binding, [], 3, expected_routes=["/a.html", "/b.html"], review_inputs=(basis, source))
     assert current()
     if defect == "string_false":
         record["review"]["approved"] = "false"

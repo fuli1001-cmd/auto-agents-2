@@ -25,7 +25,7 @@ class ProposalRecovery:
             if tree_hash(work) != source:
                 raise StateConflict("Proposal recovery inputs changed; preserve the original request and user edits")
             if state.get("phase") == "completed":
-                return schema.model_validate(engine.artifacts.json(state["result"]))
+                return engine._validate_stage_response(schema.model_validate(engine.artifacts.json(state["result"])), stage, context, rid)
             if state.get("phase") == "rejected":
                 if state.get("permit"):
                     engine.recovery_policy.complete(rid, state["permit"], {"status": "invalid_structured_response"})
@@ -46,21 +46,27 @@ class ProposalRecovery:
                 "instruction": "Return one complete result satisfying the supplied schema. Preserve the original task, "
                                "constraints and evidence; this retry does not approve any gate.",
                 "previous_feedback": context.get("validation_feedback"),
+                **({"authority_validation": state["authority_validation"]} if state.get("authority_validation") else {}),
             }}
             call_key = operation if not attempt else f"{operation}/response-retry/{attempt}"
             engine.recovery_policy.start(rid, state.get("permit"))
             try:
                 result = await engine._invoke_once(stage, request, schema, work, rid, call_key, fresh,
                                                   logical_operation=operation, logical_context=context)
-            except InvalidStructuredResponse:
+            except InvalidStructuredResponse as exc:
                 if tree_hash(work) != source:
                     raise StateConflict("Proposal source changed after an invalid response; preserve user edits") from None
                 count = store.get(rid, counter, 0) + 1
+                from .prototype_review import InvalidPrototypeReview
+                authority = exc.details if isinstance(exc, InvalidPrototypeReview) else None
+                if authority:
+                    state["authority_validation"] = authority
                 failure = FailureRecord.create(kind="proposal", component="provider_response", origin_id=owner,
                     step="structured_response", phase=stage, obligations=[digest(schema.model_json_schema())],
                     evidence_refs=[key], evidence={"response_contract": {
                         "stage": stage, "operation": operation, "schema": schema.__name__,
                         "source_hash": source, "failed_responses": count,
+                        **({"authority_validation": authority} if authority else {}),
                         "action_effect": "Repeat this read-only model invocation; no checks or file writes are authorized."}})
                 pending = [q["key"] for q in store.decision_questions(rid, ["provider/" + call_key])
                            if q["answer"] is None]

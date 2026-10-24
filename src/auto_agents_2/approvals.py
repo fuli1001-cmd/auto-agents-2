@@ -6,7 +6,9 @@ from collections import defaultdict
 from pathlib import Path
 
 from .errors import AA2Error
-from .models import BrowserAction, ReviewResult
+from .models import BrowserAction
+from .prototype_contract import source_context
+from .prototype_review import review_basis, review_current
 from .util import digest
 from .workspace import legacy_tree_hash, tree_hash
 
@@ -120,7 +122,12 @@ class PrototypeApprovals:
                 "decision": "approve", "artifact_hash": question["artifact_hash"], "binding": kind,
                 "content_hash": binding["hash"], "actions_hash": binding["actions_hash"]}
 
-    def automation_current(self, record, binding, actions, browser_version, *, expected_routes):
+    def review_inputs(self, rid, work, actions, visuals):
+        source = source_context(self.store, self.artifacts, rid)["prototype_requirement_source"]
+        basis = review_basis(source, self.store.get(rid, "clarify", {}), prototype_identity(work, actions), visuals)
+        return basis, source
+
+    def automation_current(self, record, binding, actions, browser_version, *, expected_routes, review_inputs=None):
         if not isinstance(record, dict):
             return False
         if (any(record.get(key) != binding[key] for key in ("hash", "identity", "actions_hash"))
@@ -128,7 +135,9 @@ class PrototypeApprovals:
                 or not exact_actions(actions, record.get("visuals", []), expected_routes=expected_routes)):
             return False
         try:
-            if not ReviewResult.model_validate(record["review"]).approved:
+            if (review_inputs is None or review_inputs[0]["candidate_hash"] != binding["identity"]
+                    or review_inputs[0]["observations_hash"] != digest(record["visuals"])
+                    or not review_current(record["review"], *review_inputs)):
                 return False
             images = [image for row in record["visuals"] for image in [row, *row.get("tiles", [])]]
             for row in images:
@@ -148,7 +157,8 @@ class PrototypeApprovals:
         binding = prototype_identity(work, actions)
         human = self.human(rid, work, actions, record)
         if (human and human["content_hash"] == binding["hash"] and human["actions_hash"] == binding["actions_hash"]
-                and self.automation_current(record, binding, actions, browser_version, expected_routes=self.routes(work, actions))):
+                and self.automation_current(record, binding, actions, browser_version, expected_routes=self.routes(work, actions),
+                    review_inputs=self.review_inputs(rid, work, actions, record.get("visuals", [])))):
             return {**record, "human": human}
         return None
 
@@ -168,7 +178,8 @@ class PrototypeApprovals:
         previous = self.store.get(rid, "prototype_approval", {})
         record = {**binding, "human": human, "review": review, "visuals": visuals,
                   "browser_version": browser_version, "context_version": APPROVAL_CONTEXT_VERSION}
-        if not self.automation_current(record, binding, actions, browser_version, expected_routes=self.routes(work, actions)):
+        if not self.automation_current(record, binding, actions, browser_version, expected_routes=self.routes(work, actions),
+                review_inputs=self.review_inputs(rid, work, actions, visuals)):
             raise ValueError("Prototype approval requires complete browser evidence and an independent review")
         updates = {"prototype_approval": record}
         if previous and previous != record:

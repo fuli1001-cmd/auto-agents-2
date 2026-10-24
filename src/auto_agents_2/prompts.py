@@ -8,7 +8,7 @@ from .prompt_rules import COMMON, instructions
 from .research import request_documents
 
 INVOCATION_CONTRACT_VERSION = "2026-10-16.2"
-PROMPT_VERSION = "2026-10-23.visible-behavior-v1"
+PROMPT_VERSION = "2026-10-24.prototype-review-authority-v1"
 CORE = COMMON
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
@@ -78,6 +78,12 @@ class PromptCompiler:
         }.get(family, "Follow the task contract precisely.")
         data = json.dumps(request_documents(context), ensure_ascii=False, indent=2)
         task = ROLES[stage]
+        if purpose == "prototype":
+            from .prototype_contract import prototype_instructions
+            from .prototype_review import review_instructions
+            task += prototype_instructions(purpose, context)
+            if stage == "review":
+                task += review_instructions()
         if stage == "decision":
             task += (" When scope.candidates offers prototype_recheck, the controller can recapture and independently "
                      "review the existing approved prototype without regenerating it or reapproving its design. "
