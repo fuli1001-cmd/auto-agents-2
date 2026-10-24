@@ -152,11 +152,59 @@ class PreviewEvidence:
                 "command_hash": digest(spec.command.model_dump()), "input_hash": input_identity(work, spec.command),
                 "runtime_config_hash": runtime_configuration(work, spec.command, environment)}
 
+    def _unstarted_legacy_review_gap(self, rid, work, plan, permit, key, task, failure):
+        """Classify a protocol-only prerequisite gap, never grant a different action.
+
+        The preview journal is created before comparison, checks or browser work.
+        Once it exists, execution may be occupied and must retain its original gate.
+        """
+        if (not isinstance(permit, dict) or permit.get("phase") not in {"reserved", "started"}
+                or permit.get("action", {}).get("action") != "preview_recheck"
+                or permit["action"].get("failure_id") != failure.id
+                or permit["action"].get("task_ids") != [task.id]
+                or permit.get("task_scopes") != {task.id: task.allowed_paths}
+                or permit.get("owner") != failure.origin_id
+                or self.store.get(rid, key) is not None
+                or self.store.get(rid, "invocation/" + key + "/comparison") is not None
+                or (self.store.get(rid, "delivery/journal") or {}).get("publication_started")):
+            return False
+        contracts = self.contracts(rid, plan)
+        human_binding = self.engine.approvals.recheck_binding(rid, work)
+        if (not contracts or not human_binding
+                or tree_hash(work) != permit.get("source_hash")
+                or digest(self.store.get(rid, "plan")) != permit.get("plan_hash")
+                or self.store.get(rid, "plan") != plan.model_dump()
+                or permit.get("preview_binding") != {"contracts_hash": digest(contracts), "approval": human_binding}):
+            return False
+        record = self.store.get(rid, "prototype_approval")
+        if (not isinstance(record, dict)
+                or any(record.get(field) != human_binding[field] for field in ("hash", "identity", "actions_hash"))
+                or record.get("browser_version") != self.engine.browser_check_version()):
+            return False
+        try:
+            # A malformed/current rejected review is not an obsolete legacy schema.
+            legacy = ReviewResult.model_validate(record.get("review"))
+        except (ValueError, TypeError):
+            return False
+        return legacy.approved and self.binding(rid, work, plan) is None
+
     async def recheck(self, rid, work, plan, permit_key, failure):
         engine, store = self.engine, self.store
         permit = store.get(rid, permit_key)
         key = "recovery/preview-rechecks/" + digest(permit_key)
         task = next(t for t in plan.tasks if t.id == failure.task_id)
+        if self._unstarted_legacy_review_gap(rid, work, plan, permit, key, task, failure):
+            # The existing recovery transaction rejects this unexecuted action
+            # and records a new fact. Prototype refresh needs its own authorization.
+            return FailureRecord.create(kind="review", component="prototype_verification",
+                origin_id=failure.origin_id, task_id=failure.task_id, step="prototype_review_protocol",
+                obligations=failure.obligations, evidence_refs=[permit_key, "prototype_approval"],
+                evidence={"execution_status": "not_started", "preview_permit": permit_key,
+                    "prototype_approval": store.get(rid, "prototype_approval"),
+                    "previous_failure": failure.model_dump(), "task": task.model_dump(),
+                    "validation_error": "The old automatic prototype review does not satisfy the current authority "
+                        "protocol. No preview comparison, checks or browser execution started. Retain this permission "
+                        "and candidate; independently authorize and perform prototype evidence refresh before preview."})
 
         def require_binding():
             if (tree_hash(work) != permit["source_hash"] or digest(store.get(rid, "plan")) != permit["plan_hash"]
