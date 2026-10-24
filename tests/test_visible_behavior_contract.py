@@ -53,7 +53,7 @@ async def test_real_browser_feedback_must_be_visible_at_both_callers(browser_cac
         assert not list((root / 'tmp').glob('preview-*'))
 
 
-@pytest.mark.parametrize('old_version', [6, 7, 8, 9])
+@pytest.mark.parametrize('old_version', [6, 7, 8, 9, 10])
 async def test_previous_text_only_browser_evidence_rechecks_without_replacing_human_consent(
         tmp_path, monkeypatch, old_version):
     from test_prototype_approvals import approval_fixture

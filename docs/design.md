@@ -497,7 +497,7 @@ permits are not rewritten. None of these representations by itself proves a
 check passed or permits a stage transition, source edit, or budget reset.
 ### Visible UI assertions
 
-Controller browser protocol version 10 gives `expect_text` one retrying observation:
+Controller browser protocol version 11 gives `expect_text` one retrying observation:
 a unique element's current layout visibility and text must match simultaneously.
 HTML uses rendered `innerText`; native input button/submit/reset labels use `value`;
 SVG uses visible, layout-bearing text nodes, excluding hidden descendants and
@@ -506,7 +506,7 @@ String matching is exact and case sensitive, with Playwright-compatible whitespa
 normalization (including removal of U+200B/U+00AD). Display-contents elements use
 child layout visibility. An earlier visible state cannot validate later hidden text.
 Both prototype and implemented preview use this shared action and the existing
-10-second action deadline. Automatic records from versions 6, 7, 8 and 9 must be
+10-second action deadline. Automatic records from versions 6, 7, 8, 9 and 10 must be
 rechecked; unchanged, correctly bound human consent remains valid. This is not a
 pixel-rendering engine or proof of contrast, opacity, occlusion, clipping, SVG glyph
 transforms, all user states or business semantics. Independent review examines source,
@@ -531,6 +531,11 @@ observation or a completed action. Missing targets/frames remain nonmatches;
 permanent loss or repeated navigation must eventually fail. Closed page/browser,
 invalid or ambiguous selectors, JavaScript evaluation failures, unknown driver
 errors and cancellation are not swallowed. Matching error text in a page-thrown
-JavaScript exception does not grant retry semantics. The HTML/native-label/SVG
-visibility and text predicate is unchanged. See the narrowly scoped navigation
+JavaScript exception does not grant retry semantics: the synchronous expression
+catches all its thrown values and returns a separate script-failure marker. Only
+bounded string details are copied, without serializing the thrown object or invoking
+its string conversion; unreadable details still produce a terminal script failure.
+Python raises this failure outside the driver retry catch. Public exception message,
+name or stack alone cannot distinguish a page-thrown string from real frame loss.
+The HTML/native-label/SVG visibility and text predicate is unchanged. See the narrowly scoped navigation
 follow-up in [Demo5 optimization](demo5-recovery-contract-optimization.md).
