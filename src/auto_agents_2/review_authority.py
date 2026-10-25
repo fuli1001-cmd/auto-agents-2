@@ -15,6 +15,9 @@ from .models import Record, ReviewResult
 from .util import digest
 
 VERSION = 1
+# Existing validation semantics, also disclosed to the response producer.
+FINDING_COVERAGE = {"defect": "violated", "evidence_gap": "unverified", "source_dispute": "unverified"}
+GOAL_KINDS = {"submitted_requirement", "accepted_interpretation"}
 OWNERS = Literal["clarify", "provider_research", "prototype", "design", "plan", "develop", "checks", "controller"]
 KINDS = {
     "coverage_review": ("clarify", "Interpret submitted goals without inventing user statements or consent. Preserve every original obligation; assess actual existing coverage."),
@@ -31,19 +34,22 @@ KINDS = {
 
 
 class CriterionAssessment(Record):
-    criterion_id: str
-    status: Literal["satisfied", "violated", "unverified", "later_stage"]
+    criterion_id: str = Field(description="Exact controller_review_basis.criteria ID, including its prefix.")
+    status: Literal["satisfied", "violated", "unverified", "later_stage"] = Field(
+        description="Use response_contract.finding_coverage for blocking findings; every unresolved criterion needs a mapped finding.")
     reason: str = Field(min_length=1)
 
 
 class FindingAuthority(Record):
     finding_index: int = Field(ge=0)
-    criterion_id: str
+    criterion_id: str = Field(description="Exact controller_review_basis.criteria ID, not a bare specification ID.")
     kind: Literal["defect", "evidence_gap", "advisory", "source_dispute"]
     owner: OWNERS
     source_quote: str = ""
-    observation_refs: list[str] = Field(min_length=1)
-    method_source: str = ""
+    observation_refs: list[str] = Field(min_length=1,
+        description="Exact keys of controller_review_basis.observations only; material source_ref/path/hash is not this namespace.")
+    method_source: str = Field(default="",
+        description="For source_dispute, exact key of controller_review_basis.sources; otherwise empty. Not a material source_ref.")
     method_quote: str = ""
     rationale: str = Field(min_length=1)
 
@@ -51,25 +57,29 @@ class FindingAuthority(Record):
 class TechnicalChoice(Record):
     id: str = Field(min_length=1)
     clause: str = Field(min_length=1)
-    goal_ids: list[str] = Field(min_length=1)
+    goal_ids: list[str] = Field(min_length=1,
+        description="Exact goal criterion IDs listed in response_contract.goal_ids, including requirement: prefixes.")
     method_origin: Literal["derived_choice", "explicit_input_method"]
     input_quote: str = ""
     method_source: str = "input"
     feasibility: Literal["supported", "not_yet_verified", "unavailable"]
-    evidence_refs: list[str] = []
+    evidence_refs: list[str] = Field(default_factory=list,
+        description="Exact keys of controller_review_basis.observations; no material paths or inferred evidence.")
     reason: str = Field(min_length=1)
 
 
 class ObligationSource(Record):
-    obligation_id: str
-    goal_ids: list[str] = Field(min_length=1)
+    obligation_id: str = Field(description="Exact entry of controller_review_basis.unsupported for THIS review, not historical feedback.")
+    goal_ids: list[str] = Field(min_length=1,
+        description="Exact goal criterion IDs in response_contract.goal_ids; also included in preserve_ids.")
     method_source: str
     method_quote: str = Field(min_length=1)
     classification: Literal["explicit_input_method", "necessary_technical_condition", "derived_choice", "unresolved"]
     disposition: Literal["genuine_gap", "correct_method", "unresolved"]
     owner: OWNERS
     input_quote: str = ""
-    preserve_ids: list[str] = Field(min_length=1)
+    preserve_ids: list[str] = Field(min_length=1,
+        description="Exact controller criterion IDs, including prefixes; preserve every referenced goal.")
     reason: str = Field(min_length=1)
 
 
@@ -85,11 +95,12 @@ class AuthorityAssessment(Record):
     version: Literal[1] = VERSION
     basis_hash: str
     candidate_hash: str
-    coverage: list[CriterionAssessment]
+    coverage: list[CriterionAssessment] = Field(description="Assess each controller criterion exactly once; no omitted or invented IDs.")
     findings: list[FindingAuthority] = []
     technical_choices: list[TechnicalChoice] = []
     choices_complete: bool
-    obligations: list[ObligationSource] = []
+    obligations: list[ObligationSource] = Field(default_factory=list,
+        description="Exactly one row per current basis.unsupported ID; [] when unsupported is empty, even if historical feedback lists obligations.")
     amendments: list[AmendmentAssessment] = []
     requirements_preserved: bool
     explanation: str = Field(min_length=1)
@@ -176,6 +187,48 @@ def dispute_targets(findings, basis):
             value = {"source": finding.method_source, **source["contract_target"]}
             targets[digest(value)] = value
     return [targets[key] for key in sorted(targets)]
+
+
+def response_contract(criteria, sources, observations, unsupported):
+    """Describe this finite output interface; never authorize or rewrite a verdict."""
+    return {
+        "version": 1,
+        "criterion_ids": [c["id"] for c in criteria],
+        "goal_ids": [c["id"] for c in criteria if c["kind"] in GOAL_KINDS],
+        "source_ids": sorted(sources),
+        "observation_ids": sorted(observations),
+        "unsupported_obligation_ids": list(unsupported),
+        "finding_coverage": dict(FINDING_COVERAGE),
+        "rules": [
+            "These exact IDs apply inside authority only. Material source_ref/material_id paths locate readable "
+            "content but do not become source_ids or observation_ids. Never drop a criterion prefix.",
+            "coverage contains every criterion_id exactly once. findings maps every top-level finding by its "
+            "zero-based index exactly once. Non-advisory findings must be major/blocking; advisory is minor.",
+            "Each non-advisory finding's criterion coverage equals finding_coverage[kind]. The set of all "
+            "violated/unverified criteria equals the set mapped by non-advisory findings; no unpaired coverage "
+            "or findings. If one issue affects multiple criteria, give each unresolved criterion its own mapped finding.",
+            "approved is true only with no blocking findings, requirements_preserved=true and choices_complete=true. "
+            "A stage criterion cannot be later_stage; final verify cannot defer any criterion.",
+            "Product defects/evidence gaps quote the actual criterion statement. A general stage role can ground "
+            "only a source_dispute (except doctor), not an invented product obligation.",
+            "source_dispute uses an exact sources key and a nonempty method_quote from that source's text, "
+            "with its actual owner. A contract_target source needs its complete text. Other kinds leave method_source "
+            "and method_quote empty. Explicit input/answer methods require clarification, not a technical waiver.",
+            "technical_choices are for design only: unique IDs, exact clauses in sources.candidate.text, goal_ids "
+            "from the goal list and evidence_refs from the observation list. Explicit input methods must quote "
+            "the submitted input/answer source. not_yet_verified is not execution success; unavailable cannot be adopted.",
+            "obligations maps exactly unsupported_obligation_ids once each; it is [] when that list is empty. "
+            "Historical blocked_admission is background, not a new current obligation. goal_ids are a subset "
+            "of preserve_ids; preserve_ids use criterion_ids. method_quote must occur in the selected source.",
+            "correct_method is a derived_choice at the selected proposal/technical source's owner and requires "
+            "a source_dispute with exactly the same owner, method_source and method_quote. A genuine_gap needs "
+            "explicit_input_method or necessary_technical_condition. Unknown/derived methods do not self-authorize waiting.",
+            "amendments is [] without a controller correction. Approval of a correction requires every old clause "
+            "mapped once from previous_contract to exact new candidate text, preserving all requested criterion IDs.",
+            "Identity is not semantic entailment, acceptance, successful execution or permission. Retain real goals "
+            "and uncertainty; never fabricate references or verdicts merely to satisfy this format.",
+        ],
+    }
 
 
 def make_basis(kind, context, *, original, specification, accepted_design=None,
@@ -266,6 +319,7 @@ def make_basis(kind, context, *, original, specification, accepted_design=None,
             "capability_hash": (context.get("controller_evidence_capabilities") or {}).get("hash"),
             "correction": correction if correction and correction.get("owner") == owner else None,
             "meaning": "References establish identity, not entailment, successful execution or permission."}
+    body["response_contract"] = response_contract(criteria, sources, observations, body["unsupported"])
     return {**body, "hash": digest(body)}
 
 
@@ -322,7 +376,7 @@ def validate_review(value, basis):
         if (criterion["kind"] == "controller_rule" and proof.kind != "source_dispute"
                 and basis["scope"] != "doctor"):
             fail("general_stage_role_cannot_invent_product_obligation")
-        expected = "violated" if proof.kind == "defect" else "unverified"
+        expected = FINDING_COVERAGE[proof.kind]
         if coverage[proof.criterion_id].status != expected:
             fail("finding_coverage_disagreement")
         blocking.add(proof.criterion_id)
@@ -346,7 +400,7 @@ def validate_review(value, basis):
     if unresolved != blocking or review.approved == bool(blocking):
         fail("verdict_requires_grounded_findings")
     ids = set()
-    goal_ids = {k for k, c in criteria.items() if c["kind"] in {"submitted_requirement", "accepted_interpretation"}}
+    goal_ids = {k for k, c in criteria.items() if c["kind"] in GOAL_KINDS}
     for choice in assessment.technical_choices:
         if (basis["scope"] != "design" or choice.id in ids or choice.clause not in basis["sources"]["candidate"]["text"]
                 or not set(choice.goal_ids) <= goal_ids):
@@ -483,6 +537,12 @@ def validate_journal_authority(journal, get):
 def instructions():
     return """
 Shared review authority: controller_review_basis contains source identities, limited standards and observations.
+Its response_contract describes the exact authority output namespace and field relationships. Follow it for
+both direct and nested review results. Material source_ref/material_id instructions concern reading and
+prose citations, not authority IDs. In authority, use only the exact listed criterion/source/observation keys,
+including prefixes. A source_dispute maps to unverified, not violated. Each unresolved coverage item needs
+its own mapped non-advisory finding. obligations is exactly the CURRENT unsupported list (empty means []),
+not historical feedback. No caller or reviewer may infer a new obligation from feedback alone.
 Submitted input is authoritative for this task but is NOT proof that a human personally wrote every sentence.
 An accepted interpretation or technical contract is not a verbatim user instruction. Candidate documents,
 research recommendations and previous resolution text cannot create normative criteria or permissions.
