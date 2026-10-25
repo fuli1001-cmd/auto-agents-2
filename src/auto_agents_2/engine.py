@@ -2069,6 +2069,7 @@ class WorkflowEngine:
         saved = self.store.get(rid, key, {})
         saved = self.authority.retain_task(rid, task, saved)
         if saved.get("commit"):
+            self.recovery_policy.require_task_outcome(rid, saved, task.id)
             return saved["commit"]
         seed = saved.get("resume_base", base)
         generation = self.store.run(rid)["data"].get("replans", 0)
@@ -2265,10 +2266,12 @@ class WorkflowEngine:
                     self._task_progress(rid, task, saved, checked=True, approved=True)
                     recovery_ref = f"refs/aa2/{rid}/tasks/{task.id}/r{state['revision']}/{base[:8]}"
                     commit = self.workspaces.checkpoint(work, recovery_ref, f"aa2: {task.title}")
-                    ReviewEvidence(self.store).complete(rid, consumer_key(task), [c.model_dump() for c in checks], updates={key: {**saved, "commit": commit, "workspace": str(work), "recovery_ref": recovery_ref},
-                        state_key: {**state, "implementation": "accepted", "evidence": "valid"}})
-                    self.recovery_policy.task_outcome(rid, saved, task.id, {"status": "verified", "commit": commit,
-                        "source_hash": saved["source_hash"], "evidence": key})
+                    updates = {key: {**saved, "commit": commit, "workspace": str(work), "recovery_ref": recovery_ref},
+                               state_key: {**state, "implementation": "accepted", "evidence": "valid"}}
+                    updates.update(self.recovery_policy.task_outcome_updates(rid, saved, task.id,
+                        {"status": "verified", "commit": commit, "source_hash": saved["source_hash"], "evidence": key}))
+                    ReviewEvidence(self.store).complete(rid, consumer_key(task), [c.model_dump() for c in checks],
+                                                        updates=updates)
                     return commit
             self._task_progress(rid, task, saved, checked=True)
             saved["phase"] = "rejected"

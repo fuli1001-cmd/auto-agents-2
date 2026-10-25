@@ -615,13 +615,27 @@ class RecoveryPolicy:
             self.validate_consumption(rid, saved["recovery_permit"], expected={"repair"})
         return allowed
 
+    def require_task_outcome(self, rid, saved, task_id):
+        """An accepted checkpoint cannot stand in for its missing action result."""
+        key = saved.get("recovery_permit")
+        if key:
+            permit = self.store.get(rid, key, {})
+            if not (permit or {}).get("outcome", {}).get("tasks", {}).get(task_id):
+                raise StateConflict("Accepted task has no recorded recovery outcome; preserve it for reconciliation")
+
     def task_outcome(self, rid, saved, task_id, outcome):
+        updates = self.task_outcome_updates(rid, saved, task_id, outcome)
+        if updates:
+            self.store.checkpoints(rid, updates)
+
+    def task_outcome_updates(self, rid, saved, task_id, outcome):
+        """Build the existing result updates for the consumer's atomic handoff."""
         key = saved.get("recovery_permit")
         if not key:
-            return
+            return {}
         permit = self.store.get(rid, key)
         if not permit or task_id in permit.get("outcome", {}).get("tasks", {}):
-            return
+            return {}
         results = {**permit.get("outcome", {}), "tasks": {
             **permit.get("outcome", {}).get("tasks", {}), task_id: outcome}}
         complete = set(results.get("expected_tasks", [])) <= results["tasks"].keys()
@@ -631,7 +645,7 @@ class RecoveryPolicy:
         cycle = self.store.get(rid, cycle_key)
         if cycle:
             updates[cycle_key] = {**cycle, "phase": "completed" if complete else "verifying", "outcomes": results}
-        self.store.checkpoints(rid, updates)
+        return updates
 
     def dispatch_updates(self, rid, active, targets):
         key = active.get("permit")

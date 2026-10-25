@@ -120,7 +120,8 @@ history or changed contracts simply leave the original dependency gate in place.
         if _verified_result(engine, rid, task, saved, permit):
             engine.recovery_policy.validate_consumption(rid, saved["recovery_permit"], expected={"repair"})
             mode = "integrate_verified_result"
-        elif permit["phase"] == "started" and engine.recovery_policy.task_authorized(rid, saved, task):
+        elif (not saved.get("commit") and permit["phase"] == "started"
+              and engine.recovery_policy.task_authorized(rid, saved, task)):
             mode = "execute_dispatched_repair"
         else:
             continue

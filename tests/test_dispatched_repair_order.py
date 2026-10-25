@@ -373,3 +373,92 @@ async def test_pause_after_acceptance_before_integration_uses_only_verified_resu
         assert final.store.get(rid, saved['recovery_permit']) == permit
         assert final.store.get(rid, 'rounds/C')['round'] == 3
         assert final.store.get(rid, 'develop/done') == ['C', 'P']
+
+
+@pytest.mark.parametrize('boundary', ['task', 'state', 'permit', 'cycle', 'consumer'])
+async def test_task_acceptance_and_recovery_result_rollback_together(tmp_path, monkeypatch, boundary):
+    workflow, rid, plan, base, agent = await paused_at_repair(tmp_path, monkeypatch)
+    resumed = engine(workflow.project, agent)
+    permit_key = resumed.store.get(rid, 'develop/task/C')['recovery_permit']
+    before = resumed.store.get(rid, permit_key)
+    target = {'task': 'develop/task/C', 'state': 'task_state/C', 'permit': permit_key,
+              'cycle': 'recovery/cycles/' + before['cycle_id'],
+              'consumer': 'develop/review-evidence/C'}[boundary]
+    original = resumed.store._put
+    accepting = interrupted = False
+    prior_state = None
+
+    def fail_write(db, run_id, key, value):
+        nonlocal accepting, interrupted, prior_state
+        if key == 'develop/task/C' and value.get('commit') and agent.patch_calls:
+            accepting = True
+            prior_state = resumed.store.get(rid, 'task_state/C')
+        original(db, run_id, key, value)
+        if accepting and not interrupted and key == target:
+            interrupted = True
+            # A persistence failure/process interruption inside this transaction,
+            # not a claim that cooperative cancellation occurs between sync calls.
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(resumed.store, '_put', fail_write)
+    with pytest.raises(asyncio.CancelledError):
+        await resumed.start()
+    assert interrupted
+    saved = resumed.store.get(rid, 'develop/task/C')
+    assert not saved.get('commit')
+    assert prior_state['implementation'] == 'in_progress'
+    assert resumed.store.get(rid, 'task_state/C') == prior_state
+    assert resumed.store.get(rid, permit_key) == before
+    assert resumed.store.get(rid, 'develop/review-evidence/C')['phase'] == 'pending'
+    assert resumed.store.get(rid, 'develop/done') == []
+    assert resumed.store.get(rid, 'task_state/P')['evidence'] == 'failed'
+    implementations = list(agent.implementations)
+    final = engine(workflow.project, agent)
+    result = await final.start()
+    assert result['data']['outcome'] == 'DELIVERED'
+    assert agent.implementations == implementations == ['P', 'C', 'C', 'C']
+    completed = final.store.get(rid, permit_key)
+    accepted = final.store.get(rid, 'develop/task/C')
+    assert completed['phase'] == 'completed'
+    assert completed['outcome']['tasks']['C'] == {
+        'status': 'verified', 'commit': accepted['commit'],
+        'source_hash': accepted['source_hash'], 'evidence': 'develop/task/C'}
+    assert completed['outcome_hash'] == digest(completed['outcome'])
+    assert final.store.get(rid, 'rounds/C')['round'] == 3
+    assert final.store.get(rid, 'develop/done') == ['C', 'P']
+
+
+async def test_legacy_accepted_commit_without_recovery_result_is_not_execution(tmp_path, monkeypatch):
+    from auto_agents_2.review_evidence import ReviewEvidence
+
+    workflow, rid, plan, base, agent = await paused_at_repair(tmp_path, monkeypatch)
+    resumed = engine(workflow.project, agent)
+    permit_key = resumed.store.get(rid, 'develop/task/C')['recovery_permit']
+    permit = resumed.store.get(rid, permit_key)
+    cycle_key = 'recovery/cycles/' + permit['cycle_id']
+    original = ReviewEvidence.complete
+
+    def old_split_write(self, run_id, key, checks, *, updates=None):
+        if (key == 'develop/review-evidence/C' and agent.patch_calls
+                and (updates or {}).get('develop/task/C', {}).get('commit')):
+            # Reproduce the old two-transaction checkpoint using real acceptance
+            # and review records in this isolated project, before the outcome write.
+            original(self, run_id, key, checks, updates={
+                k: v for k, v in updates.items() if k not in {permit_key, cycle_key}})
+            raise asyncio.CancelledError()
+        return original(self, run_id, key, checks, updates=updates)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ReviewEvidence, 'complete', old_split_write)
+        with pytest.raises(asyncio.CancelledError):
+            await resumed.start()
+    saved = resumed.store.get(rid, 'develop/task/C')
+    assert saved['commit'] and resumed.store.get(rid, permit_key) == permit
+    assert permit['outcome']['tasks'] == {}
+    keys = ['develop/task/C', 'task_state/C', 'develop/done', 'rounds/C', permit_key]
+    before = {key: resumed.store.get(rid, key) for key in keys}
+    assert dispatched_repair(resumed, rid, plan, set(), base) is None
+    child = next(t for t in plan.tasks if t.id == 'C')
+    with pytest.raises(StateConflict, match='recorded recovery outcome'):
+        await resumed._task(rid, child, base, plan, {})
+    assert {key: resumed.store.get(rid, key) for key in keys} == before
