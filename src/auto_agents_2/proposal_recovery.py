@@ -61,9 +61,21 @@ class ProposalRecovery:
                 if tree_hash(work) != source:
                     raise StateConflict("Proposal source changed after an invalid response; preserve user edits") from None
                 count = store.get(rid, counter, 0) + 1
-                from .prototype_review import InvalidPrototypeReview
-                from .review_authority import InvalidAuthorityReview
+                from .prototype_review import InvalidPrototypeReview, PrototypeReview
+                from .prototype_review import valid_basis as valid_prototype_basis
+                from .review_authority import InvalidAuthorityReview, valid_basis
                 authority = exc.details if isinstance(exc, (InvalidPrototypeReview, InvalidAuthorityReview)) else None
+                if authority is None and engine.authority.consumes(schema):
+                    # Strict provider parsing can reject a review before its
+                    # semantic authority validator runs. Count that response
+                    # against the same frozen review's correction allowance;
+                    # do not infer a specific missing field or product defect.
+                    prototype = issubclass(schema, PrototypeReview)
+                    basis = context.get("prototype_review_basis" if prototype else "controller_review_basis")
+                    if (valid_prototype_basis if prototype else valid_basis)(basis):
+                        authority = {"code": "invalid_structured_review_response",
+                            "contract": "prototype_review_authority" if prototype else "review_authority",
+                            "version": basis["version"], "basis_hash": basis["hash"]}
                 if authority:
                     state["authority_validation"] = authority
                     state["authority_rejections"] = state.get("authority_rejections", 0) + 1
