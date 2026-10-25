@@ -1,4 +1,4 @@
-"""Execute an already-dispatched repair before stale evidence on its inputs.
+"""Execute a dispatched repair or retained recheck before stale input evidence.
 
 Historical acceptance proves an implementation input, never current acceptance.
 The ordinary task/verification/review/permit consumers remain authoritative.
@@ -6,10 +6,12 @@ The ordinary task/verification/review/permit consumers remain authoritative.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from .models import PlanResult
 from .planning import task_dependencies
 from .util import digest
+from .workspace import git, tree_hash
 
 
 def _history(store, rid):
@@ -75,7 +77,7 @@ def _accepted_input(engine, rid, task, plan, base, history):
 
 
 def _verified_result(engine, rid, task, saved, permit):
-    """A consumed repair can only finish integrating its exact accepted commit."""
+    """A consumed task action can only integrate its exact accepted commit."""
     result = permit.get("outcome", {}).get("tasks", {}).get(task.id, {})
     state = engine.store.get(rid, "task_state/" + task.id, {})
     review, commit = saved.get("review", {}), saved.get("commit")
@@ -93,8 +95,32 @@ def _verified_result(engine, rid, task, saved, permit):
             and receipt["basis"]["source_hash"] == saved["source_hash"])
 
 
+
+def _retained_recheck(engine, rid, task, saved, permit, base):
+    """Prioritize evidence collection only; never authorize edits or a new merge."""
+    observation = saved.get("observation_id", [])
+    state = engine.store.get(rid, "task_state/" + task.id, {})
+    if (permit["phase"] != "started" or task.id in permit.get("outcome", {}).get("tasks", {})
+            or saved.get("phase") not in {"reverify", "applied", "tested"} or saved.get("patch")
+            or saved.get("revision") != state.get("revision")
+            or state.get("implementation") == "needs_repair"
+            or len(observation) != 4 or observation[0] != "recheck"
+            or observation[1] != permit["action"]["failure_id"] or observation[3] != task.id
+            or permit.get("authority_sources") != engine.authority.identity(rid)
+            or not saved.get("workspace") or not permit.get("source_hash")
+            or saved.get("source_hash") != permit["source_hash"]):
+        return False
+    work = Path(saved["workspace"])
+    if (not work.is_dir() or not work.resolve().is_relative_to((engine.store.root / "worktrees" / rid).resolve())
+            or tree_hash(work) != permit["source_hash"]
+            or not engine.workspaces.is_ancestor(base, git(work, "rev-parse", "HEAD"))):
+        return False
+    engine.recovery_policy.validate_consumption(rid, saved["recovery_permit"], expected={"recheck"})
+    return True
+
+
 def dispatched_repair(engine, rid, plan: PlanResult, done, base):
-    """Return at most one permitted repair whose only blockers are evidence.
+    """Return one dispatched task action whose only blockers are evidence.
 
 No new permit, accepted flag, or implementation budget is created here. Missing
 history or changed contracts simply leave the original dependency gate in place.
@@ -110,19 +136,23 @@ history or changed contracts simply leave the original dependency gate in place.
             continue
         saved = engine.store.get(rid, "develop/task/" + task.id, {})
         permit = engine.store.get(rid, saved.get("recovery_permit", ""), {})
+        action = permit.get("action", {}).get("action")
         if (permit.get("phase") not in {"started", "completed"}
-                or permit.get("action", {}).get("action") != "repair"
+                or action not in {"repair", "recheck"}
                 or task.id not in permit["action"].get("task_ids", [])
                 or permit.get("plan_hash") != digest(plan.model_dump())
                 or permit.get("task_scopes", {}).get(task.id) != task.allowed_paths
                 or task.id not in permit.get("outcome", {}).get("expected_tasks", [])):
             continue
         if _verified_result(engine, rid, task, saved, permit):
-            engine.recovery_policy.validate_consumption(rid, saved["recovery_permit"], expected={"repair"})
+            engine.recovery_policy.validate_consumption(rid, saved["recovery_permit"], expected={action})
             mode = "integrate_verified_result"
-        elif (not saved.get("commit") and permit["phase"] == "started"
+        elif (action == "repair" and not saved.get("commit") and permit["phase"] == "started"
               and engine.recovery_policy.task_authorized(rid, saved, task)):
             mode = "execute_dispatched_repair"
+        elif (action == "recheck" and not saved.get("commit")
+              and _retained_recheck(engine, rid, task, saved, permit, base)):
+            mode = "execute_dispatched_recheck"
         else:
             continue
         if history is None:
