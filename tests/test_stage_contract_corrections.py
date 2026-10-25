@@ -146,7 +146,7 @@ class CorrectionAgent(ApprovingAgent):
                 patch.upsert_tasks[0].checks[0] = new
                 patch.contract_corrections[0].replacement = new
             return patch
-        if schema is EvidencePatchReview:
+        if issubclass(schema, EvidencePatchReview):
             self.views.append((stage, copy.deepcopy(context)))
             assert context['original_requirements'] == 'Keep the business assertions; choose a compatible tool version.'
             assert context['correction_request']['owner'] == 'plan'
@@ -421,7 +421,7 @@ async def test_verification_only_correction_requires_fresh_bound_coverage(tmp_pa
                 return PlanPatch(evidence_contract=empty_contract(context), base_revision=1, failure_ids=[context['failure']['id']], reason='Correct expression',
                     document='reviewed expression', final_checks=[replacement] if kind == 'contract' else [command, replacement],
                     contract_corrections=[row] if kind == 'contract' else [])
-            if schema is EvidencePatchReview:
+            if issubclass(schema, EvidencePatchReview):
                 return evidence_review(context, review_for(PlanPatch.model_validate(context['patch'])) if kind == 'contract' else None)
             return await super().invoke(stage, context, schema, *args, **kwargs)
     record = failure(task_id='', origin_id='final', step='final')

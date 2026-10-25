@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from authority_review_fixtures import authority_review
 from browser_fixtures import prototype_rows
 from evidence_test_fixtures import empty_contract, evidence_review
 from prototype_review_fixtures import prototype_verdict
@@ -21,14 +22,18 @@ from auto_agents_2.models import (
     PlanResult,
     PreviewSpec,
     Requirement,
-    ReviewResult,
     SourceEvidence,
     TaskSpec,
 )
 from auto_agents_2.sandbox import SandboxRunner
 from auto_agents_2.store import Store
 from auto_agents_2.util import write_json
-from auto_agents_2.workspace import WorkspaceManager, apply_prepared, git, prepare_changes
+from auto_agents_2.workspace import (
+    WorkspaceManager,
+    apply_prepared,
+    git,
+    prepare_changes,
+)
 
 
 class CodingAgent:
@@ -77,7 +82,7 @@ class CodingAgent:
             return evidence_review(context)
         if context.get("review_kind") == "prototype":
             return prototype_verdict(context)
-        return ReviewResult(approved=True, summary="verified")
+        return authority_review(context, summary="verified")
 
 
 def engine(project, agent):
@@ -182,7 +187,7 @@ async def test_reviewer_rejects_test_weakening_before_any_candidate_is_applied(t
                         Change(path="tests/test_calc.py", content="def test_sum(): assert True\n")])
             if operation.endswith("test-change-review") and self.attempts == 1:
                 assert fresh and not (workspace / "calc.py").exists()
-                return ReviewResult(approved=False, summary="assertion weakened", findings=[Finding(
+                return authority_review(context, approved=False, summary="assertion weakened", findings=[Finding(
                     severity="blocking", location="tests/test_calc.py", description="Removes the required sum assertion",
                     evidence="proposed assert True", resolution="Preserve the existing acceptance test and fix implementation")])
             return await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)

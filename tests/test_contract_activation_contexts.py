@@ -21,7 +21,7 @@ def cite_roles(agent, *, author=(), reviewer=()):
         if schema is PlanPatch:
             for row in result.contract_corrections:
                 row.evidence_refs += list(author)
-        if schema is EvidencePatchReview:
+        if issubclass(schema, EvidencePatchReview):
             for row in result.contract_reviews:
                 row.evidence_refs += list(reviewer)
         return result
@@ -48,6 +48,56 @@ async def test_real_citations_survive_immediate_activation(tmp_path):
     await workflow.recovery.resume(rid)
     assert workflow.store.get(rid, f'plan_revision/journal/{record.id}/1')['phase'] == 'activated'
     assert workflow.store.get(rid, 'plan_revision/current')['revision'] == 2
+    assert [stage for stage, _ in agent.views] == ['plan', 'review']
+
+
+async def test_candidate_source_dispute_reaches_review_and_activation_without_formal_source_exception(tmp_path):
+    from authority_review_fixtures import authority_review
+
+    from auto_agents_2.engine import Replan
+    from auto_agents_2.models import ReviewResult
+    from auto_agents_2.review_authority import source_text
+    workflow, rid, work, old, record, agent = setup_correction(tmp_path)
+    proposed = old.model_copy(deep=True)
+    proposed.tasks[2].checks[0].argv.append('--unaccepted-method')
+    context, _ = workflow.authority.prepare(rid, 'review', {'review_kind': 'plan_patch',
+        'plan': proposed.model_dump(), 'previous_plan': old.model_dump(), 'patch': {}},
+        ReviewResult, work, 'candidate-source-review')
+    basis = context['controller_review_basis']
+    key, source = next((key, source) for key, source in basis['sources'].items()
+        if source.get('root') == 'candidate' and source['contract_target']['target'] == 'checks'
+        and source['contract_target']['task_id'] == 'T3')
+    rejected = authority_review(context, approved=False)
+    finding = rejected.authority['findings'][0]
+    finding.update(kind='source_dispute', owner='plan', method_source=key, method_quote=source['text'])
+    for row in rejected.authority['coverage']:
+        if row['criterion_id'] == finding['criterion_id']:
+            row['status'] = 'unverified'
+    workflow.authority.record(rid, rejected, context, 'candidate-source-review')
+    with pytest.raises(Replan):
+        workflow.authority.route_dispute(rid, rejected)
+    request = workflow.store.get(rid, 'authority/correction')
+    assert request['previous_kind'] == 'proposal' and request['previous'] == proposed.model_dump()
+    assert workflow.store.get(rid, 'plan') == old.model_dump()
+    invoke = agent.invoke
+    async def review_amendment(stage, ctx, schema, *args, **kwargs):
+        result = await invoke(stage, ctx, schema, *args, **kwargs)
+        if issubclass(schema, EvidencePatchReview):
+            correction = ctx['controller_review_basis']['correction']
+            result.authority['amendments'] = [{'source': 'previous_contract', 'old_quote': quote,
+                'new_quote': source_text(ctx['plan']['tasks'][2]['checks'][0]),
+                'preserve_ids': correction['preserve_ids'],
+                'reason': 'Correct the unaccepted method while preserving every formal assertion'}
+                for quote in correction['clauses']]
+        return result
+    agent.invoke = review_amendment
+    workflow.recovery.submit(rid, record)
+    await workflow.recovery.resume(rid)
+    assert workflow.store.get(rid, 'plan_revision/current')['revision'] == 2
+    assert workflow.store.get(rid, f'plan_revision/journal/{record.id}/2')['phase'] == 'activated'
+    assert workflow.store.get(rid, 'authority/correction')['completed']['artifact_hash'] == digest(workflow.store.get(rid, 'plan'))
+    assert workflow.store.get(rid, 'rounds/T3') == {'round': 17}
+    assert workflow.store.get(rid, 'plan_revision/history/1')['plan'] == old.model_dump()
     assert [stage for stage, _ in agent.views] == ['plan', 'review']
 
 
@@ -82,6 +132,160 @@ async def test_supplied_role_citations_activate_and_resume_without_new_invocatio
     assert [stage for stage, _ in agent.views] == ['plan', 'review']
     assert workflow.store.get(rid, 'rounds/T3') == {'round': 17}
     assert workflow.store.get(rid, 'develop/done') == ['T1', 'T2']
+
+
+@pytest.mark.parametrize('bad', [None, 'scope', 'other_attempt', 'action', 'answer', 'missing_request'])
+async def test_old_authority_prepared_grant_is_supplemented_only_with_original_binding(tmp_path, monkeypatch, bad):
+    workflow, rid, _, old, record, agent = setup_correction(tmp_path)
+    identity, key, journal = await prepare(workflow, rid, record, monkeypatch)
+    journal['review'].pop('authority')
+    # Reproduce the WHOLE pre-authority record format, including its original
+    # capability admission hash; do not leave a mismatched modern receipt.
+    admission = journal['evidence_admission']
+    admission.pop('authority')
+    admission['review_hash'] = digest(journal['review'])
+    admission['binding'] = digest({k: v for k, v in admission.items() if k != 'binding'})
+    journal['contract_review_binding'] = contract_review_binding(journal)
+    workflow.store.checkpoint(rid, key, journal)
+    active = workflow.store.get(rid, 'recovery/active')
+    permit_key = active['permit']
+    permit = workflow.store.get(rid, permit_key)
+    for name in ('authority_sources', 'authority_failure', 'authority_transition'):
+        permit.pop(name, None)
+    if bad == 'scope':
+        permit['task_scopes']['T3'] = ['unrelated.py']
+    elif bad == 'other_attempt':
+        cycle = workflow.store.get(rid, 'recovery/cycles/' + permit['cycle_id'])
+        cycle['observation'] += 1
+        workflow.store.checkpoint(rid, 'recovery/cycles/' + permit['cycle_id'], cycle)
+    elif bad == 'action':
+        permit['action']['task_ids'] = ['T1']
+    elif bad == 'answer':
+        question = workflow.store.request(rid, 'design/0', 'New explicit constraint', 'new-version')
+        workflow.store.answer(question['id'], 'Keep another feature')
+    elif bad == 'missing_request':
+        workflow.store.checkpoint(rid, permit_key.replace('permits/', 'request-snapshots/'), None)
+    workflow.store.checkpoint(rid, permit_key, permit)
+    workflow.store.checkpoint(rid, 'authority/protocol', 1)
+    if bad:
+        with pytest.raises(AA2Error):
+            await workflow.recovery.resume(rid)
+        assert workflow.store.get(rid, key)['phase'] == 'prepared'
+        assert workflow.store.get(rid, 'plan') == old.model_dump()
+    else:
+        await workflow.recovery.resume(rid)
+        workflow.store.activate_plan_patch(rid, identity)
+        assert workflow.store.get(rid, key)['phase'] == 'activated'
+        assert workflow.store.get(rid, 'plan_revision/current')['revision'] == 2
+        assert workflow.store.get(rid, 'authority/permit-history/' + digest(permit)) == permit
+        assert workflow.store.get(rid, key)['authority_reassessment']['permit'] == permit_key
+    assert workflow.store.get(rid, 'rounds/T3') == {'round': 17}
+    assert workflow.store.get(rid, 'develop/done') == (['T1', 'T2', 'T3', 'T4'] if bad else ['T1', 'T2'])
+
+
+@pytest.mark.parametrize('bad', [None, 'history', 'candidate'])
+async def test_legacy_activated_patch_reassesses_without_activating_twice(tmp_path, monkeypatch, bad):
+    workflow, rid, _, _, record, agent = setup_correction(tmp_path)
+    activate = workflow.store.activate_plan_patch
+    def stop_after_activation(*args):
+        activate(*args)
+        raise asyncio.CancelledError()
+    with monkeypatch.context() as stopped:
+        stopped.setattr(workflow.store, 'activate_plan_patch', stop_after_activation)
+        with pytest.raises(asyncio.CancelledError):
+            await workflow.recovery.resume(rid)
+    key = f'plan_revision/journal/{record.id}/1'
+    journal = workflow.store.get(rid, key)
+    assert journal['phase'] == 'activated'
+    journal['review'].pop('authority')
+    admission = journal['evidence_admission']
+    admission.pop('authority')
+    admission['review_hash'] = digest(journal['review'])
+    admission['binding'] = digest({k: v for k, v in admission.items() if k != 'binding'})
+    journal['contract_review_binding'] = contract_review_binding(journal)
+    workflow.store.checkpoint(rid, key, journal)
+    active = workflow.store.get(rid, 'recovery/active')
+    permit = workflow.store.get(rid, active['permit'])
+    for name in ('authority_sources', 'authority_failure', 'authority_transition'):
+        permit.pop(name, None)
+    workflow.store.checkpoint(rid, active['permit'], permit)
+    workflow.store.checkpoint(rid, 'authority/protocol', 1)
+    if bad == 'history':
+        history = workflow.store.get(rid, 'plan_revision/history/1')
+        history['plan']['document'] += ' unbound history'
+        workflow.store.checkpoint(rid, 'plan_revision/history/1', history)
+    elif bad == 'candidate':
+        changed = workflow.store.get(rid, 'plan')
+        changed['document'] += ' unbound candidate'
+        workflow.store.checkpoint(rid, 'plan', changed)
+    before = workflow.store.get(rid, 'plan')
+    if bad:
+        with pytest.raises(AA2Error, match='Retained activation'):
+            await workflow.recovery.resume(rid)
+        assert not workflow.store.get(rid, key).get('authority_reassessment')
+    else:
+        await workflow.recovery.resume(rid)
+        assert workflow.store.get(rid, key)['authority_reassessment']['phase'] == 'activated'
+        assert workflow.store.get(rid, 'recovery/active') is None
+        assert sum(stage == 'plan' for stage, _ in agent.views) == 1
+    assert workflow.store.get(rid, 'plan_revision/current')['revision'] == 2
+    assert workflow.store.get(rid, 'plan') == before
+    assert workflow.store.get(rid, 'rounds/T3') == {'round': 17}
+
+
+@pytest.mark.parametrize('verdict', ['reject', 'source_dispute'])
+async def test_completed_activation_outcome_survives_new_negative_reassessment(tmp_path, monkeypatch, verdict):
+    from authority_review_fixtures import authority_review
+
+    from auto_agents_2.engine import Replan
+    workflow, rid, _, _, record, agent = setup_correction(tmp_path)
+    complete = workflow.recovery_policy.complete
+    def stop_after_completion(run, key, outcome):
+        complete(run, key, outcome)
+        if outcome.get('status') == 'applied':
+            raise asyncio.CancelledError()
+    with monkeypatch.context() as stopped:
+        stopped.setattr(workflow.recovery_policy, 'complete', stop_after_completion)
+        with pytest.raises(asyncio.CancelledError):
+            await workflow.recovery.resume(rid)
+    key = f'plan_revision/journal/{record.id}/1'
+    journal = workflow.store.get(rid, key)
+    journal['review'].pop('authority')
+    admission = journal['evidence_admission']
+    admission.pop('authority')
+    admission['review_hash'] = digest(journal['review'])
+    admission['binding'] = digest({k: v for k, v in admission.items() if k != 'binding'})
+    journal['contract_review_binding'] = contract_review_binding(journal)
+    workflow.store.checkpoint(rid, key, journal)
+    active = workflow.store.get(rid, 'recovery/active')
+    permit_key = active['permit']
+    permit = workflow.store.get(rid, permit_key)
+    assert permit['phase'] == 'completed' and permit['outcome']['status'] == 'applied'
+    workflow.store.checkpoint(rid, 'authority/protocol', 1)
+    async def negative(stage, context, schema, *args, **kwargs):
+        assert stage == 'review' and context['feedback']['journal_phase'] == 'activated'
+        result = authority_review(context, approved=False, summary='New independently grounded concern')
+        if verdict == 'source_dispute':
+            proof = result.authority['findings'][0]
+            proof.update(kind='source_dispute', owner='plan', method_source='accepted_plan',
+                         method_quote=context['plan']['document'])
+            next(c for c in result.authority['coverage'] if c['criterion_id'] == proof['criterion_id'])['status'] = 'unverified'
+        return result
+    agent.invoke = negative
+    if verdict == 'source_dispute':
+        with pytest.raises(Replan) as raised:
+            await workflow.recovery.resume(rid)
+        assert raised.value.stage == 'plan'
+        assert workflow.store.get(rid, 'replanning/pending')['stage'] == 'plan'
+    else:
+        await workflow.recovery.resume(rid)
+        successor = workflow.store.get(rid, 'recovery/active')
+        assert successor['attempt'] == active['attempt'] + 1
+        assert successor['failure']['evidence']['patch_review']['approved'] is False
+    assert workflow.store.get(rid, permit_key) == permit
+    assert workflow.store.get(rid, key)['phase'] == 'activated'
+    assert workflow.store.get(rid, 'plan_revision/current')['revision'] == 2
+    assert workflow.store.get(rid, 'rounds/T3') == {'round': 17}
 
 
 @pytest.mark.parametrize('bad', ['author_missing', 'author_changed', 'review_missing', 'role_swap',

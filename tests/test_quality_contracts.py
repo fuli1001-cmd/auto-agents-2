@@ -1,4 +1,5 @@
 """Regression and fault-injection tests for the quality-first repair contracts."""
+
 import os
 import subprocess
 import sys
@@ -6,6 +7,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from authority_review_fixtures import authority_review, seed_original
 from jsonschema import ValidationError, validate
 
 from auto_agents_2.artifacts import ArtifactStore
@@ -336,13 +338,14 @@ async def test_delivery_repair_replays_partial_replace_once(tmp_path, monkeypatc
             if stage == "implement":
                 self.proposals += 1
                 return ImplementationResult(summary="repair", changes=[Change(path=name, operation="replace", old_text="old", content="new") for name in ("one.py", "two.py")])
-            return ReviewResult(approved=True, summary="approved")
+            return authority_review(context, approved=True, summary="approved")
     agent = RepairAgent()
     workflow = engine(tmp_path, agent)
     (tmp_path / "one.py").write_text("old")
     (tmp_path / "two.py").write_text("old")
     workflow.workspaces.checkpoint(tmp_path, "refs/aa2/fixture/base", "baseline")
     rid = workflow.store.admit("idea", {})["id"]
+    seed_original(workflow, rid)
     def interrupted(work, patch):
         apply_prepared(work, patch[:1])
         raise asyncio.CancelledError()
@@ -651,12 +654,13 @@ async def test_delivery_hard_errors_require_new_decision_without_test_review(tmp
                 path = "outside.py" if self.proposals == 1 else "allowed.py"
                 return ImplementationResult(summary="repair", changes=[Change(path=path, content="fixed")])
             self.reviews += 1
-            return ReviewResult(approved=True, summary="approved")
+            return authority_review(context, approved=True, summary="approved")
     agent = RepairAgent()
     workflow = engine(tmp_path, agent)
     (tmp_path / "allowed.py").write_text("old")
     workflow.workspaces.checkpoint(tmp_path, "refs/aa2/fixture/base", "baseline")
     rid = workflow.store.admit("fixture", {})["id"]
+    seed_original(workflow, rid)
     await workflow._delivery_repair(rid, tmp_path, {"failure": "repair"}, ["allowed.py"])
     assert agent.proposals == 2 and agent.reviews == 1
     assert agent.decisions == 1

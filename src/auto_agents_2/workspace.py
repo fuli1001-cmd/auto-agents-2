@@ -185,6 +185,14 @@ def path_allowed(path: str, scopes: list[str]) -> bool:
                or fnmatch.fnmatchcase(path, scope) for scope in scopes)
 
 
+def protected_change_path(path):
+    path = Path(path)
+    return (path.name in PROTECTED_NAMES
+            or any(p in {"tests", "test", "__tests__", "__snapshots__", "fixtures", "scripts", ".github"} for p in path.parts)
+            or path.name.startswith("test_") or path.name.endswith(("_test.py", ".snap"))
+            or ".test." in path.name or ".spec." in path.name)
+
+
 def prepare_changes(root: Path, changes: list[Change], scopes: list[str], *, protected: bool = True, contracts: bool = False):
     # Validate all non-reviewable errors before requesting test/rule authorization.
     if protected:
@@ -204,9 +212,7 @@ def prepare_changes(root: Path, changes: list[Change], scopes: list[str], *, pro
             raise PolicyViolation(f"Out-of-scope change: {change.path}")
         if not contracts and path_allowed(canonical, ["DESIGN.md", "docs/aa2", "docs/requirements", "design/prototypes"]):
             raise PolicyViolation(f"Accepted contracts require a stage replan: {change.path}")
-        if protected and (path.name in PROTECTED_NAMES or any(p in {"tests", "test", "__tests__", "__snapshots__", "fixtures", "scripts", ".github"} for p in parts)
-                          or path.name.startswith("test_") or path.name.endswith(("_test.py", ".snap"))
-                          or ".test." in path.name or ".spec." in path.name):
+        if protected and protected_change_path(canonical):
             raise ProtectedChange(f"Test/rule change requires independent authorization: {change.path}")
         if path.exists() and not path.is_file():
             raise PolicyViolation(f"Expected regular file: {canonical}")

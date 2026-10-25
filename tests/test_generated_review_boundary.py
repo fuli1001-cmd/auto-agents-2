@@ -1,16 +1,18 @@
 """Source-view absence is not execution absence; real verification remains mandatory."""
+
 import json
 import shutil
 import subprocess
 import sys
 
 import pytest
+from authority_review_fixtures import authority_review, seed_original
 from test_verification_input_identity import task_fixture
 from test_workflow import CodingAgent, engine
 
 from auto_agents_2.context import ContextBuilder
 from auto_agents_2.context_plan import ContextPlanner
-from auto_agents_2.models import Finding, ReviewResult
+from auto_agents_2.models import Finding
 from auto_agents_2.prompts import PromptCompiler
 from auto_agents_2.readview import VIEW_VERSION, create_view
 from auto_agents_2.recovery import RecoveryNeeded
@@ -55,6 +57,7 @@ def test_shared_public_view_explains_generated_omissions_without_exposing_them(t
 
 async def test_task_review_receives_real_verification_despite_filtered_dist(tmp_path):
     workflow, rid, work, base, task, plan = await task_fixture(tmp_path)
+    seed_original(workflow, rid)
     observed = []
 
     async def review(stage, context, schema, workspace, run_id, operation, fresh=False):
@@ -85,7 +88,7 @@ async def test_task_review_receives_real_verification_despite_filtered_dist(tmp_
         assert json.loads(result.stdout) == [True, False, False]
         assert (work / 'frontend/dist/index.html').read_text() == 'current build'
         observed.append(observation)
-        return ReviewResult(approved=True, summary='Reviewed source and actual passing reports')
+        return authority_review(context, approved=True, summary='Reviewed source and actual passing reports')
 
     workflow.agent.invoke = review
     assert await workflow._task(rid, task, base, plan, {'specification': {}})
@@ -125,10 +128,11 @@ async def test_invalid_real_evidence_cannot_produce_gate_observation(tmp_path, g
 
 async def test_current_observation_does_not_override_independent_semantic_rejection(tmp_path):
     workflow, rid, work, base, task, plan = await task_fixture(tmp_path)
+    seed_original(workflow, rid)
 
     async def reject(stage, context, *args, **kwargs):
         assert context['verification_observation']['status'] == 'valid_at_gate_entry'
-        return ReviewResult(approved=False, summary='Separate business obligation remains unverified', findings=[
+        return authority_review(context, approved=False, summary='Separate business obligation remains unverified', findings=[
             Finding(severity='blocking', location='backend/test_app.py', description='Missing business case',
                     evidence='The supplied test covers only one input', resolution='Preserve and extend assertions')])
 

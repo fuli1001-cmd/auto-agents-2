@@ -3,6 +3,7 @@ import sqlite3
 import sys
 
 import pytest
+from authority_review_fixtures import authority_review, seed_original
 from evidence_test_fixtures import empty_contract, seed_requirements
 from test_workflow import CodingAgent, engine
 
@@ -281,7 +282,7 @@ async def test_reverification_never_dispatches_implementation_or_consumes_busine
 @pytest.mark.asyncio
 @pytest.mark.parametrize("detected_by", ["T3", "T4", "final_review", "final_checks", "application_browser"])
 async def test_repair_t3_preserves_t1_t2_and_rechecks_t4_without_implementation(tmp_path, detected_by):
-    from auto_agents_2.models import Change, ReviewResult
+    from auto_agents_2.models import Change
 
     class Agent(CodingAgent):
         implementations = []
@@ -295,11 +296,12 @@ async def test_repair_t3_preserves_t1_t2_and_rechecks_t4_without_implementation(
                 return Diagnosis(action="repair", task_ids=["T3"], evidence_refs=context["failure"]["evidence_refs"], reason="part3 regression",
                     repair_targets=[RepairTarget(task_id="T3", paths=["part3.py"], evidence_refs=["part3.py"], reason="owns implementation")])
             assert fresh
-            return ReviewResult(approved=True, summary="actual task checks passed")
+            return authority_review(context, approved=True, summary="actual task checks passed")
 
     agent = Agent()
     workflow = engine(tmp_path, agent)
     rid = workflow.store.admit("four parts", {})["id"]
+    seed_original(workflow, rid)
     original = plan()
     (tmp_path / "tests").mkdir()
     for i in range(1, 5):

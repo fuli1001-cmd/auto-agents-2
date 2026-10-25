@@ -49,6 +49,8 @@ class ApprovingAgent(CodingAgent):
 def setup(tmp_path, agent=None):
     workflow = engine(tmp_path, agent or ApprovingAgent())
     rid = workflow.store.admit("decision tests", {})["id"]
+    from evidence_test_fixtures import seed_requirements
+    seed_requirements(workflow, rid, plan())
     return workflow, rid
 
 
@@ -517,8 +519,9 @@ async def test_review_wording_changes_are_not_progress_and_decision_can_request_
                 return ImplementationResult(summary="candidate", changes=[Change(path="value.py", content=f"value = {self.iterations}\n")])
             if stage == "decision" and self.iterations == 3:
                 return DecisionResult(action="ask_user", reason="Repeated review rejection without progress")
-            if schema is ReviewResult:
-                return ReviewResult(approved=False, summary=f"still missing {self.iterations}", findings=[Finding(
+            if issubclass(schema, ReviewResult):
+                from authority_review_fixtures import authority_review
+                return authority_review(context, approved=False, summary=f"still missing {self.iterations}", findings=[Finding(
                     severity="major", location=f"line {self.iterations}", description="same unmet requirement", evidence="source", resolution="fix")])
             return await super().invoke(stage, context, schema, *args, **kwargs)
     agent = RejectedAgent()

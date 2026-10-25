@@ -57,6 +57,9 @@ def review_basis(source, specification, binding, visuals):
     if source["status"] == "available":
         criteria.append({"id": "user:original", "origin": "user",
                          "statement": "Original captured goals and explicit timing in prototype_requirement_source.raw_requirements."})
+    for answer in source.get("submitted_answers", []):
+        criteria.append({"id": "answer:" + answer["id"], "origin": "submitted_answer",
+                         "statement": answer["answer"]})
     # Keep the complete confirmed specification even when old records have no IDs.
     criteria.append({"id": "specification:document", "origin": "accepted_specification",
                      "statement": specification.get("document", "")})

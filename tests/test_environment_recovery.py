@@ -2,6 +2,7 @@ import asyncio
 import sys
 
 import pytest
+from authority_review_fixtures import seed_original
 from test_manifest_references import plan
 from test_runtime import configured
 from test_workflow import CodingAgent, engine
@@ -111,6 +112,7 @@ async def test_resolution_failure_is_repaired_and_verified_after_resume(tmp_path
     agent = RepairAgent()
     workflow = engine(tmp_path, agent)
     rid = workflow.store.admit("addition", {})["id"]
+    seed_original(workflow, rid)
     proposal = plan(environment_file="environment.yml")
     proposal.tasks[0].allowed_paths.append("environment.yml")
     base = workflow.workspaces.committed_baseline(rid, "main")
@@ -157,6 +159,7 @@ async def test_infrastructure_failure_keeps_applied_candidate_for_retry(tmp_path
     agent = CodingAgent()
     workflow = engine(tmp_path, agent)
     rid = workflow.store.admit("addition", {})["id"]
+    seed_original(workflow, rid)
     proposal = plan()
     base = workflow.workspaces.committed_baseline(rid, "main")
     environment = workflow._environment
@@ -184,6 +187,7 @@ async def test_dependency_repair_preserves_round_and_stall_budgets(tmp_path, max
     body["execution"]["max_rounds"] = max_rounds
     write_json(workflow.config.path, body)
     rid = workflow.store.admit("addition", {})["id"]
+    seed_original(workflow, rid)
     proposal = plan()
     base = workflow.workspaces.committed_baseline(rid, "main")
 

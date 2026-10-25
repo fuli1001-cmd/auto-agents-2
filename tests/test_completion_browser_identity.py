@@ -35,6 +35,8 @@ def setup(tmp_path, monkeypatch, *, preview=True):
         'candidate_tree': git(project, 'rev-parse', 'HEAD^{tree}'), 'work': str(project), 'source_hash': tree_hash(project),
         'environment': {'prefix': sys.prefix, 'fingerprint': 'fixture'}, 'plan': plan.model_dump(),
         'reintegrations': 0, 'runtime_budget_used': 0, 'outcome': 'DELIVERED', 'validation': 'fixture'}
+    from evidence_test_fixtures import seed_requirements
+    seed_requirements(workflow, rid, plan)
     workflow.store.checkpoint(rid, 'delivery/journal', journal)
     workflow.store.checkpoint(rid, 'prototype_approval', {'human': {'answer': '1', 'artifact_hash': 'unchanged-human-binding'}})
     version, observed = {'value': '8:fixture-browser'}, {'prototype': 0, 'application': 0}

@@ -3,6 +3,7 @@ import copy
 import sqlite3
 
 import pytest
+from authority_review_fixtures import seed_original
 from browser_fixtures import PNG
 from prototype_review_fixtures import prototype_verdict
 from test_manifest_references import plan
@@ -24,7 +25,7 @@ from auto_agents_2.util import digest
 from auto_agents_2.workspace import git, tree_hash
 
 
-def approval_fixture(tmp_path, monkeypatch, *, legacy=True, answer="1"):
+def approval_fixture(tmp_path, monkeypatch, *, legacy=True, answer="1", original=True):
     contexts, browser_calls = [], []
 
     class Agent(CodingAgent):
@@ -40,6 +41,8 @@ def approval_fixture(tmp_path, monkeypatch, *, legacy=True, answer="1"):
 
     workflow = engine(tmp_path, Agent())
     rid = workflow.store.admit("ui", {})["id"]
+    if original:
+        seed_original(workflow, rid)
     page = tmp_path / "design/prototypes/index.html"
     page.parent.mkdir(parents=True)
     page.write_text("<h1>Tasks</h1>")

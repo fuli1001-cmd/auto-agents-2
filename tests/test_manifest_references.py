@@ -1,6 +1,7 @@
 import sys
 
 import pytest
+from authority_review_fixtures import seed_original
 from test_runtime import configured
 from test_workflow import CodingAgent, engine
 
@@ -103,6 +104,7 @@ async def test_repairing_saved_selector_resumes_applied_task_without_new_impleme
     agent = CodingAgent()
     workflow = engine(tmp_path, agent)
     rid = workflow.store.admit("addition", {})["id"]
+    seed_original(workflow, rid)
     proposal = plan(environment_file="dependencies:\n  - python=3.12\n")
     workflow.store.checkpoint(rid, "plan", proposal.model_dump())
     prepare = workflow._environment

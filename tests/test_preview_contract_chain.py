@@ -1,6 +1,7 @@
 import copy
 
 import pytest
+from authority_review_fixtures import authority_review
 from test_preview_evidence_recovery import ready
 
 from auto_agents_2.context_plan import ContextPlanner
@@ -81,6 +82,7 @@ async def test_full_chain_comparison_is_required_before_any_browser_actions(tmp_
         assert stage == "review" and context["review_kind"] == "preview_contract"
         contracts = context["preview_contracts"]
         result = comparison(contracts)
+        result.review = authority_review(context, result.review)
         if not complete:
             result.mappings = [row for row in result.mappings if row.source_preview_hash == contracts["previous"]["preview_hash"]]
         return result

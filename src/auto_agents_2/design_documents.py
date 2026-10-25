@@ -9,7 +9,13 @@ from .models import Change, DocumentResult, Record, ReviewResult, UserQuestion
 from .readview import public_files
 from .source_history import SourceHistory
 from .util import digest
-from .workspace import apply_prepared, path_allowed, prepared_before_hash, tree_hash, write_path
+from .workspace import (
+    apply_prepared,
+    path_allowed,
+    prepared_before_hash,
+    tree_hash,
+    write_path,
+)
 
 DESIGN_SCOPES = ["docs/aa2/design.md", "docs/aa2/design-*.md", "docs/aa2/design"]
 
@@ -22,6 +28,54 @@ class DesignQuestions(Record):
 class DesignDocuments:
     def __init__(self, engine):
         self.engine = engine
+
+    async def reaudit(self, rid, work, data, context):
+        """Migrate an old verdict by reviewing the same documents, not inventing consent."""
+        engine = self.engine
+        pending = engine.store.get(rid, "candidate/design", {})
+        self.verify_review_artifact(pending)
+        if pending.get("prepared"):
+            self.verify(work, pending)
+        elif data.get("files"):
+            from .engine import Replan
+            raise Replan("design", "Legacy design files lack their retained application binding; "
+                         "preserve them and return to the responsible gate before applying anything.")
+        before = tree_hash(work)
+        review = await engine._invoke("review", {**context, "review_kind": "design", "design": data,
+            "specification": engine.store.get(rid, "clarify"), "design_documents": self.manifest(work),
+            "project": engine.contexts.build(work),
+            "feedback": {"legacy_verdict": pending.get("review"),
+                         "blocked_admission": engine.store.get(rid, "evidence_admission/blocked"),
+                         "instruction": "Reassess source identity and adopted methods using the unchanged original "
+                             "input and current candidate. Prior approval is history, not a reason to adopt an "
+                             "unsupported or misattributed method. Preserve all actual business obligations."}},
+            ReviewResult, work, rid, "design/authority-reaudit/" + digest([data, before]), fresh=True)
+        if tree_hash(work) != before:
+            raise StateConflict("Design changed during authority reassessment")
+        if not review.approved:
+            from .engine import Replan
+            raise Replan("design", review.summary + "\n" + str(review.model_dump()))
+        updated = {**pending, "source_hash": before, "review": review.model_dump(),
+                   "review_documents": self.manifest(work),
+                   "review_specification": digest(engine.store.get(rid, "clarify")),
+                   "review_artifact": engine.artifacts.put(review.model_dump(), "review")}
+        engine.store.checkpoints(rid, {"recovery/design-review-history/" + digest(pending): pending,
+            "candidate/design": updated, "design/review-receipt": updated,
+            **engine.authority.acceptance(rid, "design", data, review)})
+
+    def verify_review_artifact(self, pending):
+        """A new protocol assessment must not hide loss of a claimed original."""
+        if "review_artifact" not in pending:
+            return  # Legacy records may have no pointer; reassessment is a new review.
+        ref = pending["review_artifact"]
+        try:
+            if not isinstance(ref, dict) or ref.get("kind") != "review":
+                raise ValueError("Invalid retained review reference")
+            raw = self.engine.artifacts.bytes(ref)
+            if len(raw) != ref.get("bytes") or json.loads(raw) != pending.get("review"):
+                raise ValueError("Retained review bytes or content do not match")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise StateConflict("Design review artifact is unavailable or changed; preserve the candidate") from exc
 
     def verify(self, work, pending):
         for item in pending["prepared"]:
@@ -178,7 +232,9 @@ class DesignDocuments:
         document = DocumentResult.model_validate(pending["document"])
         current_specification = engine.store.get(rid, "clarify")
         specification = digest(current_specification)
-        if "review" in pending and ("review_documents" not in pending or pending.get("review_specification") != specification):
+        self.verify_review_artifact(pending)
+        if "review" in pending and ("review_documents" not in pending or pending.get("review_specification") != specification
+                or not engine.authority.reusable(rid, pending["review"])):
             engine.store.checkpoint(rid, "recovery/design-review-history/" + digest(pending), pending)
             pending.pop("review")
             pending.pop("review_artifact", None)

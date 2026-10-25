@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 
 class Record(BaseModel):
@@ -195,6 +196,16 @@ class ReviewResult(Record):
     approved: bool
     summary: str
     findings: list[Finding] = []
+    authority: SkipJsonSchema[dict | None] = Field(default=None, description=(
+        "Versioned controller-bound review authority. Required by new workflow invocations; "
+        "None is retained only to read unmodified historical records."))
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_review(self, handler):
+        data = handler(self)
+        if self.authority is None:
+            data.pop("authority", None)
+        return data
 
     @model_validator(mode="after")
     def consistent_verdict(self):

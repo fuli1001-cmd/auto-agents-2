@@ -125,7 +125,7 @@ def validate_obligations(plan, context):
     return unsupported
 
 
-def preserve_obligations(previous, candidate, patch):
+def preserve_obligations(previous, candidate, patch, *, source_correction=None):
     """Metadata must not grant a second route for removing accepted obligations."""
     before = previous.evidence_contract
     if before is None:
@@ -144,7 +144,23 @@ def preserve_obligations(previous, candidate, patch):
             raise AA2Error("Evidence obligation change requires a formal mapped contract/timing correction")
         if row.origin != "model_derived" and (replacement is None or replacement.origin != row.origin
                 or replacement.requirement_ids != row.requirement_ids):
-            raise AA2Error("Evidence correction cannot remove or reattribute a user/unknown obligation")
+            from .review_authority import source_text
+            value = _value(previous, row)
+            # A prior origin label is not human authorship. Reattribution is
+            # restricted to a controller-bound dispute, an exact formal old/new
+            # correction, the same obligation ID and all original goal mappings.
+            allowed = (source_correction and source_correction.get("previous") == previous.model_dump()
+                and source_correction.get("owner") == "plan"
+                and source_text(value) in source_correction.get("clauses", []) and replacement is not None
+                and any(all(binding.get(k) == v for k, v in {
+                    "target": row.target, "task_id": row.task_id, "index": row.index,
+                    "value_hash": digest(value)}.items())
+                    for binding in source_correction.get("mapped_clauses", []))
+                and replacement.origin == "model_derived" and replacement.requirement_ids == row.requirement_ids
+                and any(c.target == row.target and c.task_id == row.task_id and c.index == row.index
+                        for c in patch.contract_corrections))
+            if not allowed:
+                raise AA2Error("Evidence correction cannot remove or reattribute a user/unknown obligation")
 
 
 def validate_admission_review(plan, review, context, *, allow_user_blocker=True):
@@ -154,6 +170,12 @@ def validate_admission_review(plan, review, context, *, allow_user_blocker=True)
                                                if k not in {"timing_reviews", "contract_reviews"}})
     assessment = verdict.evidence_assessment
     unsupported = validate_obligations(plan, context)
+    authority = None
+    if verdict.authority is not None or context.get("controller_review_basis"):
+        from .review_authority import validate_review
+        authority = validate_review(verdict, context.get("controller_review_basis"))
+        if set(context["controller_review_basis"]["unsupported"]) != set(unsupported):
+            raise AA2Error("Authority review does not cover the actual unsupported obligations")
     if (assessment.candidate_hash != digest(plan.model_dump())
             or assessment.catalog_hash != context["controller_evidence_capabilities"]["hash"]
             or assessment.source_binding != context["evidence_requirement_source"]["hash"]):
@@ -162,9 +184,12 @@ def validate_admission_review(plan, review, context, *, allow_user_blocker=True)
     user_rows = {r.id for r in plan.evidence_contract.obligations if r.origin == "user"}
     if not confirmed <= set(unsupported) & user_rows:
         raise AA2Error("Evidence review claims an unsupported user obligation without its exact source mapping")
-    if confirmed and assessment.origins_accurate and assessment.mapping_complete and allow_user_blocker:
+    grounded_gaps = ({r.obligation_id for r in authority.obligations if r.disposition == "genuine_gap"}
+                     if authority else confirmed)
+    if (unsupported and set(unsupported) <= grounded_gaps and assessment.origins_accurate
+            and assessment.mapping_complete and allow_user_blocker):
         raise HumanIntervention(HumanRequirement(kind="external_input",
-            reason="A source-reviewed user evidence requirement has no supported producer: " + ", ".join(sorted(confirmed)),
+            reason="A source-reviewed user evidence requirement has no supported producer: " + ", ".join(sorted(grounded_gaps)),
             action="Resolve the missing capability or explicitly clarify the original requirement; preserve the candidate and source.",
             resume_condition="Recheck the actual capability and source through plan admission. Confirmation cannot waive this gate.",
             evidence_refs=["capture", "clarify"]), reason_code="evidence_capability_unavailable", phase="plan")
@@ -181,6 +206,8 @@ def admission_record(plan, review, context, *, previous=None, patch=None, affect
             "previous_hash": digest(previous.model_dump()) if previous else None,
             "patch_hash": digest(patch.model_dump()) if patch else None,
             "affected": sorted(affected), "reopen": sorted(reopen), "coverage": coverage}
+    if context.get("controller_review_basis"):
+        body["authority"] = context["controller_review_basis"]
     return {**body, "binding": digest(body)}
 
 
@@ -196,10 +223,19 @@ def validate_admission_journal(journal, get, *, shared_browsers=False):
         return  # Existing prepared legacy records retain their original strict validators.
     if not record or not candidate_data.get("evidence_contract") or not patch_data.get("evidence_contract"):
         raise AA2Error("Prepared evidence contract is missing its admission record or patch contract")
-    from .plan_revision import EvidencePatchReview, PlanPatch, apply_patch, valid_coverage_receipt
+    from .plan_revision import (
+        EvidencePatchReview,
+        PlanPatch,
+        apply_patch,
+        valid_coverage_receipt,
+    )
     context = admission_context(get, shared_browsers=shared_browsers)
     if record.get("context") != context:
         raise AA2Error("Prepared evidence admission source/capability context is stale")
+    if record.get("authority") or journal.get("review", {}).get("authority"):
+        from .review_authority import validate_journal_authority
+        validate_journal_authority(journal, get)
+        context["controller_review_basis"] = record["authority"]
     previous = PlanResult.model_validate(journal["previous_plan"])
     patch = PlanPatch.model_validate(patch_data)
     coverage = record.get("coverage") if previous.mode == "verification_only" else None
@@ -208,8 +244,10 @@ def validate_admission_journal(journal, get, *, shared_browsers=False):
         coverage_verified = valid_coverage_receipt(journal, get, coverage or {})
         if not coverage_verified:
             raise AA2Error("Evidence admission coverage proof changed before activation")
+    from .review_authority import plan_source_correction
     candidate, affected, reopen = apply_patch(previous, patch, journal["base_revision"], set(patch.failure_ids),
-        {t.id: t.origin_id for t in previous.tasks}, coverage_verified=coverage_verified)
+        {t.id: t.origin_id for t in previous.tasks}, coverage_verified=coverage_verified,
+        source_correction=plan_source_correction(get, previous))
     review = EvidencePatchReview.model_validate(journal["review"])
     validate_admission_review(candidate, review, context, allow_user_blocker=False)
     expected = admission_record(candidate, review, context, previous=previous, patch=patch,

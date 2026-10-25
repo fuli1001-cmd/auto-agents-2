@@ -1,14 +1,16 @@
 """Declared dependencies and runtime caches retain consistent verification identities."""
+
 import sys
 
 import pytest
+from authority_review_fixtures import authority_review, seed_original
 from test_build_contracts import fixture, service
 from test_workflow import CodingAgent, engine
 
 from auto_agents_2.builds import output_hashes
 from auto_agents_2.errors import AA2Error
 from auto_agents_2.evidence import CHECKER_VERSION, input_identity, reusable
-from auto_agents_2.models import Command, ImplementationResult, PlanResult, ReviewResult, TaskSpec
+from auto_agents_2.models import Command, ImplementationResult, PlanResult, TaskSpec
 from auto_agents_2.recovery import RecoveryNeeded
 from auto_agents_2.sandbox import SandboxRunner
 from auto_agents_2.verification import VerificationService, passed
@@ -90,6 +92,7 @@ async def task_fixture(tmp_path):
     workflow.sandbox = SandboxRunner(workflow.store.root)
     workflow.verifier = VerificationService(workflow.store.root, workflow.sandbox, workflow.resources)
     rid = workflow.store.admit("retained candidate verification", {})["id"]
+    seed_original(workflow, rid)
     check = check.model_copy(update={"inputs": [*check.inputs, "frontend/node_modules"]})
     git(tmp_path, "add", "frontend", "backend")
     git(tmp_path, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "Retained candidate fixture")
@@ -122,7 +125,7 @@ async def test_task_review_drift_preserves_candidate_and_routes_recoverable_inpu
         reviews.append(stage)
         if when == "during_review":
             mutate()
-        return ReviewResult(approved=True, summary="Review response is a proposal")
+        return authority_review(args[0], approved=True, summary="Review response is a proposal")
     workflow.agent.invoke = review
     if when == "before_review":
         checks = workflow._checks
@@ -172,7 +175,7 @@ async def test_old_tested_candidate_rechecks_without_regenerating_implementation
     async def review(stage, *args, **kwargs):
         assert stage == "review"
         calls.append(stage)
-        return ReviewResult(approved=True, summary="Current evidence was inspected")
+        return authority_review(args[0], approved=True, summary="Current evidence was inspected")
     workflow.agent.invoke = review
     commit = await workflow._task(rid, task, base, plan, {"specification": {}})
     assert commit and calls == ["checks", "review"]

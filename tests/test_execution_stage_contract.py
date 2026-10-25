@@ -170,7 +170,7 @@ class TimingAgent(ApprovingAgent):
             return patch
         if context.get('review_kind') == 'plan_patch':
             from auto_agents_2.plan_revision import EvidencePatchReview
-            assert schema is EvidencePatchReview
+            assert issubclass(schema, EvidencePatchReview)
             self.views.append(copy.deepcopy(context))
             if self.interrupt:
                 self.interrupt = False

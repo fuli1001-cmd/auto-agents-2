@@ -269,7 +269,49 @@ async def test_same_argv_distinct_contracts_keep_separate_evidence_and_strongest
 
 
 @pytest.mark.parametrize("user_change", [False, True])
-async def test_resume_after_plan_materialization_accepts_only_the_owned_document_change(tmp_path, user_change):
+async def test_resume_after_plan_materialization_accepts_only_the_owned_document_change(tmp_path, user_change, monkeypatch):
+    from test_stage_contract_corrections import setup_correction
+
+    from auto_agents_2 import recovery_controller
+
+    workflow, rid, work, _, record, agent = setup_correction(tmp_path)
+    store = workflow.store
+    materialize = recovery_controller.materialize_plan
+
+    def interrupt_after_materialization(*args):
+        materialize(*args)
+        raise asyncio.CancelledError()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(recovery_controller, "materialize_plan", interrupt_after_materialization)
+        with pytest.raises(asyncio.CancelledError):
+            await workflow.recovery.resume(rid)
+    active = store.get(rid, "recovery/active")
+    key = f"plan_revision/journal/{record.id}/{active['attempt']}"
+    journal = store.get(rid, key)
+    assert journal["phase"] == "activated" and journal["review"]["authority"]
+    assert (work / "docs/aa2/plan.md").read_text() == journal["plan"]["document"]
+    calls = (len(agent.calls), len(agent.views))
+    budget = store.get(rid, "recovery/budgets/diagnosis/T3")
+    if user_change:
+        (work / "user.txt").write_text("preserve this")
+        with pytest.raises(AA2Error, match="source changed"):
+            await workflow.recovery.resume(rid)
+        assert (work / "user.txt").read_text() == "preserve this"
+        assert store.get(rid, "recovery/active") == active
+    else:
+        await workflow.recovery.resume(rid)
+        assert store.get(rid, "recovery/active") is None
+    assert store.get(rid, "plan_revision/current")["revision"] == 2
+    assert store.get(rid, key) == journal
+    assert store.get(rid, "rounds/T3") == {"round": 17}
+    assert store.get(rid, "recovery/budgets/diagnosis/T3") == budget
+    assert (len(agent.calls), len(agent.views)) == calls
+
+
+async def test_incomplete_legacy_activation_is_preserved_for_reconciliation(tmp_path):
+    from auto_agents_2.faults import StateConflict
+
     workflow = engine(tmp_path, CodingAgent())
     store, rid = prepare_activation(tmp_path)
     base = workflow.workspaces.committed_baseline(rid, "main")
@@ -287,13 +329,55 @@ async def test_resume_after_plan_materialization_accepts_only_the_owned_document
     decision = adjudicate(record, diagnosis=Diagnosis(action="plan_patch", reason="owned change", evidence_refs=["plan"]))
     store.checkpoint(rid, "recovery/active", {"version": 1, "failure": record.model_dump(), "attempt": 1,
         "evidence_source_hash": before, "decision": decision.model_dump()})
-    if user_change:
-        (work / "user.txt").write_text("preserve this")
-        with pytest.raises(AA2Error, match="source changed"):
-            await workflow.recovery.resume(rid)
-        assert (work / "user.txt").read_text() == "preserve this"
-    else:
+    retained = store.get(rid, key)
+    with pytest.raises(StateConflict, match="original review or proposal"):
         await workflow.recovery.resume(rid)
-        assert store.get(rid, "recovery/active") is None
+    assert store.get(rid, "recovery/active") is not None
+    assert store.get(rid, key) == retained
     assert store.get(rid, "plan_revision/current")["revision"] == 2
+    assert doc.read_text() == "revised"
     assert not workflow.agent.calls
+
+
+@pytest.mark.parametrize("damage", ["missing_review", "missing_patch", "empty_review", "empty_legacy_patch", "rejected_review"])
+async def test_activated_journal_losing_review_or_proposal_cannot_resume(tmp_path, monkeypatch, damage):
+    from test_stage_contract_corrections import setup_correction
+
+    from auto_agents_2 import recovery_controller
+    from auto_agents_2.faults import StateConflict
+
+    workflow, rid, work, _, record, agent = setup_correction(tmp_path)
+    materialize = recovery_controller.materialize_plan
+
+    def interrupt(*args):
+        materialize(*args)
+        raise asyncio.CancelledError()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(recovery_controller, "materialize_plan", interrupt)
+        with pytest.raises(asyncio.CancelledError):
+            await workflow.recovery.resume(rid)
+    active = workflow.store.get(rid, "recovery/active")
+    key = f"plan_revision/journal/{record.id}/{active['attempt']}"
+    journal = workflow.store.get(rid, key)
+    assert journal["phase"] == "activated"
+    if damage.startswith("missing_"):
+        journal.pop(damage.removeprefix("missing_"))
+    elif damage == "empty_review":
+        journal["review"] = {}
+    elif damage == "empty_legacy_patch":
+        journal["review"] = {"approved": True, "summary": "Legacy plain review", "findings": []}
+        journal["patch"] = {}
+    else:
+        journal["review"]["approved"] = False
+    workflow.store.checkpoint(rid, key, journal)
+    calls = (len(agent.calls), len(agent.views))
+    source = tree_hash(work)
+    with pytest.raises(StateConflict, match="original review or proposal"):
+        await workflow.recovery.resume(rid)
+    assert workflow.store.get(rid, key) == journal
+    assert workflow.store.get(rid, "recovery/active") is not None
+    assert workflow.store.get(rid, "plan_revision/current")["revision"] == 2
+    assert workflow.store.get(rid, "rounds/T3") == {"round": 17}
+    assert tree_hash(work) == source
+    assert (len(agent.calls), len(agent.views)) == calls

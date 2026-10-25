@@ -25,6 +25,8 @@ def commit(work, title="fixture"):
 
 
 async def reviewed(workflow, rid, work):
+    from authority_review_fixtures import seed_original
+    seed_original(workflow, rid)
     result = DocumentResult(summary="architecture", document="# Architecture\nSee design-pagination.md", files=[
         Change(path="docs/aa2/design-pagination.md", content="# Pagination\nKeep the original acceptance obligations.\n")])
     await DesignDocuments(workflow).prepare(rid, work, result, {})
@@ -53,16 +55,33 @@ async def test_architecture_receipt_binds_full_document_set_and_raw_review(tmp_p
         DesignDocuments(workflow).verify(tmp_path, workflow.store.get(rid, "candidate/design"))
 
 
-async def test_saved_verdict_cannot_advance_design_when_raw_review_is_lost(tmp_path):
+@pytest.mark.parametrize("entry", ["prepare", "reaudit"])
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "length", "different_review"])
+async def test_saved_verdict_cannot_advance_design_when_raw_review_is_lost(tmp_path, entry, damage):
     workflow = engine(tmp_path, CodingAgent())
     rid = workflow.store.admit("lost raw review", {})["id"]
     document = await reviewed(workflow, rid, tmp_path)
     pending = workflow.store.get(rid, "candidate/design")
     ref = pending["review_artifact"]
-    (workflow.artifacts.root / ref["hash"][:2] / ref["hash"]).unlink()
+    raw = workflow.artifacts.root / ref["hash"][:2] / ref["hash"]
+    if damage == "missing":
+        raw.unlink()
+    elif damage == "corrupt":
+        raw.write_text("Corrupted retained review")
+    elif damage == "length":
+        pending["review_artifact"] = {**ref, "bytes": ref["bytes"] + 1}
+        workflow.store.checkpoint(rid, "candidate/design", pending)
+    else:
+        pending["review_artifact"] = workflow.artifacts.put({**pending["review"], "summary": "A different review"}, "review")
+        workflow.store.checkpoint(rid, "candidate/design", pending)
+    calls = list(workflow.agent.calls)
     with pytest.raises(StateConflict, match="review artifact"):
-        await DesignDocuments(workflow).prepare(rid, tmp_path, document, {})
+        if entry == "prepare":
+            await DesignDocuments(workflow).prepare(rid, tmp_path, document, {})
+        else:
+            await DesignDocuments(workflow).reaudit(rid, tmp_path, document.model_dump(), {})
     assert workflow.store.get(rid, "candidate/design") == pending
+    assert workflow.agent.calls == calls
 
 
 @pytest.mark.parametrize("damage", [None, "bytes", "verdict", "documents", "specification"])

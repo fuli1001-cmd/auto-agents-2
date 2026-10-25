@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from authority_review_fixtures import authority_review, seed_original
 from evidence_test_fixtures import seed_requirements
 from test_patch_repair import Corrector, replacement, setup
 from test_plan_lineage import ReachedDevelopment, pending_run
@@ -13,7 +14,7 @@ from auto_agents_2.engine import STAGES, Replan
 from auto_agents_2.errors import AA2Error, PolicyViolation
 from auto_agents_2.evidence_admission import admission_context
 from auto_agents_2.faults import StateConflict
-from auto_agents_2.models import Change, DocumentResult, Finding, ReviewResult
+from auto_agents_2.models import Change, DocumentResult, Finding
 from auto_agents_2.planning import validate_plan
 from auto_agents_2.recovery import failure_summary
 from auto_agents_2.workspace import apply_prepared, git
@@ -76,6 +77,7 @@ async def test_partial_application_resumes_original_images_and_preserves_user_ch
     agent = DesignAgent()
     workflow = engine(tmp_path, agent)
     rid = workflow.store.admit("fixture", {})["id"]
+    seed_original(workflow, rid)
     baseline(tmp_path)
     service = DesignDocuments(workflow)
 
@@ -105,6 +107,7 @@ async def test_partial_application_resumes_original_images_and_preserves_user_ch
 
 async def test_saved_design_review_reused_after_interruption(tmp_path, monkeypatch):
     workflow, agent, rid = setup(tmp_path, [])
+    seed_original(workflow, rid)
     document = DocumentResult(summary="design", document="# Architecture")
     original = workflow.store.checkpoint
 
@@ -158,7 +161,7 @@ async def test_design_review_rejection_blocks_planning_and_retains_candidate(tmp
     class Rejecting(CodingAgent):
         async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
             if context.get("review_kind") == "design":
-                return ReviewResult(approved=False, summary="Missing interface", findings=[Finding(
+                return authority_review(context, approved=False, summary="Missing interface", findings=[Finding(
                     severity="blocking", location="docs/aa2/design.md", description="Undefined data invariant",
                     evidence="No invariant", resolution="Specify the invariant before planning")])
             return await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
@@ -174,6 +177,7 @@ async def test_design_review_rejection_blocks_planning_and_retains_candidate(tmp
 
 async def test_review_cannot_accept_changed_design_inputs(tmp_path):
     workflow, _, rid = setup(tmp_path, [])
+    seed_original(workflow, rid)
     original = workflow.agent.invoke
 
     async def drift(*args, **kwargs):

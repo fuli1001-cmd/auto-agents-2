@@ -156,8 +156,12 @@ def test_available_proposal_does_not_hide_a_missing_git_baseline(tmp_path):
     assert workflow.artifacts.json(history["artifact"])["proposals"]
 
 
-async def test_delivery_diagnosis_uses_the_same_filtered_history_without_acceptance(tmp_path):
+@pytest.mark.parametrize('grounded', [True, False])
+async def test_delivery_diagnosis_uses_the_same_filtered_history_without_acceptance(tmp_path, grounded):
+    from authority_review_fixtures import recorded_review
     from test_decisions import setup
+
+    from auto_agents_2.faults import StateConflict
 
     workflow, rid = setup(tmp_path)
     proposal = ImplementationResult(summary="Retained parser repair", changes=[
@@ -178,7 +182,13 @@ async def test_delivery_diagnosis_uses_the_same_filtered_history_without_accepta
 
     workflow.agent.invoke = invoke
     before = tree_hash(tmp_path)
-    action = await workflow.recovery.delivery_decision(rid, tmp_path,
-        {"review": {"approved": False, "summary": "Needs repair", "findings": []}}, ["value.py"])
-    assert action == "repair" and calls == ["recovery_diagnosis"]
+    raw = {"approved": False, "summary": "Needs repair", "findings": []}
+    if grounded:
+        raw = recorded_review(workflow, rid, raw, work=tmp_path)
+        action = await workflow.recovery.delivery_decision(rid, tmp_path, {"review": raw}, ["value.py"])
+        assert action == "repair"
+    else:
+        with pytest.raises(StateConflict, match='ungrounded review'):
+            await workflow.recovery.delivery_decision(rid, tmp_path, {"review": raw}, ["value.py"])
+    assert calls == ["recovery_diagnosis"]
     assert tree_hash(tmp_path) == before and not workflow.store.get(rid, "delivery/receipt")

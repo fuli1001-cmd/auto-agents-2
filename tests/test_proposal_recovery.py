@@ -37,7 +37,10 @@ class MalformedOnce(ApprovingAgent):
             assert context["validation_feedback"]["code"] == "invalid_structured_response"
             if stage == "prototype":
                 return DocumentResult(summary="prototype", document="Proposed prototype; approval still required")
-        return await super().invoke(stage, context, schema, work, rid, operation, fresh)
+        result = await super().invoke(stage, context, schema, work, rid, operation, fresh)
+        # The real ProviderRouter returns the requested schema, including its
+        # current typed authority fields, on both first call and cache reuse.
+        return schema.model_validate(result.model_dump())
 
 
 @pytest.mark.parametrize("stage,schema", [
@@ -50,6 +53,12 @@ async def test_invalid_response_enters_action_decision_without_authentication_qu
     workflow, rid = setup(tmp_path, agent)
     workflow.store.checkpoint(rid, "rounds/T1", {"round": 8})
     context = {}
+    if stage == "coverage_review":
+        context = {"assessment": workflow.store.get(rid, "clarify")}
+    elif stage == "review":
+        context = {"review_kind": "implementation"}
+    elif stage == "verify":
+        context = {"project": workflow.contexts.build(tmp_path)}
     if stage == "plan":
         seed_requirements(workflow, rid, source_plan())
         context = admission_context(lambda key: workflow.store.get(rid, key))

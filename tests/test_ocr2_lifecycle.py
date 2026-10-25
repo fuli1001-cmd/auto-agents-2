@@ -1,4 +1,5 @@
 """Interrupted handoff, recovery and ownership regressions from OCR round two."""
+
 import asyncio
 import json
 import sqlite3
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 import test_recovery_contracts as contracts
+from authority_review_fixtures import authority_review, seed_original
 from evidence_test_fixtures import empty_contract, seed_requirements
 from test_runtime import configured
 from test_workflow import CodingAgent, engine
@@ -400,12 +402,13 @@ async def test_added_delivery_repair_reconciles_interrupted_git_checkpoint(tmp_p
             if stage == "implement":
                 self.proposals += 1
                 return ImplementationResult(summary="repair", changes=[Change(path="new.py", content="new")])
-            return ReviewResult(approved=True, summary="reviewed")
+            return authority_review(a[0], approved=True, summary="reviewed")
     agent = Agent()
     workflow = engine(tmp_path, agent)
     (tmp_path / "old.py").write_text("old")
     workflow.workspaces.checkpoint(tmp_path, "refs/aa2/fixture/base", "baseline")
     rid = workflow.store.admit("fixture", {})["id"]
+    seed_original(workflow, rid)
     async def decision(*a, **kw):
         return "repair"
     monkeypatch.setattr(workflow.recovery, "delivery_decision", decision)

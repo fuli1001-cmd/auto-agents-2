@@ -11,6 +11,10 @@ class IssueLedger:
         self.store, self.artifacts = store, artifacts
 
     def record(self, rid, scope, review, evidence):
+        authority = None
+        if evidence.get("controller_review_basis") or getattr(review, "authority", None):
+            from .review_authority import validate_review
+            authority = validate_review(review, evidence.get("controller_review_basis"))
         task = evidence.get("task", {})
         origin = task.get("origin_id") or task.get("id")
         if origin:
@@ -18,15 +22,18 @@ class IssueLedger:
         ledger = self.store.get(rid, "issues", {})
         observed = set()
         proof = self.artifacts.put({"review": review.model_dump(), "context_identity": digest(evidence)}, "issue_observation")
-        for finding in review.findings:
+        for index, finding in enumerate(review.findings):
             # Advisory observations stay in the archived review, not the open defect ledger.
-            if getattr(finding, "kind", None) == "advisory":
+            proof_row = next((r for r in authority.findings if r.finding_index == index), None) if authority else None
+            if getattr(finding, "kind", None) == "advisory" or proof_row and proof_row.kind == "advisory":
                 continue
             body = finding.model_dump()
             identity = digest([scope, finding.severity, finding.location, finding.description, finding.resolution])
             observed.add(identity)
             issue = ledger.setdefault(identity, {"id": identity, "scope": scope, "original": body,
                                                   "first_seen": now(), "count": 0, "observations": []})
+            if proof_row:
+                issue["authority"] = {"basis_hash": authority.basis_hash, **proof_row.model_dump()}
             logs = {ref["hash"]: ref for ref in issue.get("diagnostic_evidence", [])}
             logs.update({ref["hash"]: ref for ref in references(evidence) if ref.get("kind") in LOG_KINDS})
             issue["diagnostic_evidence"] = list(logs.values())

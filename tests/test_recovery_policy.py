@@ -352,13 +352,22 @@ async def test_pending_human_authorization_cannot_follow_plan_drift(tmp_path):
     assert not workflow.store.recovery_history(rid, "T3")["recent"]
 
 
-async def test_unpublished_delivery_can_diagnose_beyond_legacy_limit(tmp_path):
+@pytest.mark.parametrize('grounded', [True, False])
+async def test_unpublished_delivery_can_diagnose_beyond_legacy_limit(tmp_path, grounded):
+    from authority_review_fixtures import recorded_review
+
+    from auto_agents_2.faults import StateConflict
     workflow, rid = setup(tmp_path)
     (tmp_path / "value.py").write_text("value = 1\n")
     workflow.store.checkpoint(rid, "recovery/budgets/diagnosis/delivery", {"round": 20})
-    result = await workflow.recovery.delivery_decision(rid, tmp_path,
-        {"review": {"approved": False, "summary": "candidate needs repair", "findings": []}}, ["value.py"])
-    assert result == "repair"
+    review = {"approved": False, "summary": "candidate needs repair", "findings": []}
+    if grounded:
+        review = recorded_review(workflow, rid, review, work=tmp_path)
+        result = await workflow.recovery.delivery_decision(rid, tmp_path, {"review": review}, ["value.py"])
+        assert result == "repair"
+    else:
+        with pytest.raises(StateConflict, match='ungrounded review'):
+            await workflow.recovery.delivery_decision(rid, tmp_path, {"review": review}, ["value.py"])
     assert workflow.store.get(rid, "recovery/budgets/diagnosis/delivery")["round"] == 21
     assert not workflow.store.pending(rid)
 

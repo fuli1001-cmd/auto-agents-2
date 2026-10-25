@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from authority_review_fixtures import seed_original
 from test_manifest_references import plan
 from test_runtime import configured
 from test_workflow import CodingAgent, engine
@@ -149,6 +150,7 @@ async def test_preparation_error_preserves_applied_task_and_round_for_retry(tmp_
     agent = CodingAgent()
     workflow = engine(tmp_path, agent)
     rid = workflow.store.admit("addition", {})["id"]
+    seed_original(workflow, rid)
     proposal = plan()
     proposal.tasks[0].checks[0].argv.extend(["-p", "no:junitxml"])
     base = workflow.workspaces.committed_baseline(rid, "main")

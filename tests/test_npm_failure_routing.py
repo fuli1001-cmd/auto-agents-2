@@ -2,6 +2,7 @@ import asyncio
 import sys
 
 import pytest
+from authority_review_fixtures import seed_original
 from test_runtime import configured
 from test_workflow import CodingAgent, engine
 
@@ -167,6 +168,7 @@ else:
 
     bind(workflow)
     rid = workflow.store.admit('addition', {})['id']
+    seed_original(workflow, rid)
     proposal = plan()
     proposal.tasks[0].allowed_paths.extend(['package.json', 'package-lock.json'])
     base = workflow.workspaces.committed_baseline(rid, 'main')

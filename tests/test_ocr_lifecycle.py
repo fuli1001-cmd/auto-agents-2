@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from authority_review_fixtures import authority_review, seed_original
 from test_runtime import configured
 from test_workflow import CodingAgent, engine
 from typer.testing import CliRunner
@@ -86,12 +87,13 @@ async def test_completed_repair_replays_only_for_same_observation(tmp_path, monk
             if stage == "implement":
                 self.proposals += 1
                 return ImplementationResult(summary="repair", changes=[Change(path="app.py", content=str(self.proposals))])
-            return ReviewResult(approved=True, summary="reviewed")
+            return authority_review(context, approved=True, summary="reviewed")
     agent = Agent()
     workflow = engine(tmp_path, agent)
     (tmp_path / "app.py").write_text("initial")
     workflow.workspaces.checkpoint(tmp_path, "refs/aa2/fixture/base", "baseline")
     rid = workflow.store.admit("fixture", {})["id"]
+    seed_original(workflow, rid)
     async def decision(*args, **kwargs):
         return "repair"
     monkeypatch.setattr(workflow.recovery, "delivery_decision", decision)

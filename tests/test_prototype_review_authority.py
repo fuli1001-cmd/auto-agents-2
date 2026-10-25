@@ -270,7 +270,7 @@ async def test_approved_recheck_entry_receives_authority_and_original_capture(tm
 
 
 def test_missing_original_is_explicit_and_corrupt_retained_original_is_not_ignored(tmp_path, monkeypatch):
-    workflow, rid, document, _, _, _ = approval_fixture(tmp_path, monkeypatch, legacy=False)
+    workflow, rid, document, _, _, _ = approval_fixture(tmp_path, monkeypatch, legacy=False, original=False)
     context = workflow._prototype_review_context(rid, tmp_path, {"prototype": document.model_dump()})
     assert context["prototype_requirement_source"]["status"] == "unavailable"
     assert all(c["id"] != "user:original" for c in context["prototype_review_basis"]["criteria"])

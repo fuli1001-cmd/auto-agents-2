@@ -1,10 +1,13 @@
 """Final observations can propose owned task repairs, never unscoped permits."""
+
 import asyncio
 import copy
 
 import pytest
+from authority_review_fixtures import authority_review
+from evidence_test_fixtures import seed_requirements
 from test_recovery_contracts import failure
-from test_recovery_policy import ready
+from test_recovery_policy import plan, setup
 
 from auto_agents_2.decisions import DecisionResult
 from auto_agents_2.errors import AA2Error, PostCommitError
@@ -12,6 +15,23 @@ from auto_agents_2.faults import StateConflict
 from auto_agents_2.models import PlanResult
 from auto_agents_2.recovery import Diagnosis, RepairTarget, adjudicate
 from auto_agents_2.workspace import tree_hash
+
+
+def ready(tmp_path, agent=None, record=None):
+    """Current reviewed failure; legacy authority is tested in its own negative cases."""
+    from authority_review_fixtures import recorded_review
+    workflow, rid = setup(tmp_path, agent)
+    base = workflow.workspaces.committed_baseline(rid, "main")
+    work = workflow.workspaces.allocate(rid, "integration", base)
+    contract = plan()
+    seed_requirements(workflow, rid, contract)
+    workflow.store.checkpoint(rid, "plan", contract.model_dump())
+    record = record or failure()
+    if record.evidence.get("review"):
+        review = recorded_review(workflow, rid, record.evidence["review"], work=work)
+        record = record.model_copy(update={"evidence": {**record.evidence, "review": review}})
+    workflow.recovery.submit(rid, record)
+    return workflow, rid, work, contract, record
 
 
 def final_failure():
@@ -144,7 +164,7 @@ async def test_old_pending_diagnosis_answer_is_preserved_then_new_call_can_targe
 async def test_real_final_review_repair_reexecutes_checks_and_waits_for_new_acceptance(tmp_path):
     from test_workflow import CodingAgent, engine
 
-    from auto_agents_2.models import Change, Finding, ImplementationResult, ReviewResult
+    from auto_agents_2.models import Change, Finding, ImplementationResult
 
     class FinalAgent(CodingAgent):
         implementations = 0
@@ -169,14 +189,14 @@ async def test_real_final_review_repair_reexecutes_checks_and_waits_for_new_acce
                 self.final_reviews += 1
                 if self.final_reviews == 1:
                     assert "return 5" in (workspace/"calc.py").read_text()
-                    return ReviewResult(approved=False, summary="One passing example does not prove addition",
+                    return authority_review(context, approved=False, summary="One passing example does not prove addition",
                         findings=[Finding(severity="major", location="calc.py:2", description="Constant result",
                             evidence="Source returns 5 for all inputs", resolution="Repair T1 and test another pair")])
                 assert "a + b" in (workspace/"calc.py").read_text()
                 rows = [r for r in context["evidence"] if r.get("tests")]
                 assert rows and all(r["exit_code"] == 0 and r["tests"] == 2 for r in rows)
                 assert self.protection_reviews >= 2  # Initial and repaired test proposals reviewed.
-                return ReviewResult(approved=True, summary="New checks and source resolve the final finding")
+                return authority_review(context, approved=True, summary="New checks and source resolve the final finding")
             if context.get("review_kind") == "test_changes":
                 self.protection_reviews += 1
             return await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)

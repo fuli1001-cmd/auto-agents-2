@@ -1,7 +1,9 @@
 """Inconclusive diagnoses reach action decisions without becoming human-only blocks."""
+
 import asyncio
 
 import pytest
+from authority_review_fixtures import recorded_review
 from test_decisions import ApprovingAgent, configure, setup
 from test_recovery_contracts import failure, plan
 from test_recovery_policy import ready
@@ -224,7 +226,7 @@ async def test_unpublished_delivery_routes_inconclusive_diagnoses_through_decisi
     workflow, rid = setup(tmp_path, agent)
     (tmp_path / "value.py").write_text("value = 1\n")
     result = await workflow.recovery.delivery_decision(rid, tmp_path,
-        {"review": {"approved": False, "summary": "Need startup evidence", "findings": []}}, ["value.py"])
+        {"review": recorded_review(workflow, rid, {"approved": False, "summary": "Need startup evidence", "findings": []})}, ["value.py"])
     assert result == actions[-1]
     assert not workflow.store.pending(rid)
     assert agent.calls == [("recovery_diagnosis", True), ("decision", True)] * len(actions)

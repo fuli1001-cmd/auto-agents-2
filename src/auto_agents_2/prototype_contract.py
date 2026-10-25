@@ -58,6 +58,9 @@ def source_context(store, artifacts, rid, specification=None):
         # is an error, unlike a legacy record that never contained a capture.
         source = {"status": "available", "capture": ref,
                   "raw_requirements": artifacts.read(ref), "specification_hash": digest(spec)}
+    answers = store.submitted_answers(rid)
+    if answers:
+        source["submitted_answers"] = answers
     return {"controller_prototype_contract": prototype_contract(), "prototype_requirement_source": source}
 
 

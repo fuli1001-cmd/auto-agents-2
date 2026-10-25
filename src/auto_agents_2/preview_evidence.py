@@ -141,6 +141,8 @@ class PreviewEvidence:
             return {}
         report = self.engine.artifacts.json(saved["report"])
         comparison = PreviewComparison.model_validate(saved["comparison"])
+        if not self.engine.authority.reusable(rid, comparison.review.model_dump()):
+            return {}
         if not self.report_valid(report, plan.preview) or not self.comparison_valid(comparison, self.contracts(rid, plan)):
             raise StateConflict("Completed preview evidence no longer matches its contract")
         return {"preview_evidence": {"report": saved["report"], "execution": expected,
@@ -224,6 +226,10 @@ class PreviewEvidence:
         if saved["binding"] != permit["preview_binding"]:
             raise StateConflict("Preview journal no longer matches its permit")
         store.checkpoint(rid, key, saved)
+        if saved.get("comparison") and not engine.authority.reusable(rid, saved["comparison"]["review"]):
+            store.checkpoint(rid, "authority/preview-history/" + digest(saved), saved)
+            saved = {k: v for k, v in saved.items() if k != "comparison"}
+            store.checkpoint(rid, key, saved)
         if "comparison" not in saved:
             comparison = await engine._invoke("review", {"review_kind": "preview_contract",
                 "preview_contracts": contracts, "task": task.model_dump(),

@@ -1,7 +1,9 @@
 """Integrated reviewers must retain the approved task scope for historical bodies."""
+
 import json
 
 import pytest
+from authority_review_fixtures import authority_review, seed_original
 from test_review_evidence import commit
 from test_workflow import CodingAgent, engine
 
@@ -205,6 +207,7 @@ async def test_new_history_scope_invalidates_prior_final_invocation_without_rewr
     from auto_agents_2.models import ReviewResult
     from auto_agents_2.source_history import SourceHistory
     workflow, rid, _ = history_fixture(tmp_path)
+    seed_original(workflow, rid)
     calls = []
 
     class Reviewer:
@@ -212,20 +215,21 @@ async def test_new_history_scope_invalidates_prior_final_invocation_without_rewr
             manifest = workflow.artifacts.json(context["source_history"]["artifact"])
             included = manifest["snapshots"][0]["public_tree"]["frontend/vite.config.mjs"]["body_status"] == "included"
             calls.append(included)
-            return ReviewResult(approved=included, summary="History present" if included else "History unavailable")
+            return schema.model_validate(authority_review(context, approved=included,
+                summary="History present" if included else "History unavailable").model_dump())
 
     workflow.agent = Reviewer()
     histories = SourceHistory(workflow)
     old = histories.collect_protected(rid, tmp_path)
-    first = await workflow._invoke_once("verify", {"source_history": old}, ReviewResult, tmp_path,
+    first = await workflow._invoke("verify", {"source_history": old}, ReviewResult, tmp_path,
                                         rid, "final-review", fresh=True)
     original = workflow.store.get(rid, "invocation/final-review")
     original_bytes = workflow.artifacts.bytes(original["artifact"])
     assert not first.approved
     current = histories.collect_plan(rid, tmp_path, plan_for(CONFIGS))
-    second = await workflow._invoke_once("verify", {"source_history": current}, ReviewResult, tmp_path,
+    second = await workflow._invoke("verify", {"source_history": current}, ReviewResult, tmp_path,
                                          rid, "final-review", fresh=True)
-    repeated = await workflow._invoke_once("verify", {"source_history": current}, ReviewResult, tmp_path,
+    repeated = await workflow._invoke("verify", {"source_history": current}, ReviewResult, tmp_path,
                                            rid, "final-review", fresh=True)
     assert second.approved and repeated == second and calls == [False, True]
     assert workflow.artifacts.bytes(original["artifact"]) == original_bytes

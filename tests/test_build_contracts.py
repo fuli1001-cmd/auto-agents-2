@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from authority_review_fixtures import authority_review, seed_original
 from test_runtime import configured
 from test_workflow import CodingAgent, engine
 
@@ -11,7 +12,7 @@ from auto_agents_2.builds import BUILD_CONTRACT_VERSION, normalized, verificatio
 from auto_agents_2.environment import Environment
 from auto_agents_2.errors import PolicyViolation, VerificationPreparationError
 from auto_agents_2.evidence import reusable
-from auto_agents_2.models import Change, Command, ImplementationResult, PlanResult, ReviewResult, TaskSpec
+from auto_agents_2.models import Change, Command, ImplementationResult, PlanResult, TaskSpec
 from auto_agents_2.sandbox import SandboxRunner
 from auto_agents_2.util import digest, write_json
 from auto_agents_2.verification import VerificationService, passed
@@ -202,12 +203,13 @@ async def blocked_workflow(tmp_path, *, failing=False, proposed_changes=False):
                 assert context["feedback"]["controller_recheck"]["previous_request"]["replan_reason"] == "Build prerequisite missing"
                 return ImplementationResult(summary="Rechecked build and original tests", changes=[])
             assert stage == "review" and fresh and context["checks"][1]["tests"] == 1
-            return ReviewResult(approved=True, summary="Reviewed actual results")
+            return authority_review(context, approved=True, summary="Reviewed actual results")
 
     workflow = engine(tmp_path, Agent())
     workflow.sandbox = SandboxRunner(workflow.store.root)
     workflow.verifier = VerificationService(workflow.store.root, workflow.sandbox, workflow.resources)
     rid = workflow.store.admit("fixture://build", {})["id"]
+    seed_original(workflow, rid)
     build, check = fixture(tmp_path)
     if failing:
         (tmp_path / "frontend/source.txt").write_text("actual product failure")

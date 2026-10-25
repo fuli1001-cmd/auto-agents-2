@@ -265,6 +265,8 @@ class DeliveryCoordinator:
               [(p, generated_entry(contained(project, p), project)) for p in c.outputs]) for c in commands]]
         if plan and plan.preview:
             inputs.append({"application_browser_version": self.application_browser_version()})
+        from .review_authority import VERSION
+        inputs.append({"review_authority_version": VERSION})
         return digest(inputs)
 
     def complete_pending(self, rid, journal):

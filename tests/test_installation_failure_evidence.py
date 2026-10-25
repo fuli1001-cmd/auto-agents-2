@@ -4,6 +4,7 @@ import os
 import sys
 
 import pytest
+from authority_review_fixtures import seed_original
 from test_runtime import configured
 
 from auto_agents_2.artifacts import ArtifactStore
@@ -322,6 +323,7 @@ else:Path('node_modules').mkdir(exist_ok=True)
         e.environments.with_resolution = resolution
     bind(workflow)
     rid = workflow.store.admit('addition',{})['id']
+    seed_original(workflow, rid)
     proposal = plan()
     proposal.tasks[0].allowed_paths.extend(['package.json','package-lock.json'])
     base = workflow.workspaces.committed_baseline(rid,'main')

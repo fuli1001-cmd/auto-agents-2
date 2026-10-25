@@ -15,7 +15,13 @@ from .errors import AA2Error, InvalidStructuredResponse
 from .evidence import assess_observation
 from .evidence_refs import controller_context_catalog
 from .execution_stages import current_stage_contract, stage_contract
-from .faults import HumanIntervention, HumanRequirement, ResourceBoundary, StateConflict, route_failure
+from .faults import (
+    HumanIntervention,
+    HumanRequirement,
+    ResourceBoundary,
+    StateConflict,
+    route_failure,
+)
 from .interaction import choice_spec
 from .models import CheckResult, ImplementationResult, PlanResult
 from .plan_revision import (
@@ -38,7 +44,11 @@ from .recovery import (
     implemented_candidate,
 )
 from .source_history import SourceHistory
-from .stage_responsibilities import correction_contract, correction_request, validate_correction_request
+from .stage_responsibilities import (
+    correction_contract,
+    correction_request,
+    validate_correction_request,
+)
 from .util import digest
 from .workspace import git, prepared_before_hash, tree_hash
 
@@ -105,6 +115,10 @@ class RecoveryController:
         if saved and saved.get("decision", {}).get("action") == "repair":
             # The caller validates a partially applied repair against its saved
             # patch preimage. An already dispatched repair may legitimately edit.
+            if saved.get("permit"):
+                policy.validate_consumption(rid, saved["permit"], expected={"repair"})
+            elif self.store.get(rid, "authority/protocol"):
+                policy.engine.authority.require_failure(rid, FailureRecord.model_validate(saved["failure"]), "repair")
             return saved["decision"]["action"]
         evidence_source = tree_hash(work)
         if saved and saved.get("evidence_source_hash", evidence_source) != evidence_source:
@@ -283,6 +297,7 @@ class RecoveryController:
                 raise StateConflict("Interrupted delivery recheck has no durable completion; reservation remains occupied")
         if saved.get("workspace") != str(work) or saved.get("source_hash") != tree_hash(work):
             raise StateConflict("Reserved delivery recheck input changed; preserve recovery evidence")
+        self.engine.recovery_policy.validate_consumption(rid, saved.get("permit"), expected={"recheck"})
         self.store.checkpoint(rid, key, {**saved, "phase": "started"})
 
     def complete_delivery_recheck(self, rid, outcome):
@@ -483,12 +498,15 @@ class RecoveryController:
         active["decision"] = decision.model_dump()
         active["actor"] = (self.store.get(rid, active.get("permit", ""), {}) or {}).get("actor", "rule")
         self.store.checkpoint(rid, "recovery/active", active)
-        policy.start(rid, active.get("permit"))
+        activated = decision.action == "plan_patch" and self.store.get(
+            rid, f"plan_revision/journal/{failure.id}/{active['attempt']}", {}).get("phase") == "activated"
+        retained_patch = decision.action == "plan_patch" and self.store.get(
+            rid, f"plan_revision/journal/{failure.id}/{active['attempt']}")
+        if not retained_patch:
+            policy.start(rid, active.get("permit"))
         # Admission metadata never replaces the selected action or its existing permission.
         request_key = "recovery/correction-request/" + digest([failure.id, active["attempt"], decision.action])
         request = self.store.get(rid, request_key)
-        activated = decision.action == "plan_patch" and self.store.get(
-            rid, f"plan_revision/journal/{failure.id}/{active['attempt']}", {}).get("phase") == "activated"
         if request is None and not activated:
             request = correction_request(self.store, rid, action=decision.action, reason=decision.reason,
                 evidence_refs=decision.evidence_refs, permit=active.get("permit"))
@@ -693,17 +711,26 @@ class RecoveryController:
         pending = self.store.get(rid, "replanning/pending")
         permit_key = active.get("permit")
         permit = self.store.get(rid, permit_key) if permit_key else None
+        later_observation = {}
         if permit and (successor is not None or replan is not None):
             outcome = {"status": "rejected" if successor is not None else "gate_requested",
                        "evidence": "recovery/completed/" + active["failure"]["id"] + f"/{active['attempt']}"}
-            cycle_key = "recovery/cycles/" + permit["cycle_id"]
-            cycle = self.store.get(rid, cycle_key)
-            updates = {**updates, permit_key: {**permit, "phase": "completed", "outcome": outcome},
-                       cycle_key: {**cycle, "phase": "completed", "outcomes": outcome}}
+            if permit.get("phase") == "completed":
+                # Reassessment after activation is a new observation, not a
+                # retroactive rejection of an already applied operation.
+                self.engine.recovery_policy.completed_outcome(rid, permit_key)
+                later_observation = {"later_observation": {"permit": permit_key,
+                    "original_outcome_hash": digest(permit.get("outcome", {})), "disposition": outcome}}
+            else:
+                cycle_key = "recovery/cycles/" + permit["cycle_id"]
+                cycle = self.store.get(rid, cycle_key)
+                updates = {**updates, permit_key: {**permit, "phase": "completed", "outcome": outcome},
+                           cycle_key: {**cycle, "phase": "completed", "outcomes": outcome}}
         previous_tasks = {key: self.store.get(rid, key) for key in updates if key.startswith("develop/task/")}
         self.store.finish_recovery(rid, {**updates, "recovery/active": None,
             f"recovery/completed/{active['failure']['id']}/{active['attempt']}": {
-                **active, "phase": "dispatched", "legacy_pending": pending, "previous_tasks": previous_tasks},
+                **active, "phase": "dispatched", "legacy_pending": pending, "previous_tasks": previous_tasks,
+                **later_observation},
             "replanning/pending": None}, pending, replan=replan, successor=successor)
 
     async def _patch(self, rid, active, failure, plan, work):
@@ -712,6 +739,20 @@ class RecoveryController:
         journal_key = "plan_revision/journal/" + identity
         journal = self.store.get(rid, journal_key)
         if journal:
+            from .contract_corrections import ContractPlanReview
+            from .models import ReviewResult
+            from .plan_revision import EvidencePatchReview, TimingPlanReview
+            try:
+                original = journal["review"]
+                review_type = (EvidencePatchReview if "evidence_assessment" in original else
+                               ContractPlanReview if "contract_reviews" in original else
+                               TimingPlanReview if "timing_reviews" in original else ReviewResult)
+                if not review_type.model_validate(original).approved:
+                    raise ValueError("A prepared or activated patch must retain its original approval")
+                PlanPatch.model_validate(journal["patch"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise StateConflict("Retained plan patch has missing or invalid original review or proposal; "
+                                    "preserve the journal for reconciliation") from exc
             if journal["phase"] != "activated" and (tree_hash(work) != journal["source_hash"]
                     or git(work, "rev-parse", "HEAD") != journal["base_commit"]):
                 raise StateConflict("Integration changed before patch activation; preserved journal requires reconciliation")
@@ -720,6 +761,40 @@ class RecoveryController:
                     path = Path(snapshot["workspace"])
                     if not path.is_dir() or tree_hash(path) != snapshot["source_hash"]:
                         raise StateConflict("Retained candidate changed before activation; reconcile the saved snapshot first")
+            elif (journal["plan"] != self.store.get(rid, "plan")
+                    or self.store.get(rid, "plan_revision/current", {}).get("revision") != journal["base_revision"] + 1
+                    or self.store.get(rid, f"plan_revision/history/{journal['base_revision']}", {}).get("plan") != journal["previous_plan"]):
+                raise StateConflict("Retained activation no longer matches its original plan and history")
+            if not journal["review"].get("authority") and not journal.get("authority_reassessment"):
+                from .evidence_admission import admission_context, validate_obligations
+                from .models import ReviewResult
+                candidate = PlanResult.model_validate(journal["plan"])
+                review_context = {**admission_context(lambda key: self.store.get(rid, key),
+                    shared_browsers=engine.config.load().shared_cache.enabled),
+                    "review_kind": "plan_patch", "plan": journal["plan"],
+                    "patch": journal["patch"], "previous_plan": journal["previous_plan"],
+                    "failure": failure.model_dump(), "project": engine.contexts.build(work),
+                    "feedback": {"legacy_review": journal["review"], "journal_phase": journal["phase"],
+                        "instruction": "Reassess the exact retained old/new contract under current sources. "
+                            "Do not regenerate or fabricate earlier approval. A prepared candidate still requires "
+                            "all original activation gates; an activated contract is not activated again."}}
+                review_context["unsupported_evidence_obligations"] = (
+                    validate_obligations(candidate, review_context) if candidate.evidence_contract else [])
+                verdict = await engine._invoke("review", review_context, ReviewResult, work, rid,
+                    journal_key + "/authority-reaudit", fresh=True)
+                if not verdict.approved:
+                    self._reject_patch(rid, active, failure, identity,
+                        {"patch": journal["patch"], "patch_review": verdict.model_dump(),
+                         "validation_error": "Retained contract failed current authority review"})
+                    return False
+                journal["authority_reassessment"] = {**engine.authority.receipt(rid, verdict.model_dump()),
+                    "phase": journal["phase"], "journal": journal_key, "permit": active.get("permit")}
+                self.store.checkpoint(rid, journal_key, journal)
+            if journal["phase"] != "activated":
+                engine.recovery_policy.adopt_prepared_authority(rid, active, failure, journal_key)
+                engine.recovery_policy.start(rid, active.get("permit"))
+            elif self.store.get(rid, "authority/protocol"):
+                engine.authority.patch_transition(rid, active, failure)
             self.store.activate_plan_patch(rid, identity)
             return True
         # Charge only an actual amendment, retaining the historical progress barrier.
@@ -782,9 +857,14 @@ class RecoveryController:
         if recovery_context.get("correction_request"):
             validate_correction_request(recovery_context["correction_request"],
                 lambda key: self.store.get(rid, key), action="plan_patch")
-        from .evidence_admission import admission_record, validate_admission_review, validate_obligations
+        from .evidence_admission import (
+            admission_record,
+            validate_admission_review,
+            validate_obligations,
+        )
         from .plan_revision import EvidencePatchReview
         patch_context = {**recovery_context, "plan_patch": True, "base_revision": revision,
+            "controller_authority_scope": engine.authority.author_scope(rid, "plan"),
             "plan": plan.model_dump(), "failure": failure.model_dump(), "task_origins": self.store.task_origin_state(rid),
             "specification": self.store.get(rid, "clarify"), "project": engine.contexts.build(work)}
         patch_context["evidence_reference_contract"] = controller_context_catalog(
@@ -814,8 +894,10 @@ class RecoveryController:
                 satisfied, _ = validate_coverage(assessment, work)
                 coverage_verified = satisfied and bool(evidence) and passed(evidence)
                 self.store.checkpoint(rid, "coverage_checks", [r.model_dump() for r in evidence])
+            from .review_authority import plan_source_correction
             candidate, affected, reopen = apply_patch(plan, patch, revision, {failure.id},
-                self.store.get(rid, "task_origins", {}), coverage_verified=coverage_verified)
+                self.store.get(rid, "task_origins", {}), coverage_verified=coverage_verified,
+                source_correction=plan_source_correction(lambda name: self.store.authority_get(rid, name), plan))
             unsupported = validate_obligations(candidate, patch_context)
             for task in candidate.tasks:
                 verification_commands(task.checks, work, candidate.runtime_prepare)
@@ -854,6 +936,7 @@ class RecoveryController:
             review_context, provenance={"patch": "proposal", "plan": "proposal"}).contract(review_context)
         review = await engine._invoke("review", review_context, EvidencePatchReview,
             work, rid, "recovery/patch-review/" + identity, fresh=True)
+        review_context = engine.authority.context(rid, review, review_context)
         unchanged({"patch": patch.model_dump(), "review": review.model_dump()})
         try:
             validate_admission_review(candidate, review, review_context)

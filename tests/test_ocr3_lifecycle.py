@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from authority_review_fixtures import authority_review, seed_original
 from test_recovery_contracts import failure, plan
 from test_runtime import configured
 from test_workflow import CodingAgent, engine
@@ -31,16 +32,17 @@ async def test_inherited_environment_invalidates_pending_provider_response(tmp_p
     config, store = configured(tmp_path)
     rid = store.admit("fixture", {})["id"]
     workflow = WorkflowEngine(tmp_path)
+    seed_original(workflow, rid)
     calls = []
     async def call(effective, *args):
         calls.append(effective["fingerprint"])
-        return ReviewResult(approved=True, summary="fixture")
+        return authority_review(args[1], approved=True, summary="fixture")
     monkeypatch.setattr(workflow.agent, "_call", call)
-    await workflow._invoke("review", {}, ReviewResult, tmp_path, rid, "cache")
-    await workflow._invoke("review", {}, ReviewResult, tmp_path, rid, "cache")
+    await workflow._invoke("verify", {}, ReviewResult, tmp_path, rid, "cache")
+    await workflow._invoke("verify", {}, ReviewResult, tmp_path, rid, "cache")
     assert len(calls) == 1
     monkeypatch.setenv("OCR_FIXTURE_ENDPOINT", "changed inherited input")
-    await workflow._invoke("review", {}, ReviewResult, tmp_path, rid, "cache")
+    await workflow._invoke("verify", {}, ReviewResult, tmp_path, rid, "cache")
     assert len(calls) == 2 and calls[0] != calls[1]
     assert "changed inherited input" not in json.dumps(store.get(rid, "invocation/cache"))
 

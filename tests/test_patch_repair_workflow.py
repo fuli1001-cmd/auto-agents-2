@@ -1,11 +1,12 @@
 import asyncio
 
 import pytest
+from authority_review_fixtures import authority_review, seed_original
 from test_patch_repair import Corrector, replacement, setup
 from test_workflow import engine
 
 from auto_agents_2.engine import PROTOTYPE_BROWSER_VERSION
-from auto_agents_2.models import DocumentResult, ImplementationResult, IntakeResult, ReviewResult
+from auto_agents_2.models import DocumentResult, ImplementationResult, IntakeResult
 from auto_agents_2.util import digest
 from auto_agents_2.workspace import git
 
@@ -33,7 +34,7 @@ async def test_implementation_correction_still_requires_protected_test_review(tm
                 assert "assert add(0, 0)" not in (workspace / "tests/test_calc.py").read_text()
                 assert "return a - b" in (workspace / "calc.py").read_text()
                 reviewed.append(candidate)
-                return ReviewResult(approved=approve, summary="fixture protected review")
+                return authority_review(context, approved=approve, summary="fixture protected review")
             return await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
 
     agent = Agent([{"old_text": "assert add(2, 3) == 5", "content": "assert add(2, 3) == 5\n    assert add(0, 0) == 0"}])
@@ -132,6 +133,7 @@ async def test_delivery_repair_uses_corrected_proposal_for_independent_review(tm
     agent = Agent([{"old_text": "old", "content": "new"}])
     workflow = engine(tmp_path, agent)
     rid = workflow.store.admit("fixture", workflow.config.load().model_dump(mode="json"))["id"]
+    seed_original(workflow, rid)
     workflow.workspaces.checkpoint(tmp_path, f"refs/aa2/{rid}/base", "fixture")
 
     async def repair(*args, **kwargs):

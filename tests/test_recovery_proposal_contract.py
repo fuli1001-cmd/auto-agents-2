@@ -27,15 +27,17 @@ def test_catalog_has_proposal_authority_and_cannot_deserialize_as_decision(tmp_p
         assert 'repair' not in choices  # It is not yet a scoped execution candidate.
 
 
-@pytest.mark.parametrize('owner', ['task', 'final', 'delivery'])
-async def test_actual_controller_diagnosis_callers_share_proposal_contract(tmp_path, owner):
+@pytest.mark.parametrize('owner,grounded', [('task', True), ('final', True), ('final', False), ('delivery', True)])
+async def test_actual_controller_diagnosis_callers_share_proposal_contract(tmp_path, owner, grounded):
     from test_diagnosis_decisions import proposal_failure, setup
+    from test_final_task_repair_route import ready as reviewed_ready
 
     if owner == 'delivery':
         workflow, rid = setup(tmp_path)
         (tmp_path / 'value.py').write_text('value = 1\n')
     else:
-        workflow, rid, work, plan, failure = ready(tmp_path,
+        fixture = reviewed_ready if owner == 'final' and grounded else ready
+        workflow, rid, work, plan, failure = fixture(tmp_path,
             record=final_failure() if owner == 'final' else proposal_failure())
     actual = workflow.agent.invoke
     seen = []
@@ -53,6 +55,13 @@ async def test_actual_controller_diagnosis_callers_share_proposal_contract(tmp_p
     if owner == 'delivery':
         assert await workflow.recovery.delivery_decision(rid, tmp_path,
             {'review': {'approved': False, 'summary': 'Need startup evidence', 'findings': []}}, ['value.py']) == 'recheck'
+    elif owner == 'final' and not grounded:
+        # Diagnosis may inspect the old verdict, but it cannot turn that verdict
+        # into execution authority. Keep the original raw-input refusal case.
+        with pytest.raises(StateConflict, match='ungrounded review'):
+            await workflow.recovery.resume(rid)
+        assert workflow.store.get(rid, 'recovery/active') is not None
+        assert workflow.store.get(rid, 'plan') == plan.model_dump()
     else:
         await workflow.recovery.resume(rid)
         assert workflow.store.get(rid, 'recovery/active') is None

@@ -5,7 +5,11 @@ from pathlib import PurePosixPath
 
 from pydantic import Field, model_serializer
 
-from .contract_corrections import ContractCorrection, ContractPlanReview, validate_contract_structure
+from .contract_corrections import (
+    ContractCorrection,
+    ContractPlanReview,
+    validate_contract_structure,
+)
 from .errors import AA2Error
 from .evidence_refs import controller_context_catalog
 from .execution_stages import TimingProducer, current_stage_contract
@@ -228,7 +232,8 @@ def _retain_checks(old, new):
             raise AA2Error("Plan patch removes a check obligation or reduces expected_tests")
 
 
-def apply_patch(plan: PlanResult, patch: PlanPatch, revision: int, failures: set[str], origins: dict, *, coverage_verified=False):
+def apply_patch(plan: PlanResult, patch: PlanPatch, revision: int, failures: set[str], origins: dict, *, coverage_verified=False,
+                source_correction=None):
     if patch.base_revision != revision:
         raise AA2Error("Stale plan patch base_revision")
     if not set(patch.failure_ids) <= failures:
@@ -261,7 +266,7 @@ def apply_patch(plan: PlanResult, patch: PlanPatch, revision: int, failures: set
     if patch.evidence_contract is not None:
         candidate.evidence_contract = patch.evidence_contract.model_copy(deep=True)
     from .evidence_admission import preserve_obligations
-    preserve_obligations(plan, candidate, patch)
+    preserve_obligations(plan, candidate, patch, source_correction=source_correction)
     if not contract:
         _retain_checks(plan.final_checks, candidate.final_checks)
         _retain_checks(plan.runtime_prepare, candidate.runtime_prepare)

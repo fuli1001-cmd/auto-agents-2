@@ -4,6 +4,7 @@ import os
 import sys
 
 import pytest
+from authority_review_fixtures import authority_review
 from browser_fixtures import PNG
 from test_browser import browser_cache as browser_cache
 from test_prototype_evidence_recovery import ready as prototype_ready
@@ -12,7 +13,7 @@ from auto_agents_2.context_plan import ContextPlanner
 from auto_agents_2.decisions import DecisionResult
 from auto_agents_2.errors import AA2Error, PrototypeBrowserError
 from auto_agents_2.faults import StateConflict
-from auto_agents_2.models import BrowserAction, Command, PreviewSpec, ReviewResult
+from auto_agents_2.models import BrowserAction, Command, PreviewSpec
 from auto_agents_2.preview_evidence import ActionMapping, PreviewComparison, PreviewEvidence
 from auto_agents_2.recovery import Diagnosis, RecoveryNeeded, adjudicate
 from auto_agents_2.workspace import tree_hash
@@ -68,12 +69,12 @@ async def ready(tmp_path, monkeypatch):
                 contracts = context["preview_contracts"]
                 assert contracts["previous"]["preview"] == previous.model_dump()
                 assert len(contracts["current"]["preview"]["actions"]) == 4
-                return PreviewComparison(review=ReviewResult(approved=self.approved, summary="Every original obligation retained"),
+                return PreviewComparison(review=authority_review(context, approved=self.approved, summary="Every original obligation retained"),
                     mappings=[ActionMapping(previous_index=i, current_indexes=[i], reason="Original action retained")
                               for i in range(2 if self.missing_mapping else 3)])
             assert context["preview_evidence"]["comparison"]["review"]["approved"]
             assert context["preview_evidence"]["execution"]["source_hash"] == tree_hash(work)
-            return ReviewResult(approved=True, summary="Full preview evidence independently reviewed")
+            return authority_review(context, approved=True, summary="Full preview evidence independently reviewed")
 
     workflow.agent = Agent()
     return workflow, rid, work, plan, base, failure, calls, browsers, approval

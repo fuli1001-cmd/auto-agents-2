@@ -2,6 +2,7 @@ import asyncio
 import copy
 
 import pytest
+from authority_review_fixtures import authority_review
 from prototype_review_fixtures import prototype_verdict
 from test_manifest_references import plan
 from test_prototype_approvals import approval_fixture
@@ -72,7 +73,7 @@ async def ready(tmp_path, monkeypatch, *, legacy_review=True):
                 assert context["feedback"]["previous_approval"] == old
                 return prototype_verdict(context, approved=self.approved, summary="Fresh images reviewed")
             assert context["prototype_approval"]["human"]["question_id"] == question["id"]
-            return ReviewResult(approved=True, summary="Retained implementation and fresh prerequisite verified")
+            return authority_review(context, approved=True, summary="Retained implementation and fresh prerequisite verified")
 
     workflow.agent = Agent()
     return workflow, rid, work, contract, base, failure, calls, browser_calls, old

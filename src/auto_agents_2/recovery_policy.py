@@ -18,7 +18,11 @@ from .recovery import (
     failure_summary,
     implemented_candidate,
 )
-from .recovery_identity import authorization_binding, binding_matches_failure, failure_contract
+from .recovery_identity import (
+    authorization_binding,
+    binding_matches_failure,
+    failure_contract,
+)
 from .recovery_progress import RecoveryProgress
 from .stage_responsibilities import ACTION_OWNERS
 from .util import digest
@@ -41,6 +45,10 @@ class ActionPermit(Record):
     phase: Literal["reserved", "started", "completed"] = "reserved"
     outcome: dict = {}
     outcome_hash: str = ""
+    authority_failure: dict = {}
+    authority_sources: dict = {}
+    authority_transition: dict = {}
+    authority_patch: str = ""
 
 
 class RecoveryCycle(Record):
@@ -287,6 +295,7 @@ class RecoveryPolicy:
             if (not bound or not binding_matches_failure(bound, failure.model_dump())
                     or any(bound.get(name) != binding[name] for name in ("source_hash", "plan_hash", "scope_hash"))):
                 raise StateConflict("Completed or reserved recovery inputs changed; preserve its receipt")
+            self.validate_consumption(rid, permit_key)
             return RecoveryDecision.model_validate(permit.action), permit_key
         if bound is not None and bound != binding:
             if not legacy_match and not expanded:
@@ -442,6 +451,9 @@ class RecoveryPolicy:
         if tree_hash(work) != source or self.engine.config.load().automation != cfg:
             raise StateConflict("Recovery evidence or policy changed while authorizing; preserved candidate requires reassessment")
         choice = choices[selected]
+        transition = (self.engine.authority.patch_transition(rid, active, failure)
+                      if operation == "patch-followup" and self.store.get(rid, "authority/protocol") else {})
+        self.engine.authority.require_failure(rid, failure, choice.action, transition=transition)
         if choice.action == "prototype_recheck" and (
                 not prototype_binding or self.engine.approvals.recheck_binding(rid, work) != prototype_binding):
             raise StateConflict("Prototype consent changed during recovery authorization")
@@ -450,6 +462,8 @@ class RecoveryPolicy:
             raise StateConflict("Preview contracts or consent changed during recovery authorization")
         permit = ActionPermit(cycle_id=cid, owner=failure.origin_id, action=choice.model_dump(),
                               actor=actor, source_hash=source, plan_hash=plan_hash,
+                              authority_failure=failure.model_dump(),
+                              authority_sources=self.engine.authority.identity(rid), authority_transition=transition,
                               reason=result.reason, expected_result=result.expected_result,
                               task_scopes={task.id: task.allowed_paths for task in scoped},
                               prototype_binding=prototype_binding if choice.action == "prototype_recheck" else {},
@@ -478,10 +492,45 @@ class RecoveryPolicy:
             "reason_code": failure.reason_code, "permit": permit_key, "authorized": True})
         return choice, permit_key
 
-    def start(self, rid, key):
+    def validate_consumption(self, rid, key, *, expected=None):
         if not key:
             return
         permit = self.store.get(rid, key)
+        if not permit:
+            raise StateConflict("Dispatched action lost its authorization receipt")
+        action = permit["action"]["action"]
+        if expected is not None and action not in expected:
+            raise StateConflict("Dispatched action belongs to another responsibility")
+        if self.store.get(rid, "authority/protocol"):
+            from .recovery import FailureRecord
+            raw = permit.get("authority_failure")
+            if not raw:
+                cycle = self.store.get(rid, "recovery/cycles/" + permit["cycle_id"], {})
+                raw = self.store.get(rid, f"recovery/failures/{cycle.get('failure_id')}/{cycle.get('observation')}")
+            if not raw or raw.get("id") != permit["action"]["failure_id"]:
+                raise StateConflict("Reserved action lost its authority observation; reassess before execution")
+            if (action not in {"diagnose", "recheck", "prototype_recheck", "preview_recheck"}
+                    and permit.get("authority_sources") != self.engine.authority.identity(rid)):
+                raise StateConflict("Dispatched authority sources changed; reassessment is required before mutation")
+            if permit.get("authority_patch"):
+                self.engine.authority.validate_prepared_migration(rid, key, permit, FailureRecord.model_validate(raw))
+            else:
+                self.engine.authority.require_failure(rid, FailureRecord.model_validate(raw), action,
+                                                      transition=permit.get("authority_transition"))
+        return permit
+
+    def adopt_prepared_authority(self, rid, active, failure, journal_key):
+        key = active.get("permit")
+        permit = self.store.get(rid, key, {}) if key else {}
+        if permit.get("authority_sources") or not self.store.get(rid, "authority/protocol"):
+            return
+        migrated = {**permit, "authority_sources": self.engine.authority.identity(rid),
+                    "authority_failure": failure.model_dump(), "authority_patch": journal_key}
+        self.engine.authority.validate_prepared_migration(rid, key, migrated, failure)
+        self.store.checkpoints(rid, {"authority/permit-history/" + digest(permit): permit, key: migrated})
+
+    def start(self, rid, key):
+        permit = self.validate_consumption(rid, key)
         if permit and permit["phase"] == "reserved":
             self.store.checkpoint(rid, key, {**permit, "phase": "started"})
 
@@ -559,9 +608,12 @@ class RecoveryPolicy:
 
     def task_authorized(self, rid, saved, task):
         permit = self.store.get(rid, saved.get("recovery_permit", ""), {})
-        return (task.id in permit.get("outcome", {}).get("expected_tasks", [])
+        allowed = (task.id in permit.get("outcome", {}).get("expected_tasks", [])
                 and task.id not in permit.get("outcome", {}).get("tasks", {})
                 and permit.get("task_scopes", {}).get(task.id) == task.allowed_paths)
+        if allowed:
+            self.validate_consumption(rid, saved["recovery_permit"], expected={"repair"})
+        return allowed
 
     def task_outcome(self, rid, saved, task_id, outcome):
         key = saved.get("recovery_permit")

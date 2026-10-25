@@ -23,6 +23,8 @@ async def blocked_workflow(tmp_path, *, failing=False, checker_version="verifica
 
     workflow = engine(tmp_path, Agent())
     rid = workflow.store.admit("addition", {})["id"]
+    from authority_review_fixtures import seed_original
+    seed_original(workflow, rid)
     proposal = plan()
     proposal.tasks[0].checks[0].argv.insert(1, "-B")
     workflow.store.checkpoint(rid, "plan", proposal.model_dump())

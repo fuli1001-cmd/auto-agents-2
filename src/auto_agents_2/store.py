@@ -264,6 +264,7 @@ class Store:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             rows = {r[0]: json.loads(r[1]) for r in db.execute("SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
+            rows["authority/submitted-answers"] = self._submitted_answers(db, rid)
             key = "plan_revision/journal/" + journal_id
             journal = rows[key]
             if journal["phase"] == "activated":
@@ -273,17 +274,36 @@ class Store:
                 raise AA2Error("Plan activation CAS failed; preserving proposal and recovery snapshots")
             from .plan_revision import validate_timing_journal
             validate_timing_journal(journal)
-            from .contract_corrections import legacy_contract_contexts, validate_contract_journal
+            from .contract_corrections import (
+                legacy_contract_contexts,
+                validate_contract_journal,
+            )
             contexts = None
             if journal.get("version") == 2 and journal.get("patch", {}).get("contract_corrections"):
                 from .artifacts import ArtifactStore
                 contexts = legacy_contract_contexts(journal, journal_id, rows, ArtifactStore(self.root).json)
             validate_contract_journal(journal, rows.get, legacy_contexts=contexts)
-            from .evidence_admission import requires_admission, validate_admission_journal
+            from .evidence_admission import (
+                requires_admission,
+                validate_admission_journal,
+            )
             if requires_admission(journal):
                 from .config import ConfigStore
                 validate_admission_journal(journal, rows.get,
                     shared_browsers=ConfigStore(self.root.parent).load().shared_cache.enabled)
+            if rows.get("authority/protocol") or journal.get("review", {}).get("authority"):
+                from .review_authority import validate_journal_authority
+                validate_journal_authority(journal, rows.get)
+                review = (journal.get("authority_reassessment") or journal)["review"]
+                review_key = "authority/reviews/" + digest(review)
+                self._put(db, rid, "authority/accepted/plan", {"version": 1,
+                    "artifact_hash": digest(journal["plan"]), "review_hash": digest(review), "review_key": review_key})
+                correction = rows[review_key]["basis"].get("correction")
+                if correction:
+                    if correction != rows.get("authority/correction"):
+                        raise AA2Error("Plan correction changed before activation")
+                    self._put(db, rid, "authority/correction", {**correction, "completed": {
+                        "review_key": review_key, "artifact_hash": digest(journal["plan"])}})
             self._put(db, rid, f"plan_revision/history/{revision}", {
                 "plan": rows["plan"], "tasks": {k: v for k, v in rows.items() if k.startswith(("develop/", "task_state/"))}})
             origins = dict(rows.get("task_origins", {}))
@@ -634,6 +654,41 @@ class Store:
             restriction = " AND superseded=0" if "superseded" in columns else ""
             return [self._question(r) for r in db.execute(
                 "SELECT * FROM questions WHERE run_id=? AND answer IS NULL" + restriction + " ORDER BY created", (rid,))]
+
+    @staticmethod
+    def _submitted_answers(db, rid):
+        """External requirements answers, never automatic decisions or approvals.
+
+        Question prose is context, not a statement made by its respondent. Keep
+        the original answer and binding; do not infer that a human wrote it.
+        """
+        import re
+        rows = db.execute("SELECT * FROM questions WHERE run_id=? AND answer IS NOT NULL "
+                          "AND superseded=0 ORDER BY created,id", (rid,))
+        answers = []
+        for row in rows:
+            if not re.fullmatch(r"(?:(?:clarify/[^/]+|prototype-clarification|provider_research|design)/[0-9]+|prototype-feedback)", row["key"]):
+                continue
+            item = {k: row[k] for k in ("id", "key", "prompt", "answer", "artifact_hash")}
+            item["raw_answer"] = row["answer"]
+            item["interaction"] = interaction = json.loads(row["interaction"])
+            if interaction.get("kind") == "choice":
+                choices = [o for o in interaction["options"] if o["key"] == row["answer"]]
+                if len(choices) != 1:
+                    raise AA2Error("Submitted requirement answer lost its exact selected option")
+                item["selected_option"] = selected = choices[0]
+                item["answer"] = selected["label"] + ("\n" + selected["value"] if selected["value"] != selected["label"] else "")
+            answers.append(item)
+        return answers
+
+    def submitted_answers(self, rid):
+        with self.connect() as db:
+            return self._submitted_answers(db, rid)
+
+    def authority_get(self, rid, key):
+        if key == "authority/submitted-answers":
+            return self.submitted_answers(rid)
+        return self.get(rid, key)
 
     def answer(self, qid, answer, artifact_hash: str | None = None):
         with self.connect() as db:

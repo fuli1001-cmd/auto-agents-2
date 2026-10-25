@@ -539,17 +539,22 @@ async def test_resuming_delivery_repair_does_not_complete_recheck_with_old_feedb
 
 
 async def test_persisted_provider_result_waits_for_cleanup_and_is_reused_without_another_call(tmp_path, monkeypatch):
+    from authority_review_fixtures import authority_review, seed_original
+
     from auto_agents_2.engine import WorkflowEngine
+    from auto_agents_2.evidence_admission import capability_catalog
+    from auto_agents_2.review_authority import InvalidAuthorityReview
     config, store = configured(tmp_path)
+    response = store.root / 'native-result.json'
     binary = tmp_path / 'native-fixture'
     binary.write_text(f'#!{sys.executable}\n' + '''import json,sys
 sys.stdin.read()
 args=sys.argv[1:]
-result={"approved":True,"summary":"preserved","findings":[]}
+result=json.load(open(__RESULT_PATH__))
 open(args[args.index("-o")+1],"w").write(json.dumps(result))
 print(json.dumps({"type":"thread.started","thread_id":"fixture"}))
 print(json.dumps({"type":"turn.completed","usage":{"input_tokens":11,"output_tokens":3}}))
-''')
+'''.replace('__RESULT_PATH__', repr(str(response))))
     binary.chmod(0o755)
     native = tmp_path / 'native'
     native.mkdir()
@@ -571,21 +576,34 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":11,"output_tok
         raise PolicyViolation('fixture unknown cleanup')
     monkeypatch.setattr(runner, 'spawn', spawn)
     monkeypatch.setattr(runner, 'stop', unknown)
+    # Keep the old incomplete request as a refusal case, before any paid call.
+    with pytest.raises(InvalidAuthorityReview, match='unregistered_review_consumer'):
+        await workflow._invoke('review', {}, ReviewResult, tmp_path, rid, 'paid-result')
+    assert not processes and store.get(rid, 'invocation/paid-result') is None
+    context = {'review_kind': 'implementation'}
+    with pytest.raises(InvalidAuthorityReview, match='missing_original_input'):
+        await workflow._invoke('review', context, ReviewResult, tmp_path, rid, 'paid-result')
+    assert not processes
+    seed_original(workflow, rid)
+    prepared, _ = workflow.authority.prepare(rid, 'review', {**context,
+        'controller_evidence_capabilities': capability_catalog(shared_browsers=config.load().shared_cache.enabled)},
+        ReviewResult, tmp_path, 'paid-result')
+    write_json(response, authority_review(prepared, summary='preserved').model_dump())
     try:
         from auto_agents_2.errors import PostCommitError
         with pytest.raises(PostCommitError, match='result saved'):
-            await workflow._invoke('review', {}, ReviewResult, tmp_path, rid, 'paid-result')
+            await workflow._invoke('review', context, ReviewResult, tmp_path, rid, 'paid-result')
         assert store.usage_summary(rid)['total_tokens'] == 14
         saved = store.get(rid, 'invocation/paid-result')
         assert saved['result']['summary'] == 'preserved'
         assert Path(saved['cleanup_record']).exists()
         assert list((store.root / 'attempts' / rid).iterdir())
         with pytest.raises(PolicyViolation, match='awaits process cleanup'):
-            await workflow._invoke('review', {}, ReviewResult, tmp_path, rid, 'paid-result')
+            await workflow._invoke('review', context, ReviewResult, tmp_path, rid, 'paid-result')
     finally:
         monkeypatch.setattr(runner, 'stop', original_stop)
         for process in processes:
             await original_stop(process)
-    result = await workflow._invoke('review', {}, ReviewResult, tmp_path, rid, 'paid-result')
+    result = await workflow._invoke('review', context, ReviewResult, tmp_path, rid, 'paid-result')
     assert result.summary == 'preserved' and len(processes) == 1
     assert store.usage_summary(rid)['total_tokens'] == 14

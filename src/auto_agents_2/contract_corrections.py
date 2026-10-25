@@ -261,9 +261,10 @@ def validate_contract_journal(journal, get, *, legacy_contexts=None):
         coverage_verified = valid_coverage_receipt(journal, get, journal.get('contract_coverage', {}))
         if not coverage_verified:
             raise AA2Error('Contract correction coverage proof changed before activation')
+    from .review_authority import plan_source_correction
     candidate, affected, reopen = apply_patch(previous, patch, journal['base_revision'],
         {context.get('failure', {}).get('id')}, {t.id: t.origin_id for t in previous.tasks},
-        coverage_verified=coverage_verified)
+        coverage_verified=coverage_verified, source_correction=plan_source_correction(get, previous))
     if (journal.get('contract_review_binding') != contract_review_binding(journal)
             or candidate.model_dump() != journal['plan'] or set(journal['affected']) != affected
             or set(journal['reopen']) != reopen):

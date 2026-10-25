@@ -13,8 +13,10 @@ from auto_agents_2.workspace import apply_prepared, git, prepare_changes, tree_h
 
 
 def setup_candidate(tmp_path, agent, conflict=False):
+    from authority_review_fixtures import seed_original
     workflow = engine(tmp_path, agent)
     rid = workflow.store.admit("retain candidate with updated dependencies", {})["id"]
+    seed_original(workflow, rid)
     (tmp_path / "value.py").write_text("value = 0\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests/test_value.py").write_text(

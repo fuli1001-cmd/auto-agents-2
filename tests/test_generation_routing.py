@@ -1,11 +1,12 @@
 import pytest
+from authority_review_fixtures import authority_review
 from test_decisions import ApprovingAgent
 from test_patch_repair import setup
 from test_plan_lineage import pending_run
 from test_workflow import CodingAgent, engine
 
 from auto_agents_2.engine import PROTOTYPE_BROWSER_VERSION, Replan
-from auto_agents_2.models import Change, DocumentResult, IntakeResult, ReviewResult
+from auto_agents_2.models import Change, DocumentResult, IntakeResult
 from auto_agents_2.util import digest
 from auto_agents_2.workspace import git
 
@@ -76,7 +77,7 @@ async def test_clarification_batch_exhaustion_preserves_feedback_for_recovery(tm
     class Agent(CodingAgent):
         async def invoke(self, stage, *args, **kwargs):
             if stage == "coverage_review":
-                return ReviewResult(approved=False, summary="Preserve the requested acceptance criteria")
+                return authority_review(args[0], approved=False, summary="Preserve the requested acceptance criteria")
             return await super().invoke(stage, *args, **kwargs)
     workflow, rid = pending_run(tmp_path, Agent())
     with pytest.raises(Replan, match="batch ended"):

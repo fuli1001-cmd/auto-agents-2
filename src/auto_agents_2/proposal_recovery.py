@@ -1,7 +1,7 @@
 """Resume schema-invalid proposals through the shared action policy, without recursive decisions."""
 from __future__ import annotations
 
-from .errors import InvalidStructuredResponse
+from .errors import InvalidStructuredResponse, RecoveryPathExhausted
 from .faults import StateConflict
 from .recovery import FailureRecord, RecoveryDecision
 from .util import digest
@@ -30,6 +30,10 @@ class ProposalRecovery:
                 if state.get("permit"):
                     engine.recovery_policy.complete(rid, state["permit"], {"status": "invalid_structured_response"})
                     engine.recovery_policy.finish_cycle(rid, state["permit_active"], {"status": "invalid_structured_response"})
+                if state.get("authority_rejections", 0) >= 2:
+                    raise RecoveryPathExhausted({owner: {"evidence": key}},
+                        "The same frozen review authority request failed after its format correction. "
+                        "Preserve both responses; diagnose the source/protocol instead of repeatedly regenerating a verdict.")
                 failure = FailureRecord.model_validate(state["active"]["failure"])
                 suggested = RecoveryDecision(failure_id=failure.id, action="recheck", budget_owner=owner,
                     evidence_refs=["failure.evidence.response_contract"],
@@ -58,9 +62,11 @@ class ProposalRecovery:
                     raise StateConflict("Proposal source changed after an invalid response; preserve user edits") from None
                 count = store.get(rid, counter, 0) + 1
                 from .prototype_review import InvalidPrototypeReview
-                authority = exc.details if isinstance(exc, InvalidPrototypeReview) else None
+                from .review_authority import InvalidAuthorityReview
+                authority = exc.details if isinstance(exc, (InvalidPrototypeReview, InvalidAuthorityReview)) else None
                 if authority:
                     state["authority_validation"] = authority
+                    state["authority_rejections"] = state.get("authority_rejections", 0) + 1
                 failure = FailureRecord.create(kind="proposal", component="provider_response", origin_id=owner,
                     step="structured_response", phase=stage, obligations=[digest(schema.model_json_schema())],
                     evidence_refs=[key], evidence={"response_contract": {

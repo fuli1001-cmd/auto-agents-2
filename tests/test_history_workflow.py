@@ -1,9 +1,11 @@
 """Capture history at actual engine/recovery calls, never inject collector output."""
+
 import asyncio
 import copy
 import json
 
 import pytest
+from authority_review_fixtures import authority_review
 from test_decisions import ApprovingAgent
 from test_final_history_scope import CONFIGS
 from test_plan_patch_evidence_handoff import HandoffAgent, setup_handoff
@@ -11,7 +13,7 @@ from test_review_evidence import commit
 from test_workflow import CodingAgent, engine
 
 from auto_agents_2.context_plan import ContextPlanner
-from auto_agents_2.models import Change, Finding, ReviewResult
+from auto_agents_2.models import Change, Finding
 from auto_agents_2.recovery import Diagnosis
 from auto_agents_2.util import digest, write_json
 from auto_agents_2.workspace import git, tree_hash
@@ -80,7 +82,7 @@ async def test_rejected_and_failed_candidates_survive_real_repair_pause_resume_a
             if operation.endswith("/test-change-review") and self.implementations == 1:
                 assert (workspace / TEST).read_text() == ASSERTIONS
                 assert (workspace / CONFIG).read_text() == CONFIGS[CONFIG]
-                return ReviewResult(approved=False, summary="Reject weakened assertion", findings=[Finding(
+                return authority_review(context, approved=False, summary="Reject weakened assertion", findings=[Finding(
                     severity="blocking", location=TEST, description="Removes sum assertion",
                     evidence="Proposed assert True", resolution="Retain the assertion and fix addition")])
             if operation.endswith("/review") and context.get("task") and self.implementations == 3:

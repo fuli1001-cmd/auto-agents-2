@@ -3,7 +3,12 @@ import asyncio
 import copy
 
 import pytest
-from test_execution_stage_contract import TimingAgent, fixture_patch, review, setup_timing
+from test_execution_stage_contract import (
+    TimingAgent,
+    fixture_patch,
+    review,
+    setup_timing,
+)
 from test_recovery_policy import ready
 
 from auto_agents_2.artifacts import ArtifactStore
@@ -146,17 +151,17 @@ class ReferenceTimingAgent(TimingAgent):
 
     async def invoke(self, stage, context, schema, workspace, rid, operation, fresh=False):
         from auto_agents_2.plan_revision import EvidencePatchReview
-        if schema in {Diagnosis, PlanPatch, EvidencePatchReview} or stage == 'decision':
+        if schema in {Diagnosis, PlanPatch} or issubclass(schema, EvidencePatchReview) or stage == 'decision':
             evidence = context['decision_request']['evidence'] if stage == 'decision' else context
             assert evidence['controller_stage_contract'] == stage_contract()
             assert 'controller_stage_contract' in context['evidence_reference_contract']['roots']
-            self.reference_roles.append(stage if schema is not EvidencePatchReview else 'timing_review')
+            self.reference_roles.append('timing_review' if issubclass(schema, EvidencePatchReview) else stage)
         response = await super().invoke(stage, context, schema, workspace, rid, operation, fresh)
         if schema is Diagnosis or stage == 'decision':
             response.evidence_refs.append('controller_stage_contract')
         elif schema is PlanPatch:
             response.timing_corrections[0].evidence_refs.append('controller_stage_contract')
-        elif schema is EvidencePatchReview:
+        elif issubclass(schema, EvidencePatchReview):
             response.timing_reviews[0].evidence_refs.append(stage_contract()['hash'])
         return response
 

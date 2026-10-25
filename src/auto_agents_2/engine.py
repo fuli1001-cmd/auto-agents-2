@@ -11,7 +11,12 @@ from urllib.parse import quote
 from .action_authority import GATES
 from .approvals import APPROVAL_CONTEXT_VERSION, PrototypeApprovals, prototype_identity
 from .artifacts import ArtifactStore
-from .builds import BUILD_CONTRACT_VERSION, command_hashes, runtime_commands, verification_commands
+from .builds import (
+    BUILD_CONTRACT_VERSION,
+    command_hashes,
+    runtime_commands,
+    verification_commands,
+)
 from .config import ConfigStore
 from .context import ContextBuilder
 from .convergence import Convergence
@@ -108,6 +113,7 @@ from .requirements import (
 )
 from .research import ResearchService
 from .resources import ResourceManager
+from .review_authority import InvalidAuthorityReview
 from .review_evidence import ReviewEvidence, consumer_key, review_consumer
 from .sandbox import SandboxRunner
 from .source_history import SourceHistory
@@ -117,7 +123,13 @@ from .task_baselines import refresh_task_baseline
 from .test_reports import test_runner
 from .toolchain import ToolchainPreflight
 from .util import atomic_write, digest, file_lock, identifier, scrub_text
-from .verification import VerificationRefreshNeeded, VerificationService, passed, verification_operation
+from .verification import (
+    VerificationRefreshNeeded,
+    VerificationService,
+    passed,
+    verification_operation,
+)
+from .workflow_authority import WorkflowAuthority
 from .workspace import (
     WorkspaceManager,
     apply_prepared,
@@ -169,6 +181,7 @@ class WorkflowEngine:
         self.convergence = Convergence(self.store, self.config)
         self.decisions = DecisionService(self)
         self.recovery_policy = RecoveryPolicy(self)
+        self.authority = WorkflowAuthority(self)
         browser_environment(self.store.root / "cache/browsers")
 
     async def start(self, source: str | None = None, provider: str | None = None, run_id: str | None = None, *,
@@ -217,6 +230,8 @@ class WorkflowEngine:
             if self.store.get(rid, "control/cancel"):
                 self.store.checkpoint(rid, "control/cancel", False)
             self.store.update(rid, status="RUNNING", pause_reason=None, incident_id=None)
+            from .review_authority import VERSION as authority_version
+            self.store.checkpoint(rid, "authority/protocol", authority_version)
             if self.store.get(rid, "replanning/evidence/contracts") is None:
                 self._replan_evidence(rid, "contracts", {"coverage": False, "prototype_scope": False, "plan": False})
             owner = asyncio.current_task()
@@ -406,9 +421,11 @@ class WorkflowEngine:
         if exc.stage == "plan" and plan:
             key = "recovery/controller-contract/" + digest([plan, exc.reason])
             self.store.checkpoint(rid, key, {"stage": exc.stage, "reason": exc.reason})
+            correction = self.store.get(rid, "authority/correction", {}) or {}
             self.recovery.submit(rid, FailureRecord.create(kind="contract", component="controller", origin_id="plan",
                 step="contract", obligations=sorted({r for t in plan["tasks"] for r in t["requirement_ids"]}),
-                evidence_refs=[key, "plan"], evidence={"reason": exc.reason}))
+                evidence_refs=[key, "plan"], evidence={"reason": exc.reason,
+                    **({"authority_correction": correction} if correction.get("reason") == exc.reason else {})}))
         else:
             pending = self.store.prepare_replan(rid, exc.stage, exc.reason)
             self.store.checkpoint(rid, "replanning/pending", {**pending, "controller_owned": True,
@@ -494,18 +511,30 @@ class WorkflowEngine:
         if answered and not pending.get("granted"):
             question = self.store.question(answered[-1]["id"])
             await self._ask(rid, key, question["prompt"], question["artifact_hash"], question["interaction"])
-            pending = {**pending, "granted": True}
+            pending = {**pending, "granted": True, "authority_sources": self.authority.identity(rid)}
             self.store.checkpoint(rid, "replanning/pending", pending)
         if pending.get("granted"):
+            permit = pending.get("correction_permit") or pending.get("permit")
+            if (not permit and self.store.get(rid, "authority/protocol")
+                    and pending.get("authority_sources") != self.authority.identity(rid)):
+                raise StateConflict("Stage return authorization needs current source reassessment")
+            self.recovery_policy.validate_consumption(rid, permit,
+                expected={"plan_patch" if pending["stage"] == "plan" else pending["stage"]})
+            correction = self.store.get(rid, "authority/correction", {}) or {}
+            if correction and not correction.get("completed"):
+                self.authority.correction_evidence(rid, pending, correction)
             return pending
         active = self.store.get(rid, "recovery/active", {}) or {}
         if active.get("permit") and active.get("decision", {}).get("action") == "plan_patch":
             return pending
         from .recovery import RecoveryDecision
         stage = "plan_patch" if pending["stage"] == "plan" else pending["stage"]
+        correction = self.store.get(rid, "authority/correction", {}) or {}
+        authority_evidence = self.authority.correction_evidence(rid, pending, correction)
         failure = FailureRecord.create(kind="contract", component="controller", origin_id="gates",
             step="upstream", obligations=["accepted_requirements"], evidence_refs=["replanning/pending"],
-            evidence={"pending": pending, "checks": pending.get("verification_recheck", {}).get("checks", [])})
+            evidence={"pending": pending, "checks": pending.get("verification_recheck", {}).get("checks", []),
+                      **authority_evidence})
         action = RecoveryDecision(failure_id=failure.id, action=stage, budget_owner="gates",
                                   reason=pending["reason"], evidence_refs=failure.evidence_refs)
         work = self.store.root / "worktrees" / rid / "integration"
@@ -875,6 +904,15 @@ class WorkflowEngine:
 
     def _validate_stage_response(self, result, stage, context, rid):
         if stage != "review" or context.get("review_kind") != "prototype":
+            if self.authority.consumes(type(result)):
+                try:
+                    self.authority.validate(rid, result, context)
+                except InvalidAuthorityReview as exc:
+                    ref = self.artifacts.put({"response": exc.response, "validation": exc.details,
+                        "basis": context.get("controller_review_basis")}, "invalid-authority-review")
+                    exc.details = {**exc.details, "response_ref": ref}
+                    self.store.event(rid, "review.authority_invalid", {"code": exc.details["code"], "artifact": ref})
+                    raise
             return result
         try:
             return validate_review(result, context.get("prototype_review_basis"),
@@ -905,9 +943,9 @@ class WorkflowEngine:
         elif stage == "review" and context.get("review_kind") == "prototype":
             context = self._prototype_review_context(rid, workspace, context)
             schema = PrototypeReview
-        if stage in {"implement", "verify", "recovery_diagnosis"} or (stage == "review" and
+        if stage in {"design", "implement", "verify", "recovery_diagnosis"} or (stage == "review" and
                 context.get("review_kind", "implementation") in {
-                    "plan", "plan_patch", "implementation", "test_changes", "recovery_diagnosis"}):
+                    "design", "plan", "plan_patch", "implementation", "test_changes", "recovery_diagnosis"}):
             catalog = capability_catalog(shared_browsers=self.config.load().shared_cache.enabled)
             if stage == "recovery_diagnosis":
                 frozen = self.store.get(rid, "recovery/invocation-inputs/" + digest([stage, key]))
@@ -917,10 +955,17 @@ class WorkflowEngine:
                     catalog = frozen["context"].get("controller_evidence_capabilities")
             if catalog is not None:
                 context = {"controller_evidence_capabilities": catalog, **context}
+        if stage in {"clarify", "provider_research", "design", "plan", "implement"}:
+            context = {**context, "controller_authority_scope": self.authority.author_scope(rid, stage)}
+        context, schema = self.authority.prepare(rid, stage, context, schema, workspace, key)
         if not interactive_retry or stage in {"decision", "recovery_diagnosis", "material_probe"} or context.get("patch_repair"):
-            return await self._invoke_once(stage, context, schema, workspace, rid, key, fresh,
+            result = await self._invoke_once(stage, context, schema, workspace, rid, key, fresh,
                                            interactive_retry=interactive_retry)
-        return await ProposalRecovery(self).invoke(stage, context, schema, workspace, rid, key, fresh)
+        else:
+            result = await ProposalRecovery(self).invoke(stage, context, schema, workspace, rid, key, fresh)
+        if self.authority.consumes(type(result)) and context.get("controller_review_basis"):
+            self.authority.route_dispute(rid, result)
+        return result
 
     async def _invoke_once(self, stage, context, schema, workspace, rid, key, fresh=False, *, interactive_retry=True,
                            logical_operation=None, logical_context=None):
@@ -965,7 +1010,9 @@ class WorkflowEngine:
         if saved.get("identity") in compatible and saved.get("result"):
             if saved.get("cleanup_record"):
                 self.sandbox.confirm_record(saved["cleanup_record"])
-            return self._validate_stage_response(schema.model_validate(saved["result"]), stage, context, rid)
+            result = self._validate_stage_response(schema.model_validate(saved["result"]), stage, context, rid)
+            self.authority.record(rid, result, context, logical_operation or key)
+            return result
         self.store.update(rid, stage=stage)
         try:
             result = await self.agent.invoke(stage, context, schema, workspace, rid, key, fresh)
@@ -982,6 +1029,7 @@ class WorkflowEngine:
             raise PolicyViolation("Workspace changed while generating or reviewing a candidate; preserving user changes")
         result = self._validate_stage_response(result, stage, context, rid)
         artifact = self.artifacts.put(result.model_dump(mode="json"), stage)
+        self.authority.record(rid, result, context, logical_operation or key)
         if isinstance(result, ReviewResult):
             IssueLedger(self.store, self.artifacts).record(rid, logical_operation or key, result, context)
         record = {"identity": identity, "result": result.model_dump(mode="json"), "artifact": artifact,
@@ -1319,6 +1367,7 @@ class WorkflowEngine:
                     await self._ensure_prototype_approval(rid, Path(journal["work"]))
                 except Replan as exc:
                     raise ApprovalBoundary(f"交付原型审批未通过，已保留交付现场：{exc.reason}") from exc
+            await self.authority.reaudit_delivery(rid, journal)
             return await self.delivery.finish(rid)
         run = self.store.run(rid)
         raw = self.store.get(rid, "capture")
@@ -1392,7 +1441,8 @@ class WorkflowEngine:
                     self.store.checkpoint(rid, "clarify_context", context)
                     continue
                 assessment = result.model_dump()
-                self.store.checkpoint(rid, "clarify", assessment)
+                self.store.checkpoints(rid, {"clarify": assessment,
+                    **self.authority.acceptance(rid, "clarify", assessment, review)})
                 break
             else:
                 raise Replan("clarify", "Clarification batch ended without accepted coverage. "
@@ -1464,6 +1514,8 @@ class WorkflowEngine:
             cached = self.store.get(rid, stage)
             if cached:
                 if stage == "design":
+                    if not self.authority.accepted(rid, stage, cached):
+                        await DesignDocuments(self).reaudit(rid, work, cached, context)
                     pending = self.store.get(rid, "candidate/design", {})
                     if "prepared" in pending:
                         DesignDocuments(self).verify(work, pending)
@@ -1476,6 +1528,8 @@ class WorkflowEngine:
                         if context["design_review"]["status"] != "approved":
                             raise Replan("design", "Current architecture needs a document-bound independent review receipt; "
                                          "retain the documents and review them in the design gate.")
+                if stage == "plan" and not self.authority.accepted(rid, stage, cached):
+                    await self.authority.reaudit_plan(rid, work, cached, context)
                 context[stage] = cached
                 if stage == "prototype":
                     context["prototype_approval"] = await self._ensure_prototype_approval(rid, work, cached)
@@ -1596,6 +1650,7 @@ class WorkflowEngine:
                                   "evidence_candidate_hash": digest(document.model_dump())}
                 review = await self._invoke("review", review_context, EvidencePlanReview,
                                             work, rid, "plan-review", fresh=True)
+                review_context = self.authority.context(rid, review, review_context)
                 details = "".join(f"\n\n[{f.severity}] {f.location}\n{f.description}\n证据：{f.evidence}\n修复要求：{f.resolution}"
                                   for f in review.findings)
                 try:
@@ -1618,7 +1673,10 @@ class WorkflowEngine:
             if retrieved:
                 stage_data["verified_sources"] = [{k: v for k, v in source.items() if k != "excerpt"} for source in retrieved]
                 context.pop("selected_design_sources", None)
-            self.store.checkpoint(rid, stage, stage_data)
+            updates = {stage: stage_data}
+            if stage in {"design", "plan"}:
+                updates.update(self.authority.acceptance(rid, stage, stage_data, review))
+            self.store.checkpoints(rid, updates)
             context[stage] = stage_data
         plan = PlanResult.model_validate(self.store.get(rid, "plan"))
         if not self.store.get(rid, "plan_revision/current"):
@@ -1712,6 +1770,8 @@ class WorkflowEngine:
                              context["design_review"], context["source_history"], context["preview_contracts"],
                              context["verification_observation"]])
         cached_review = self.store.get(rid, "verify/review") if self.store.get(rid, "verify/review_identity") == review_key else None
+        if cached_review and not self.authority.reusable(rid, cached_review):
+            cached_review = None
         review = ReviewResult.model_validate(cached_review) if cached_review else await self._invoke("verify", {**context, "project": self.contexts.build(work),
                                                "evidence": [r.model_dump() for r in evidence],
                                                "implemented_visuals": visuals,
@@ -1793,6 +1853,9 @@ class WorkflowEngine:
 
     async def _develop(self, rid, integration, plan, context):
         cfg = self.config.load()
+        for task in plan.tasks:
+            if task.id in self.store.get(rid, "develop/done", []):
+                self.authority.retain_task(rid, task, self.store.get(rid, "develop/task/" + task.id, {}))
         done = set(self.store.get(rid, "develop/done", []))
         positions = {task.id: index for index, task in enumerate(plan.tasks, 1)}
         safe_event(self.store, rid, "tasks.planned", {"total": len(plan.tasks), "done": len(done)})
@@ -1998,6 +2061,7 @@ class WorkflowEngine:
     async def _task(self, rid, task, base, plan, context):
         key = f"develop/task/{task.id}"
         saved = self.store.get(rid, key, {})
+        saved = self.authority.retain_task(rid, task, saved)
         if saved.get("commit"):
             return saved["commit"]
         seed = saved.get("resume_base", base)
@@ -2012,6 +2076,7 @@ class WorkflowEngine:
             raise StateConflict("Task workspace missing; restore its recovery snapshot before retrying")
         saved["workspace"] = str(work)
         self.resources.register(work, "worktree", rid)
+        saved = await self.authority.reaudit_task(rid, saved, task, work)
         if saved.get("phase") == "implementing" and saved.get("patch"):
             self._task_approval_context(rid, work, context)
             if not saved.get("source_hash") and not self.workspaces.is_ancestor(base, git(work, "rev-parse", "HEAD")):
@@ -2020,6 +2085,7 @@ class WorkflowEngine:
                 raise PolicyViolation("Prepared candidate belongs to an earlier scope; preserve it for reconciliation")
             if saved.get("source_hash") and prepared_before_hash(work, saved["patch"]) != saved["source_hash"]:
                 raise PolicyViolation("Task inputs changed outside its prepared patch; preserve user edits")
+            self.authority.prepared_task(rid, saved, task)
             apply_prepared(work, saved["patch"])
             saved.update(phase="applied", source_hash=tree_hash(work))
             self.store.checkpoint(rid, key, saved)
@@ -2044,6 +2110,7 @@ class WorkflowEngine:
                         raise RecoveryNeeded(self._task_failure(rid, task, saved))
                 counters["round"] += 1
                 saved = {"phase": "implementing", "workspace": str(work), "source_hash": tree_hash(work),
+                    "authority_sources": self.authority.identity(rid),
                     "preview_permit": saved.get("preview_permit"),
                     "recovery_permit": saved.get("recovery_permit"),
                     "observation_id": ["implementation", task.origin_id or task.id, counters["round"]], "feedback": {
@@ -2107,6 +2174,8 @@ class WorkflowEngine:
                         self.store.checkpoint(rid, key, saved)
                         raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="proposal", step="candidate"))
                     prepared = prepare_changes(work, change.changes, task.allowed_paths, protected=False)
+                    saved["protected_review"] = review.model_dump()
+                    saved["protected_patch_hash"] = digest(prepared)
                 except (PolicyViolation, PatchRepairExhausted) as exc:
                     saved = {**saved, "phase": "rejected", "candidate_error": str(exc), "workspace": str(work)}
                     self._task_progress(rid, task, saved)
@@ -2115,6 +2184,7 @@ class WorkflowEngine:
                 validate_stage_writes("develop", prepared, task.allowed_paths)
                 saved["patch"] = prepared
                 self.store.checkpoint(rid, key, saved)
+                self.authority.prepared_task(rid, saved, task)
                 apply_prepared(work, prepared)
                 saved.update(phase="applied", source_hash=tree_hash(work))
                 self.store.checkpoint(rid, key, saved)
@@ -2175,7 +2245,7 @@ class WorkflowEngine:
                 if preview_required and not preview_context:
                     raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="evidence", step="preview_stale"))
                 task_context.update(preview_context)
-                review = await self._invoke("review", {**task_context, "implementation": change.model_dump(),
+                review = await self._invoke("review", {**task_context, "review_kind": "implementation", "implementation": change.model_dump(),
                                                        "project": self.contexts.build(work, scopes=task.allowed_paths),
                                                        "checks": [c.model_dump() for c in checks],
                                                        "source_hash": saved["source_hash"]}, ReviewResult, work, rid, key + "/review", fresh=True)
@@ -2311,10 +2381,16 @@ class WorkflowEngine:
         inherited = self.store.run(source_run)["data"] if source_run else {"external_dependencies": True}
         plan_data = self.store.get(source_run, "plan") if source_run else None
         if source_run:
-            for key in ("plan", "prototype", "prototype_approval", "provider_research", "verify/identity", "verify/checks", "verify/review"):
+            for key in ("plan", "design", "prototype", "prototype_approval", "provider_research", "verify/identity", "verify/checks", "verify/review"):
                 value = self.store.get(source_run, key)
                 if value is not None:
                     self.store.checkpoint(rid, key, value)
+            adopted = self.store.get(source_run, "authority/accepted/design")
+            if adopted:
+                record = self.store.get(source_run, adopted["review_key"])
+                if not record:
+                    raise StateConflict("Reused design lost its independent adoption receipt")
+                self.store.checkpoints(rid, {"authority/accepted/design": adopted, adopted["review_key"]: record})
             # Retain accepted implementations when a reused candidate later needs
             # repair. Current-run budget consumption is never copied or reset.
             if self.store.get(rid, "develop/done") is None and plan_data:
@@ -2688,7 +2764,8 @@ class WorkflowEngine:
                 self.store.checkpoint(rid, pending_key, pending)
                 continue
             self.store.checkpoint(rid, pending_key, pending)
-            review = (ReviewResult.model_validate(pending["review"]) if pending.get("review") else
+            review = (ReviewResult.model_validate(pending["review"]) if pending.get("review")
+                      and self.authority.reusable(rid, pending["review"]) else
                       await self._invoke("review", {**context, "review_kind": "test_changes", "candidate_changes": proposal.model_dump()},
                                          ReviewResult, work, rid, f"delivery-repair-review/{count}", fresh=True))
             if not review.approved:
