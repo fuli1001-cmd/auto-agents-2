@@ -152,3 +152,33 @@ async def test_partial_patch_is_reconciled_before_dependency_refresh_without_ove
         assert (worker / "extra.txt").read_text() == "retained addition\n"
     assert not any(stage == "implement" for stage, _ in agent.calls)
     assert workflow.store.get(rid, "rounds/CHILD")["round"] == 1
+
+
+@pytest.mark.parametrize("implementation,evidence,expected", [
+    ("accepted", "failed", "reverify"), ("accepted", "stale", "reverify"),
+    ("needs_repair", "failed", "rejected"), ("pending", "failed", "rejected"),
+    ("in_progress", "failed", "rejected"), ("accepted", "valid", "rejected")])
+def test_actual_merge_only_rechecks_rejected_accepted_implementation(tmp_path, implementation, evidence, expected):
+    from auto_agents_2.task_baselines import refresh_task_baseline
+    workflow, rid, task, plan, worker, incoming = setup_candidate(tmp_path, CodingAgent())
+    saved = workflow.store.get(rid, "develop/task/CHILD")
+    saved["phase"] = "rejected"
+    workflow.store.checkpoints(rid, {"develop/task/CHILD": saved,
+        "task_state/CHILD": {"version": 1, "revision": 1, "implementation": implementation, "evidence": evidence}})
+    updated, _ = refresh_task_baseline(workflow, rid, task, saved, worker, incoming, 1)
+    assert updated["phase"] == expected
+    assert workflow.store.get(rid, "rounds/CHILD")["round"] == 1
+    # Changing baseline is evidence for a new observation, never a successful check.
+    assert "commit" not in updated and "checks" not in updated
+    assert workflow.store.get(rid, "task_state/CHILD")["evidence"] == evidence
+
+
+def test_rejected_accepted_implementation_does_not_recheck_unchanged_base(tmp_path):
+    from auto_agents_2.task_baselines import refresh_task_baseline
+    workflow, rid, task, plan, worker, incoming = setup_candidate(tmp_path, CodingAgent())
+    saved = workflow.store.get(rid, "develop/task/CHILD")
+    saved["phase"] = "rejected"
+    workflow.store.checkpoint(rid, "task_state/CHILD", {"implementation": "accepted", "evidence": "failed"})
+    before = git(worker, "rev-parse", "HEAD")
+    updated, _ = refresh_task_baseline(workflow, rid, task, saved, worker, before, 1)
+    assert updated == saved and updated["phase"] == "rejected"

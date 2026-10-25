@@ -72,10 +72,23 @@ def conflict(a: TaskSpec, b: TaskSpec) -> bool:
     return any(overlaps(x, y) for x in a.allowed_paths for y in b.allowed_paths)
 
 
+def task_dependencies(task: TaskSpec, tasks: dict[str, TaskSpec]) -> set[str]:
+    """All ancestors, including evidence holes left by a bounded repair."""
+    result, pending = set(), list(task.depends_on)
+    while pending:
+        key = pending.pop()
+        if key not in result:
+            result.add(key)
+            if key in tasks:
+                pending.extend(tasks[key].depends_on)
+    return result
+
+
 def ready_batch(tasks: list[TaskSpec], done: set[str], concurrency: int) -> list[TaskSpec]:
     selected = []
+    by_id = {task.id: task for task in tasks}
     for task in tasks:
-        if task.id in done or not set(task.depends_on) <= done:
+        if task.id in done or not task_dependencies(task, by_id) <= done:
             continue
         if not any(conflict(task, other) for other in selected):
             selected.append(task)

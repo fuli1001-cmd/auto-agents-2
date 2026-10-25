@@ -74,7 +74,12 @@ def refresh_task_baseline(engine, rid, task, saved, work, base, revision):
     parents = git(work, "rev-list", "--parents", "-n", "1", "HEAD").split()[1:]
     if set(parents) != {record["snapshot"], base} or git(work, "status", "--porcelain"):
         raise AA2Error("Dependency merge has unknown changes; preserve the journal and workspace")
-    phase = "reverify" if saved.get("phase") in {"applied", "tested", "reverify"} else "rejected"
+    state = store.get(rid, "task_state/" + task.id, {})
+    # A rejected observation on an accepted implementation can be checked again
+    # after an actual dependency merge. It is not permission to edit that task.
+    accepted_input = (saved.get("phase") == "rejected" and state.get("implementation") == "accepted"
+                      and state.get("evidence") in {"stale", "failed"})
+    phase = "reverify" if saved.get("phase") in {"applied", "tested", "reverify"} or accepted_input else "rejected"
     updated = {"phase": phase, "workspace": str(work), "revision": revision, "source_hash": tree_hash(work),
                "recovery_permit": saved.get("recovery_permit"),
                "feedback": {**prior_feedback, "baseline_refresh": {

@@ -1867,10 +1867,16 @@ class WorkflowEngine:
                 if shutil.disk_usage(self.store.root).free < cfg.cleanup.min_free_bytes:
                     raise ResourceBoundary("磁盘空间仍不足", action="释放项目所在文件系统的磁盘空间。",
                         condition="资源管理器核对可用空间达到当前配置要求。", phase="generation")
-            batch = ready_batch(plan.tasks, done, cfg.execution.max_parallel_tasks)
+            base = git(integration, "rev-parse", "HEAD")
+            from .task_repair_order import dispatched_repair
+            repair = dispatched_repair(self, rid, plan, done, base)
+            if repair:
+                batch = [repair[0]]
+                self.store.event(rid, "task.repair_prioritized", repair[1])
+            else:
+                batch = ready_batch(plan.tasks, done, cfg.execution.max_parallel_tasks)
             if not batch:
                 raise Replan("plan", "Task graph cannot make progress; reconcile accepted task dependencies")
-            base = git(integration, "rev-parse", "HEAD")
             from .task_batch import collect_batch
             for task in batch:
                 safe_event(self.store, rid, "task.started", {
