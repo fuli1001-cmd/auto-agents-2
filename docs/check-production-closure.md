@@ -69,3 +69,7 @@ Demo5 `run_22419c9eef564f2b` 的 `plan_revision/journal/*` 原件：revision 1 �
 新增真实 Engine 组合在验收后、集成前中断，再验证变化被回送、正式补丁使旧任务 reverify、真实附件重新关闭、实现不重跑且次数不清零；另保留降格、旧协议迁移、无任务 final 映射和理由变化正反例。
 
 该真实恢复组合同时检出了原回送分支漏传 FailureRecord.obligations 的错误；现身份直接来自既有任务验收和最终命令。测试夹具必须通过 Engine.start 恢复正式运行状态，不能在 PAUSED 下直调恢复器；缺审核记录用合法空记录表示。正常 CAS/状态保护未放宽。
+
+## 固定提交复审修正：已选 preparation 的本阶段证据
+
+任务因 inputs 依赖或等价完整命令合并而实际执行 preparation 时，其既有文件义务必须在该任务门禁关闭。使用同次归一化返回的 preparation 和 schedule 精确身份判断是否执行；未选择的 preparation、final-only 检查及探针保持原阶段，不增命令。真实沙箱的依赖选择和合并去重反例在旧实现均误通过，未选择正例保持通过；错误命令的附件不能代替实际 preparation 的附件。

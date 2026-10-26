@@ -267,6 +267,10 @@ def observe(get, commands, results, work, environment, artifacts, *, task=None, 
                 if task and obligation.task_id != task.id:
                     continue
                 command = resolved[offsets[obligation.task_id] + obligation.index]
+            elif target == "runtime_prepare":
+                command = preparations[obligation.index]
+                if task and digest(command.model_dump()) not in positions:
+                    continue  # Available preparation is not necessarily scheduled here.
             elif task:
                 continue
             elif target == "final_checks":
@@ -274,7 +278,7 @@ def observe(get, commands, results, work, environment, artifacts, *, task=None, 
             elif target == "runtime_probes":
                 command = resolved[len(raw) - len(plan.runtime_probes) + obligation.index]
             else:
-                command = preparations[obligation.index]
+                raise AA2Error("Unsupported executable file obligation target")
             selected = [positions[digest(command.model_dump())]]
             identities = attachment_evidence(results, selected, artifacts, [])
             closed.append({"obligation_id": obligation.id, "target": target,
