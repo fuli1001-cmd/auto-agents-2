@@ -1024,11 +1024,20 @@ class WorkflowEngine:
         if stage == "recovery_diagnosis":
             old_execution = self.agent.execution_identity("review") if isinstance(self.agent, ProviderRouter) else None
             compatible.add(invocation_identity("review", context, schema, workspace, self.config.load(), source_before, old_execution))
+            # Older review receipts may predate either known guidance addition.
+            # Each encoding still binds every factual input, source, schema,
+            # configuration and provider identity; unknown fields stay intact.
+            legacy_contexts = []
             if current_catalog(context.get("controller_evidence_capabilities")):
-                # Completed pre-catalog receipts still require the exact original
-                # source, schema, config and all factual inputs. Only this known
-                # controller protocol may be absent; no evidence is discarded.
-                legacy = {k: v for k, v in context.items() if k != "controller_evidence_capabilities"}
+                legacy_contexts.append({k: v for k, v in context.items()
+                                        if k != "controller_evidence_capabilities"})
+            if context.get("controller_attachment_capture") is not None:
+                from .collection import capture_contract
+                if context["controller_attachment_capture"] == capture_contract(self.store.root):
+                    legacy_contexts.extend({k: v for k, v in candidate.items()
+                                            if k != "controller_attachment_capture"}
+                                           for candidate in [context, *legacy_contexts])
+            for legacy in legacy_contexts:
                 compatible.add(invocation_identity("review", legacy, schema, workspace,
                     invocation_config, source_before, old_execution))
                 compatible.add(invocation_identity(stage, legacy, schema, workspace,

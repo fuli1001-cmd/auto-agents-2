@@ -90,3 +90,26 @@ prepared 重入重新核对上述绑定和 preimage，不能因源中已有部�
 扩展回归保留了既有逐角色上下文严格相等断言，发现新增预算在 `_invoke` 临时注入而 PlanPatch journal 未保存。修复为新 PlanPatch 创建时即冻结预算，由作者/审核共同继承；旧冻结记录预算缺失保持原样。新增预算字段真实引用和 prepared 重入、旧记录兼容反例，不以删除严格断言消除失败。
 
 冻结预算例外只由 `recovery/patch`、`recovery/patch-review` 的控制器操作身份及实际已保存 patch-context 决定；新的 authority-reaudit 仍取得当前预算，不依据任意 review_kind 将新审核误判为旧冻结调用。
+
+
+## Completed diagnosis receipt compatibility
+
+A diagnosis originally invoked under `review` can have a completed invocation
+receipt without a `recovery/invocation-inputs` checkpoint. Additive attachment
+budget guidance must not cause that same completed diagnosis to be called again.
+The existing diagnosis identity consumer recognizes the finite historical
+encodings lacking the known capability catalog, the current attachment contract,
+or both. Every candidate identity still includes the source, remaining factual
+inputs, schema, configuration, provider execution identity and original stage.
+Unknown or modified guidance is not stripped. The original receipt is retained.
+
+Native diagnosis/decision logical calls keep their frozen context on completion
+and interruption; a separate new operation receives the current policy. A migrated
+old review receipt continues to require its complete configuration identity.
+This compatibility does not grant a recovery action, change budgets, reset counts,
+or make an earlier diagnosis evidence that a later collection succeeded.
+
+The full02 regression produced a second model call from an unchanged old review
+receipt. The original regression assertion is retained, with additional real
+Engine invocation cases for both historical encodings, repeated migration, input
+drift, unknown guidance, interrupted native calls and new-operation policy refresh.
