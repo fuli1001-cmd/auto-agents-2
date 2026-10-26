@@ -226,7 +226,7 @@ def _candidate_repair_path(value, *, existing=False):
     return name
 
 
-def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None, evidence_context=None, workspace=None):
+def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None, evidence_context=None, workspace=None, recording=False):
     """Facts first; ambiguous or repeated collection failures require independent diagnosis."""
     action, reason = "diagnose", "需要独立诊断故障归属和最小修复范围"
     tasks = [failure.task_id] if failure.task_id else []
@@ -235,9 +235,11 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None,
     collection_failure = any(COLLECTION_FAILURES.intersection(row["failure_reasons"]) for row in rows)
     if (failure.kind in {"evidence", "build"} or collection_failure) and attempts == 0:
         action, reason = "recheck", "重新准备声明的构建产物并采集原始检查证据"
-    if any("evidence_collection_failed" in row["failure_reasons"] for row in rows):
+    if not recording and any("evidence_collection_failed" in row["failure_reasons"] for row in rows):
         return RecoveryDecision(failure_id=failure.id, action="blocked", task_ids=tasks, evidence_refs=refs,
             reason="附件证据采集失败；调整采集上限或测试录制配置后复验，保留候选代码和原始现场", budget_owner=failure.origin_id)
+    if recording:
+        action, reason = "diagnose", "核对已绑定数量超限；录制修正必须保留原义务并独立审核"
     if diagnosis:
         if len({target.task_id for target in diagnosis.repair_targets}) != len(diagnosis.repair_targets):
             raise AA2Error("Duplicate repair-target task IDs")

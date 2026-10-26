@@ -22,6 +22,23 @@ def policy_identity(root):
     return digest(["attachment-capture-v1", capture_policy(root)])
 
 
+def capture_contract(root):
+    """Actual per-command acquisition limits; not a new business obligation."""
+    limits = capture_policy(root)
+    return {"version": 1, "limits": limits,
+        "policy_hash": digest(["attachment-capture-v1", limits]),
+        "output_root": "controller-selected playwright-results for each command",
+        "counting": "physical_paths_in_each_command_output_root",
+        "duplicate_paths_count_separately": True,
+        "scope": "All files under that root, including copies made by testInfo.attach(path). "
+            "The count is not distinct contents, test cases, or only attached metadata.",
+        "preserve": "Keep all accepted tests, assertions, viewports, required PNG, actual state JSON and "
+            "download bytes. Recording budgets do not authorize dropping evidence, changing limits or "
+            "overriding an adopted method. A changed accepted method needs its owner's formal correction.",
+        "collection": "Write real required bytes under the controller output root. Memory-only attachment "
+            "metadata is not proof of archived bytes. Complete acquisition is required before acceptance."}
+
+
 async def run_collection(root, request, *, timeout=30, paths=()):
     """A helper process can be stopped even when a filesystem read or parser stalls."""
     process = await spawn_managed([sys.executable, "-I", "-m", "auto_agents_2.collection_worker", str(root)],

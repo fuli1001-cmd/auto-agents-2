@@ -109,6 +109,8 @@ async def test_candidate_source_dispute_reaches_review_and_activation_without_fo
     ('reviewer', 'recovery_decision'), ('reviewer', 'controller_stage_contract'),
     ('reviewer', 'retained_candidates.T3.project.workspace'), ('reviewer', 'affected[0]'),
     ('reviewer', 'reopen[0]'), ('reviewer', 'project.workspace'),
+    ('author', 'controller_attachment_capture.limits.max_files'),
+    ('reviewer', 'controller_attachment_capture.limits.max_files'),
 ])
 async def test_supplied_role_citations_activate_and_resume_without_new_invocations(tmp_path, monkeypatch, role, reference):
     workflow, rid, work, old, record, agent = setup_correction(tmp_path)
@@ -179,6 +181,8 @@ async def test_old_authority_prepared_grant_is_supplemented_only_with_original_b
         assert workflow.store.get(rid, 'plan_revision/current')['revision'] == 2
         assert workflow.store.get(rid, 'authority/permit-history/' + digest(permit)) == permit
         assert workflow.store.get(rid, key)['authority_reassessment']['permit'] == permit_key
+        from auto_agents_2.collection import capture_contract
+        assert agent.views[-1][1]['controller_attachment_capture'] == capture_contract(workflow.store.root)
     assert workflow.store.get(rid, 'rounds/T3') == {'round': 17}
     assert workflow.store.get(rid, 'develop/done') == (['T1', 'T2', 'T3', 'T4'] if bad else ['T1', 'T2'])
 
@@ -396,4 +400,29 @@ async def test_legacy_prepared_replay_requires_original_frozen_evidence(tmp_path
         activated = workflow.store.get(rid, key)
         assert {**activated, 'phase': 'prepared'} == legacy
     assert [stage for stage, _ in agent.views] == ['plan', 'review']
+    assert workflow.store.get(rid, 'rounds/T3') == {'round': 17}
+
+
+async def test_legacy_frozen_patch_context_preserves_absent_capture_budget(tmp_path, monkeypatch):
+    workflow, rid, _, _, record, agent = setup_correction(tmp_path)
+    invoke = workflow._invoke
+    async def interrupt(stage, *args, **kwargs):
+        if stage == 'plan':
+            raise asyncio.CancelledError()
+        return await invoke(stage, *args, **kwargs)
+    monkeypatch.setattr(workflow, '_invoke', interrupt)
+    with pytest.raises(asyncio.CancelledError):
+        await workflow.recovery.resume(rid)
+    key = f'recovery/patch-context/{record.id}/1'
+    frozen = workflow.store.get(rid, key)
+    assert frozen.pop('controller_attachment_capture')
+    workflow.store.checkpoint(rid, key, frozen)
+    monkeypatch.setattr(workflow, '_invoke', invoke)
+    await workflow.recovery.resume(rid)
+    journal = workflow.store.get(rid, f'plan_revision/journal/{record.id}/1')
+    assert journal['phase'] == 'activated'
+    assert journal['contract_author_context'] == agent.views[0][1]
+    assert journal['contract_review_context'] == agent.views[1][1]
+    assert all('controller_attachment_capture' not in ctx for _, ctx in agent.views)
+    assert workflow.store.get(rid, key) == frozen
     assert workflow.store.get(rid, 'rounds/T3') == {'round': 17}

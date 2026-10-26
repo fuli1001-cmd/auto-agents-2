@@ -259,6 +259,28 @@ class Store:
                    (rid, key, json.dumps(value, ensure_ascii=True)))
         adopt_logs(db, self.root, value)
 
+    def prepare_recording_recovery(self, rid, key, record, guards, question_keys, questions, *,
+                                   previous, observation_key, observation):
+        """Keep the same failure/attempt; preparation does not answer or retire a wait."""
+        from .faults import StateConflict
+        from .recording_recovery import OWNER
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT status FROM runs WHERE id=?', (rid,)).fetchone()[0] not in {'RUNNING', 'WAITING_USER'}:
+                raise StateConflict('Recording admission requires the normal running recovery entry')
+            for name, expected in {**guards, OWNER + record['task_id']: previous, observation_key: None}.items():
+                row = db.execute('SELECT data FROM checkpoints WHERE run_id=? AND key=?', (rid, name)).fetchone()
+                if (json.loads(row[0]) if row else None) != expected:
+                    raise StateConflict('Recording admission inputs changed before publication')
+            current = self._decision_questions(db, rid, question_keys)
+            if current != questions or any(q['answer'] is not None for q in current):
+                raise StateConflict('Recording admission cannot reinterpret an existing human answer')
+            self._put(db, rid, key, record)
+            self._put(db, rid, OWNER + record['task_id'], key)
+            self._put(db, rid, observation_key, observation)
+            self._event(db, rid, 'recording.diagnosis_prepared', {'receipt': key,
+                'task_id': record['task_id'], 'failure': record['original_active']['failure']['id']})
+
     def activate_plan_patch(self, rid, journal_id):
         """CAS activation. Git/files are snapshotted before this transaction, never called atomic with it."""
         with self.connect() as db:
@@ -268,12 +290,16 @@ class Store:
             key = "plan_revision/journal/" + journal_id
             journal = rows[key]
             if journal["phase"] == "activated":
+                from .recording_recovery import validate_journal
+                validate_journal(journal, rows.get, self.root)
                 return
             revision = rows.get("plan_revision/current", {}).get("revision", 1)
             if revision != journal["base_revision"] or rows["plan"] != journal["previous_plan"]:
                 raise AA2Error("Plan activation CAS failed; preserving proposal and recovery snapshots")
             from .plan_revision import validate_timing_journal
             validate_timing_journal(journal)
+            from .recording_recovery import validate_journal
+            validate_journal(journal, rows.get, self.root)
             from .contract_corrections import (
                 legacy_contract_contexts,
                 validate_contract_journal,
@@ -311,6 +337,10 @@ class Store:
                 origins[task["id"]] = task["origin_id"]
             self._put(db, rid, "task_origins", origins)
             self._put(db, rid, "plan", journal["plan"])
+            if journal.get('recording'):
+                proof = journal['recording']
+                self._put(db, rid, 'recovery/recording/plans/' + proof['receipt_hash'] + '/' + digest(journal['plan']),
+                          {'journal': key, 'review_hash': digest(journal['recording_review'])})
             from .check_production import activation_updates
             for name, value in activation_updates(journal.get("evidence_admission", {})).items():
                 self._put(db, rid, name, value)

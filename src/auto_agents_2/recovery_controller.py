@@ -341,7 +341,10 @@ class RecoveryController:
             work = integration
         if not work.is_dir():
             raise StateConflict("Recovery workspace missing; restore the recorded worktree before continuing")
-        capture_retry = await self._capture_retry(rid, failure.evidence.get("checks", []), work)
+        from . import recording_recovery
+        recording = await recording_recovery.prepare(engine, rid, active, failure, plan, work)
+        capture_retry = (False if recording else
+                         await self._capture_retry(rid, failure.evidence.get("checks", []), work))
         if capture_retry:
             active.pop("decision", None)
         if failure.component == "legacy_adapter" and failure.task_id and not active.get("evidence_reconciled"):
@@ -415,7 +418,7 @@ class RecoveryController:
                 decision = adjudicate(failure).model_copy(update={"action": "diagnose"})
                 permit = active.get("diagnosis_permit")
             else:
-                suggested = adjudicate(failure, attempts=active["attempt"] - 1)
+                suggested = adjudicate(failure, attempts=active["attempt"] - 1, recording=bool(recording))
                 if failure.kind == "integration" and failure.evidence.get("baseline_refresh", {}).get("retained_candidate"):
                     suggested = suggested.model_copy(update={"action": "repair", "reason":
                         "控制器已保留冲突候选，在当前依赖基线按原任务范围修复"})
@@ -447,6 +450,8 @@ class RecoveryController:
                     "observations": self.store.get(rid, "recovery/observations/" + failure.origin_id, []),
                     "allowed_actions": policy.diagnosis_actions(rid, failure, work, plan),
                 }
+                if recording:
+                    diagnosis_context['controller_recording_recovery'] = recording_recovery.context(recording)
                 history = SourceHistory(engine)
                 diagnosis_context["source_history"] = (history.collect_plan(rid, work, plan,
                     task_ids=[failure.task_id] if failure.task_id else None) if plan is not None
@@ -475,7 +480,7 @@ class RecoveryController:
                             **diagnosis_context["allowed_actions"], **policy.proposal_actions({
                                 "diagnose": RecoveryDecision.model_validate(self.store.get(rid, permit)["action"])})}}
                     suggested = adjudicate(failure, attempts=active["attempt"] - 1, diagnosis=diagnosis,
-                        plan=plan, evidence_context=assessment_context, workspace=work)
+                        plan=plan, evidence_context=assessment_context, workspace=work, recording=bool(recording))
                 except AA2Error as exc:
                     rejection = {"diagnosis": diagnosis.model_dump() if diagnosis else None, "validation_error": str(exc)}
                     rejected_round = active.pop("diagnosis_round")
@@ -746,6 +751,11 @@ class RecoveryController:
         identity = f"{failure.id}/{active['attempt']}"
         journal_key = "plan_revision/journal/" + identity
         journal = self.store.get(rid, journal_key)
+        from . import recording_recovery
+        recording = recording_recovery.current(engine, rid, failure.task_id) if failure.task_id else None
+        recording_proof = self.store.get(rid, active.get('permit', ''), {}).get('recording') if recording else None
+        if recording and not recording_proof:
+            raise StateConflict('Recording PlanPatch requires its restricted permit')
         if journal:
             from .contract_corrections import ContractPlanReview
             from .models import ReviewResult
@@ -847,8 +857,10 @@ class RecoveryController:
                 action="plan_patch", reason=active["decision"]["reason"], evidence_refs=failure.evidence_refs,
                 permit=active.get("permit"))
             capture = self.store.get(rid, "capture")
+            from .collection import capture_contract
             from .evidence_admission import admission_context
-            recovery_context = {**admission_context(lambda key: self.store.get(rid, key),
+            recovery_context = {"controller_attachment_capture": capture_contract(self.store.root),
+                                **admission_context(lambda key: self.store.get(rid, key),
                                                   shared_browsers=engine.config.load().shared_cache.enabled),
                                 "controller_correction_contract": correction_contract(),
                                 "correction_request": request, "original_capture": capture,
@@ -875,6 +887,13 @@ class RecoveryController:
             "controller_authority_scope": engine.authority.author_scope(rid, "plan"),
             "plan": plan.model_dump(), "failure": failure.model_dump(), "task_origins": self.store.task_origin_state(rid),
             "specification": self.store.get(rid, "clarify"), "project": engine.contexts.build(work)}
+        if recording:
+            patch_context['controller_recording_recovery'] = recording_recovery.context(recording)
+            patch_context['recording_patch_constraint'] = (
+                'Only formal acceptance mappings for this task file-attachment method may change. '
+                'Keep checks, inputs/outputs, test minima, paths, dependencies, other tasks and preview identical. '
+                'Synchronize only the same evidence obligation value; keep identity, user origin, requirement IDs, '
+                'capability and stages. Adopted design methods remain binding; PlanPatch cannot override them.')
         patch_context["evidence_reference_contract"] = controller_context_catalog(
             patch_context, provenance={"patch": "proposal"}).contract(patch_context)
         progress_key = "recovery/patch-progress-basis/" + identity
@@ -905,7 +924,10 @@ class RecoveryController:
             from .review_authority import plan_source_correction
             candidate, affected, reopen = apply_patch(plan, patch, revision, {failure.id},
                 self.store.get(rid, "task_origins", {}), coverage_verified=coverage_verified,
-                source_correction=plan_source_correction(lambda name: self.store.authority_get(rid, name), plan))
+                source_correction=plan_source_correction(lambda name: self.store.authority_get(rid, name), plan),
+                recording_scope=recording)
+            if recording:
+                recording_recovery.validate_patch(recording, plan, patch, candidate, affected, reopen)
             unsupported = validate_obligations(candidate, patch_context)
             for task in candidate.tasks:
                 verification_commands(task.checks, work, candidate.runtime_prepare)
@@ -944,8 +966,25 @@ class RecoveryController:
             "project": engine.contexts.build(work)}
         review_context["evidence_reference_contract"] = controller_context_catalog(
             review_context, provenance={"patch": "proposal", "plan": "proposal"}).contract(review_context)
-        review = await engine._invoke("review", review_context, EvidencePatchReview,
+        if recording:
+            review_context['controller_recording_recovery'] = recording_recovery.context(recording)
+            review_context['recording_review_binding'] = recording_recovery.review_binding(recording,
+                baseline['source_hash'], plan, {'patch': patch.model_dump(), 'plan': candidate.model_dump()}, phase='plan_patch')
+            review_context['recording_review_instruction'] = (
+                'Independently prove this is only an attachment representation/method expression correction. '
+                'Preserve business evidence, user origin and adopted upstream methods; a plan cannot repeal design. '
+                'All commands/test execution/assertions/viewports/required actual files must remain.')
+        result = await engine._invoke("review", review_context,
+            recording_recovery.RecordingPatchReview if recording else EvidencePatchReview,
             work, rid, "recovery/patch-review/" + identity, fresh=True)
+        review = result.review if recording else result
+        if recording:
+            try:
+                recording_recovery.require_review(result.model_dump(), review_context['recording_review_binding'])
+            except AA2Error as exc:
+                self._reject_patch(rid, active, failure, identity, {'patch': patch.model_dump(),
+                    'patch_review': review.model_dump(), 'recording_review': result.model_dump(), 'validation_error': str(exc)})
+                return False
         review_context = engine.authority.context(rid, review, review_context)
         unchanged({"patch": patch.model_dump(), "review": review.model_dump()})
         try:
@@ -976,6 +1015,13 @@ class RecoveryController:
                                               review.evidence_assessment.check_production)
         retain_candidates(closure_affected - affected)
         affected |= closure_affected
+        if recording:
+            try:
+                recording_recovery.validate_patch(recording, plan, patch, candidate, affected, reopen)
+            except AA2Error as exc:
+                self._reject_patch(rid, active, failure, identity, {'patch': patch.model_dump(),
+                    'patch_review': review.model_dump(), 'validation_error': str(exc)})
+                return False
         for task_id, snapshot in snapshots.items():
             if tree_hash(Path(snapshot["workspace"])) != snapshot["source_hash"]:
                 raise StateConflict("Task source changed during plan review; preserve user changes before activation")
@@ -1007,6 +1053,9 @@ class RecoveryController:
             journal["contract_author_context"] = patch_context
             journal["contract_review_context"] = review_context
             journal["contract_review_binding"] = contract_review_binding(journal)
+        if recording:
+            journal['recording'] = recording_proof
+            journal['recording_review'] = result.model_dump()
         self.store.checkpoint(rid, journal_key, journal)
         self.store.activate_plan_patch(rid, identity)
         # A derived document is written only after activation. Startup materializes

@@ -965,6 +965,24 @@ class WorkflowEngine:
                 context = {"controller_evidence_capabilities": catalog, **context}
         if stage in {"clarify", "provider_research", "design", "plan", "implement"}:
             context = {**context, "controller_authority_scope": self.authority.author_scope(rid, stage)}
+        if stage in {"design", "plan", "implement", "verify", "recovery_diagnosis", "decision", "review"}:
+            from .collection import capture_contract
+            frozen = (self.store.get(rid, "recovery/invocation-inputs/" + digest([stage, key]))
+                      if stage in {"recovery_diagnosis", "decision"} else None)
+            # An additive contract cannot rewrite or recount an old logical call.
+            patch_prefix = {"plan": "recovery/patch/", "review": "recovery/patch-review/"}.get(stage)
+            patch_frozen = (self.store.get(rid, "recovery/patch-context/" + key[len(patch_prefix):])
+                            if patch_prefix and key.startswith(patch_prefix) else None)
+            if patch_frozen is not None:
+                # Only these recorded logical calls share a frozen policy.
+                # A new authority-reaudit must still receive the current budget.
+                # Absence in a legacy patch-context remains meaningful.
+                budget = patch_frozen.get("controller_attachment_capture")
+            else:
+                budget = (frozen["context"].get("controller_attachment_capture") if frozen
+                          else capture_contract(self.store.root))
+            if budget is not None:
+                context = {**context, "controller_attachment_capture": budget}
         context, schema = self.authority.prepare(rid, stage, context, schema, workspace, key)
         if not interactive_retry or stage in {"decision", "recovery_diagnosis", "material_probe"} or context.get("patch_repair"):
             result = await self._invoke_once(stage, context, schema, workspace, rid, key, fresh,
@@ -1963,6 +1981,8 @@ class WorkflowEngine:
         current = saved if any(k in saved for k in ("checks", "review", "environment_error", "candidate_error")) else feedback
         evidence = {k: current.get(k) for k in
                     ("checks", "review", "environment_error", "candidate_error")}
+        if current.get("recording_review"):
+            evidence["recording_review"] = current["recording_review"]
         if current.get("environment_failure"):
             evidence["environment_failure"] = current["environment_failure"]
         evidence["checks"] = evidence["checks"] or []
@@ -2003,6 +2023,7 @@ class WorkflowEngine:
     @staticmethod
     def _task_failure_evidence(task, saved):
         return {"task": task.model_dump(), "review": saved.get("review"),
+                **({"recording_review": saved["recording_review"]} if saved.get("recording_review") else {}),
                 "environment_error": saved.get("environment_error"), "candidate_error": saved.get("candidate_error"),
                 **({"environment_failure": saved["environment_failure"]} if saved.get("environment_failure") else {})}
 
@@ -2117,6 +2138,8 @@ class WorkflowEngine:
                 raise PolicyViolation("Prepared candidate belongs to an earlier scope; preserve it for reconciliation")
             if saved.get("source_hash") and prepared_before_hash(work, saved["patch"]) != saved["source_hash"]:
                 raise PolicyViolation("Task inputs changed outside its prepared patch; preserve user edits")
+            from .recording_recovery import validate_prepared as validate_recording_prepared
+            validate_recording_prepared(self, rid, saved, task, plan)
             self.authority.prepared_task(rid, saved, task)
             apply_prepared(work, saved["patch"])
             saved.update(phase="applied", source_hash=tree_hash(work))
@@ -2147,16 +2170,20 @@ class WorkflowEngine:
                     "recovery_permit": saved.get("recovery_permit"),
                     "observation_id": ["implementation", task.origin_id or task.id, counters["round"]], "feedback": {
                     **saved.get("feedback", {}), **{k: v for k, v in saved.items() if k in {
-                        "checks", "review", "environment_error", "environment_failure", "candidate_error", "controller_recheck", "controller_approval_recheck"}}}}
+                        "checks", "review", "recording_review", "environment_error", "environment_failure", "candidate_error", "controller_recheck", "controller_approval_recheck"}}}}
                 self.store.checkpoints(rid, {key: saved, counter_key: counters,
                     state_key: {**state, "implementation": "in_progress"}})
             previous_feedback = saved.get("feedback", saved)
-            feedback = {k: previous_feedback[k] for k in ("phase", "checks", "review", "environment_error", "environment_failure", "candidate_error", "controller_recheck", "controller_approval_recheck", "controller_recovery", "upstream_recovery", "failure", "baseline_refresh") if k in previous_feedback}
+            feedback = {k: previous_feedback[k] for k in ("phase", "checks", "review", "recording_review", "environment_error", "environment_failure", "candidate_error", "controller_recheck", "controller_approval_recheck", "controller_recovery", "upstream_recovery", "failure", "baseline_refresh") if k in previous_feedback}
             feedback = json.loads(json.dumps(feedback))
             task_context = {**approval_context, **design_context, "task": task.model_dump(), "specification": context["specification"],
                             "verification_contract": self._verification_contract(commands),
                             "design": context.get("design"), "feedback": feedback, "unresolved_issues": IssueLedger(self.store, self.artifacts).unresolved(rid),
                             "project": self.contexts.build(work, scopes=task.allowed_paths)}
+            from . import recording_recovery
+            recording = recording_recovery.task_record(self, rid, saved, task)
+            if recording:
+                task_context['controller_recording_recovery'] = recording_recovery.context(recording)
             task_context["source_history"] = SourceHistory(self).collect_task(rid, work, task)
             if plan.preview:
                 task_context["preview_contracts"] = PreviewEvidence(self).contracts(rid, plan)
@@ -2193,14 +2220,34 @@ class WorkflowEngine:
                         change = change.model_copy(update={"changes": changes})
                         saved["implementation"] = change.model_dump()
                         self.store.checkpoint(rid, key, saved)
+                        if recording:
+                            preliminary = prepare_changes(work, change.changes, task.allowed_paths, protected=False)
+                            recording_recovery.check_changes(recording, preliminary)
                         prepared = prepare_changes(work, change.changes, task.allowed_paths)
                 except ProtectedChange:
-                    review = await self._invoke("review", {**task_context, "candidate_changes": change.model_dump(),
-                                                           "review_kind": "test_changes",
-                                                           "purpose": "Authorize proposed protected test/config changes against requirements"},
-                                                ReviewResult, work, rid, key + "/test-change-review", fresh=True)
-                    if not review.approved:
-                        saved = {**saved, "review": review.model_dump(), "candidate_error": "Protected candidate rejected",
+                    review_context = {**task_context, "candidate_changes": change.model_dump(),
+                        "review_kind": "test_changes", "purpose": "Authorize proposed protected test/config changes against requirements"}
+                    recording_error = None
+                    if recording:
+                        review_context['recording_review_binding'] = recording_recovery.review_binding(
+                            recording, saved['source_hash'], plan, preliminary, phase='implementation')
+                        review_context['recording_review_instruction'] = (
+                            'Independently inspect this exact before/after diff and all accepted upstream methods. '
+                            'Approve only recording representation changes preserving every assertion, executed test, '
+                            'viewport and required PNG/state/download bytes. A path alone is not semantic proof. '
+                            'Do not approve an unactivated method change or override adopted design choices.')
+                    result = await self._invoke("review", review_context,
+                        recording_recovery.RecordingReview if recording else ReviewResult,
+                        work, rid, key + "/test-change-review", fresh=True)
+                    review = result.review if recording else result
+                    if recording:
+                        saved['recording_review'] = result.model_dump()
+                        try:
+                            recording_recovery.require_review(result.model_dump(), review_context['recording_review_binding'])
+                        except PolicyViolation as exc:
+                            recording_error = str(exc)
+                    if not review.approved or recording_error:
+                        saved = {**saved, "review": review.model_dump(), "candidate_error": recording_error or "Protected candidate rejected",
                                  "phase": "rejected", "workspace": str(work)}
                         self._task_progress(rid, task, saved)
                         self.store.checkpoint(rid, key, saved)
@@ -2216,6 +2263,7 @@ class WorkflowEngine:
                 validate_stage_writes("develop", prepared, task.allowed_paths)
                 saved["patch"] = prepared
                 self.store.checkpoint(rid, key, saved)
+                recording_recovery.validate_prepared(self, rid, saved, task, plan)
                 self.authority.prepared_task(rid, saved, task)
                 apply_prepared(work, prepared)
                 saved.update(phase="applied", source_hash=tree_hash(work))

@@ -260,10 +260,11 @@ def validate_admission_journal(journal, get, *, shared_browsers=False):
         coverage_verified = valid_coverage_receipt(journal, get, coverage or {})
         if not coverage_verified:
             raise AA2Error("Evidence admission coverage proof changed before activation")
+    from .recording_recovery import journal_scope
     from .review_authority import plan_source_correction
     candidate, affected, reopen = apply_patch(previous, patch, journal["base_revision"], set(patch.failure_ids),
         {t.id: t.origin_id for t in previous.tasks}, coverage_verified=coverage_verified,
-        source_correction=plan_source_correction(get, previous))
+        source_correction=plan_source_correction(get, previous), recording_scope=journal_scope(journal, get))
     review = EvidencePatchReview.model_validate(journal["review"])
     validate_admission_review(candidate, review, {**context, "previous_plan": previous.model_dump(),
         "patch": patch.model_dump()}, allow_user_blocker=False)
@@ -295,6 +296,9 @@ def evidence_instructions(purpose):
             "check mapping completeness, origins, capability sufficiency and substantive preservation. Capability availability "
             "does not prove installability or successful evidence collection. EnvironmentManager consumes frozen product locks; "
             "the task author proposes lock edits through protected review.\n"
-            "Playwright required file evidence: write PNG/JSON to testInfo.outputPath(...), then await testInfo.attach(name, "
-            "{path, contentType}). Use the controller-selected output directory. Memory-only body attachments do not guarantee "
-            "archived originals; verify actual captured content, not counts/complete status. Never attach credentials/private data.")
+            "Playwright required file evidence: write real required PNG/JSON/download bytes under the controller-selected "
+            "output directory. Use controller_attachment_capture for actual per-command budgets and physical-path counting. "
+            "If the accepted method requires testInfo.outputPath then testInfo.attach(path), preserve it: attach(path) can make a physical copy "
+            "and both paths count. Do not drop assertions/evidence or silently replace an adopted method to fit the budget; "
+            "request its owner's formal correction. Memory-only body metadata does not guarantee archived originals. "
+            "Verify actual captured content, not counts/complete status. Never attach credentials/private data.")

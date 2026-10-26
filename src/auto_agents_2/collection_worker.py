@@ -65,9 +65,47 @@ def attachments(artifacts, directory, policy, progress=None):
     return {"attachments": rows, "files": count, "bytes": total, "limits": policy, "status": "complete"}
 
 
+def attachment_inventory(directory, policy):
+    """Bounded metadata diagnosis only: no archive and no successful capture receipt."""
+    import time
+    started = time.monotonic()
+    rows, total, entries = [], 0, 0
+    def visit(fd, prefix, depth):
+        nonlocal total, entries
+        if depth > 64:
+            raise CollectionError('Unsafe diagnostic attachment tree', {'reason': 'directory_depth'})
+        with os.scandir(fd) as children:
+            for entry in children:
+                entries += 1
+                if entries > max(1024, policy['max_files'] * 8) or time.monotonic() - started > policy['timeout_seconds']:
+                    raise CollectionError('Attachment diagnostic metadata budget exceeded')
+                info = entry.stat(follow_symlinks=False)
+                relative = prefix / entry.name
+                if stat.S_ISDIR(info.st_mode):
+                    child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                    try:
+                        visit(child, relative, depth + 1)
+                    finally:
+                        os.close(child)
+                elif stat.S_ISREG(info.st_mode):
+                    total += info.st_size
+                    if info.st_size > policy['max_file_bytes'] or total > policy['max_total_bytes']:
+                        raise CollectionError('Attachment diagnostic tree also exceeds byte budgets')
+                    rows.append({'path': relative.as_posix(), 'bytes': info.st_size,
+                                 'inode': info.st_ino, 'mtime_ns': info.st_mtime_ns})
+                else:
+                    raise CollectionError('Unsafe diagnostic attachment tree', {'reason': 'invalid_input'})
+    with directory_fd(directory) as fd:
+        visit(fd, Path(), 0)
+    return {'status': 'metadata_only', 'files': len(rows), 'bytes': total,
+            'entries': sorted(rows, key=lambda row: row['path'])}
+
+
 def execute(root, request):
     artifacts = ArtifactStore(root)
     action = request["action"]
+    if action == "attachment_inventory":
+        return attachment_inventory(Path(request['path']), request['policy'])
     if action == "attachments":
         return attachments(artifacts, Path(request["path"]), request["policy"],
                            Path(request["progress"]) if request.get("progress") else None)

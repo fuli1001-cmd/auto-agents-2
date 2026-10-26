@@ -234,8 +234,27 @@ def _retain_checks(old, new):
             raise AA2Error("Plan patch removes a check obligation or reduces expected_tests")
 
 
+def local_obligation_value_sync(previous, candidate, patch):
+    """An exact local clause-value alias changes its owner, not every task's facts."""
+    old, new = previous.evidence_contract, candidate.evidence_contract
+    if old is None or new is None or old.model_dump(exclude={'obligations'}) != new.model_dump(exclude={'obligations'}):
+        return False
+    if len(old.obligations) != len(new.obligations):
+        return False
+    mappings = {(r.task_id, r.index): (r.previous, r.replacement)
+                for r in patch.contract_corrections if r.target == 'acceptance' and r.task_id}
+    for a, b in zip(old.obligations, new.obligations):
+        if a == b:
+            continue
+        if (a.capability != 'test_file_attachments' or a.target != 'acceptance' or not a.task_id
+                or a.model_dump(exclude={'value'}) != b.model_dump(exclude={'value'})
+                or mappings.get((a.task_id, a.index)) != (a.value, b.value)):
+            return False
+    return True
+
+
 def apply_patch(plan: PlanResult, patch: PlanPatch, revision: int, failures: set[str], origins: dict, *, coverage_verified=False,
-                source_correction=None):
+                source_correction=None, recording_scope=None):
     if patch.base_revision != revision:
         raise AA2Error("Stale plan patch base_revision")
     if not set(patch.failure_ids) <= failures:
@@ -278,7 +297,7 @@ def apply_patch(plan: PlanResult, patch: PlanPatch, revision: int, failures: set
     affected = descendants(candidate, changed) | descendants(plan, changed)
     old_obligations = plan.evidence_contract.obligations if plan.evidence_contract else []
     new_obligations = candidate.evidence_contract.obligations if candidate.evidence_contract else []
-    if changes or old_obligations != new_obligations:
+    if changes or (old_obligations != new_obligations and not (recording_scope and local_obligation_value_sync(plan, candidate, patch))):
         affected |= tasks.keys()  # preparation/verification contract: conservative recheck
     reopen = set()
     for key, task in updates.items():
@@ -287,4 +306,7 @@ def apply_patch(plan: PlanResult, patch: PlanPatch, revision: int, failures: set
         if len(predecessors) != 1 or implementation_changed(predecessors[0], task):
             reopen.add(key)
     reopen.update(row.task_id for row in patch.contract_corrections if row.task_id)
+    if recording_scope:
+        from .recording_recovery import validate_patch
+        validate_patch(recording_scope, plan, patch, candidate, affected & tasks.keys(), reopen)
     return candidate, affected & tasks.keys(), reopen

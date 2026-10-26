@@ -50,6 +50,7 @@ class ActionPermit(Record):
     authority_transition: dict = {}
     authority_patch: str = ""
     resolution_diagnosis: dict = {}
+    recording: dict = {}
 
 
 class RecoveryCycle(Record):
@@ -158,6 +159,9 @@ class RecoveryPolicy:
                     reason="Return to the owning stage without approving its outputs").model_dump()
         else:
             proposals.pop("plan_patch", None)
+        from .recording_recovery import current
+        if failure.task_id and current(self.engine, rid, failure.task_id):
+            proposals = {name: value for name, value in proposals.items() if name in {'diagnose', 'repair', 'plan_patch'}}
         return proposals
 
     def legacy_questions(self, rid, failure, active):
@@ -195,6 +199,27 @@ class RecoveryPolicy:
         if resolution_proof == {}:
             suggested = suggested.model_copy(update={"action": "diagnose", "task_ids": [], "repair_targets": []})
             candidates = {"diagnose": suggested}
+        from .recording_recovery import authorization as recording_authorization
+        from .recording_recovery import current as recording_current
+        recording = recording_authorization(self, rid, failure, active, work, plan, operation)
+        if recording:
+            record = recording_current(self.engine, rid, failure.task_id)
+            has_diagnosis = bool(recording.get('diagnosis_permit') or recording.get('patch_permit'))
+            initial = suggested.model_copy(update={'action': 'diagnose', 'task_ids': [failure.task_id], 'repair_targets': []})
+            choices_for_recording = candidates if candidates is not None else self.candidates(failure, plan, initial)
+            candidates = {name: choice for name, choice in choices_for_recording.items()
+                          if name in ({'diagnose', 'repair', 'plan_patch'} if has_diagnosis else {'diagnose'})}
+            if suggested.action in candidates and set(suggested.task_ids) <= {failure.task_id}:
+                candidates[suggested.action] = suggested
+            else:
+                suggested = candidates.get('diagnose') or next(iter(candidates.values()), initial)
+            if not candidates:
+                raise StateConflict('Recording restriction has no authorized action in this caller scope')
+            # Only this verified capture prerequisite is excepted, not arbitrary
+            # external requirements. Edits/retries remain separate permits.
+            prerequisite_resolved = prerequisite_resolved or bool(recording.get('observation'))
+            observed = self.store.get(rid, recording.get('observation', ''), {})
+            supersede_keys = tuple(dict.fromkeys([*supersede_keys, *observed.get('question_keys', [])]))
         cid = self.cycle_id(failure, active)
         bounded_progress = (candidates is None or 'diagnose' in candidates) and not (
             self.store.get(rid, 'delivery/journal') or {}).get('publication_started')
@@ -261,6 +286,10 @@ class RecoveryPolicy:
         answered = [q for q in questions if q["answer"] is not None]
         guards = self.engine.decisions.guards(rid, failure.origin_id,
             [cycle_key, permit_key, rule_key, "plan_revision/current", "automation/engineering/" + failure.origin_id])
+        if recording:
+            for key in (recording['receipt'], recording.get('observation')):
+                if key:
+                    guards[key] = self.store.get(rid, key)
         if transition or suggested.action == "plan_patch" or prototype_binding or preview_binding:
             guards["delivery/journal"] = self.store.get(rid, "delivery/journal")
         if prototype_binding:
@@ -342,6 +371,9 @@ class RecoveryPolicy:
             "consumption": {"implementation": self.store.get(rid, "rounds/" + failure.origin_id, {}),
                 "diagnosis": self.store.get(rid, "recovery/budgets/diagnosis/" + failure.origin_id, {}),
                 "tokens": self.store.usage_summary(rid)}}
+        if recording:
+            from .recording_recovery import context as recording_context
+            evidence['controller_recording_recovery'] = recording_context(record)
         if exclusions:
             evidence["excluded_actions"] = exclusions
         if prototype_binding:
@@ -474,7 +506,7 @@ class RecoveryPolicy:
             raise StateConflict("Preview contracts or consent changed during recovery authorization")
         permit = ActionPermit(cycle_id=cid, owner=failure.origin_id, action=choice.model_dump(),
                               actor=actor, source_hash=source, plan_hash=plan_hash,
-                              authority_failure=failure.model_dump(), resolution_diagnosis=resolution_proof or {},
+                              authority_failure=failure.model_dump(), resolution_diagnosis=resolution_proof or {}, recording=recording or {},
                               authority_sources=self.engine.authority.identity(rid), authority_transition=transition,
                               reason=result.reason, expected_result=result.expected_result,
                               task_scopes={task.id: task.allowed_paths for task in scoped},
@@ -512,6 +544,8 @@ class RecoveryPolicy:
             raise StateConflict("Dispatched action lost its authorization receipt")
         from .resolution_diagnosis import validate_permit
         validate_permit(self, rid, permit)
+        from .recording_recovery import validate_permit as validate_recording_permit
+        validate_recording_permit(self, rid, permit)
         action = permit["action"]["action"]
         if expected is not None and action not in expected:
             raise StateConflict("Dispatched action belongs to another responsibility")

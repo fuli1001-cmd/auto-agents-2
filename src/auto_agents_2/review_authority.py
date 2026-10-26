@@ -127,9 +127,10 @@ def review_schema(schema):
     if issubclass(schema, ReviewResult):
         return create_model("Authority" + schema.__name__, __base__=schema,
                             authority=(AuthorityAssessment, ...))
-    if "review" in schema.model_fields and schema.model_fields["review"].annotation is ReviewResult:
+    if ("review" in schema.model_fields and isinstance(schema.model_fields["review"].annotation, type)
+            and issubclass(schema.model_fields["review"].annotation, ReviewResult)):
         return create_model("Authority" + schema.__name__, __base__=schema,
-                            review=(review_schema(ReviewResult), ...))
+                            review=(review_schema(schema.model_fields["review"].annotation), ...))
     return schema
 
 
