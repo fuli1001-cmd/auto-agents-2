@@ -156,7 +156,8 @@ async def test_real_check_and_archive_bytes_close_only_the_bound_producer(tmp_pa
                 workflow.artifacts, task=plan.tasks[0], phase='task')
 
 
-async def test_actual_engine_task_and_final_gates_reject_missing_receipt(tmp_path):
+@pytest.mark.parametrize('damage', ['missing', 'damaged', 'stale_plan'])
+async def test_actual_engine_task_and_final_gates_preserve_receipt_state_conflict(tmp_path, damage):
     plan, review, ctx = plan_and_review()
     workflow = engine(tmp_path, CodingAgent())
     rid = workflow.store.admit('isolated closure', {})['id']
@@ -169,12 +170,43 @@ async def test_actual_engine_task_and_final_gates_reject_missing_receipt(tmp_pat
     final_commands = workflow._candidate_checks(plan, tmp_path)
     final = await workflow._checks(rid, final_commands, tmp_path, env)
     assert workflow._require_candidate_evidence(rid, final_commands, final, tmp_path, env, phase='final')['check_production']
-    workflow.store.checkpoint(rid, ACTIVE_KEY, None)
-    from auto_agents_2.recovery import RecoveryNeeded
-    with pytest.raises(RecoveryNeeded):
+    receipt = workflow.store.get(rid, ACTIVE_KEY)
+    if damage == 'missing':
+        receipt = None
+    elif damage == 'damaged':
+        receipt['binding'] = 'damaged'
+    else:
+        from auto_agents_2.util import digest
+        receipt['candidate_hash'] = 'different-plan'
+        receipt['binding'] = digest({k: v for k, v in receipt.items() if k != 'binding'})
+    workflow.store.checkpoints(rid, {ACTIVE_KEY: receipt, 'rounds/A': {'round': 4}})
+    keys = [ACTIVE_KEY, 'plan', 'rounds/A', 'task_state/A', 'develop/task/A', 'verify/checks']
+    before = {key: workflow.store.get(rid, key) for key in keys}
+    from auto_agents_2.faults import StateConflict
+    with pytest.raises(StateConflict):
         workflow._require_task_evidence(rid, plan.tasks[0], {}, commands, checks, tmp_path, env)
-    with pytest.raises(RecoveryNeeded):
+    with pytest.raises(StateConflict):
         workflow._require_candidate_evidence(rid, final_commands, final, tmp_path, env, phase='final')
+    assert {key: workflow.store.get(rid, key) for key in keys} == before
+
+
+async def test_actual_missing_attachment_remains_evidence_recovery_not_state_conflict(tmp_path):
+    from auto_agents_2.recovery import RecoveryNeeded
+    plan, review, ctx = plan_and_review()
+    row = review.evidence_assessment.check_production.bindings[0]
+    row.kind, row.attachment_formats = 'attachments', ['json']
+    workflow = engine(tmp_path, CodingAgent())
+    rid = workflow.store.admit('actual missing file', {})['id']
+    receipt = admission_record(plan, review, ctx)
+    workflow.store.checkpoints(rid, {'plan': plan.model_dump(), 'rounds/A': {'round': 4}, **activation_updates(receipt)})
+    env = Environment(__import__('pathlib').Path(sys.prefix), 'fixture')
+    commands = workflow._task_commands(rid, plan.tasks[0], tmp_path, plan)
+    checks = await workflow._checks(rid, commands, tmp_path, env, plan.tasks[0])
+    with pytest.raises(RecoveryNeeded) as error:
+        workflow._require_task_evidence(rid, plan.tasks[0], {}, commands, checks, tmp_path, env)
+    assert error.value.failure.kind == 'evidence'
+    assert workflow.store.get(rid, ACTIVE_KEY) == receipt
+    assert workflow.store.get(rid, 'rounds/A') == {'round': 4}
 
 
 def test_frozen_demo5_original_build_gap_and_legitimate_final_only_tsc():

@@ -57,3 +57,7 @@ Demo5 `run_22419c9eef564f2b` 的 `plan_revision/journal/*` 原件：revision 1 �
 - metadata-only映射变化用共享差异函数计算新增affected及依赖后继，不新增reopen。RecoveryController._patch先保留原affected快照作为审核输入；审核返回并通过后补齐新增affected的真实快照并重新验源，journal记录最终总affected；prepared验证重建同一差异，Store仍同一CAS事务激活。reason说明变化不触发失效。冻结审核上下文声明这条确定性失效规则，审核者不自行指定新权限。
 
 - 已有 test_file_attachments 合同如果直接指向 checks/final_checks/runtime_prepare/runtime_probes，也按当前真正执行阶段读取原件；final-only 探针不成为各任务的义务。当前协议的 accepted 回执丢失/损坏属于状态冲突，沿既有等待核对流程处理，不伪造新回执或当作旧版兼容。
+
+## 固定提交复审修正：回执状态分类
+
+独立复审在真实任务/最终门禁复现：StateConflict 属于 AA2Error 子类，被 observe 的通用包装吞入合同诊断。现公共门禁明确传播状态冲突，避免缺失或损坏正式回执变成修订义务的许可。三个缺失/损坏/旧计划反例在旧实现均失败；真实附件未产生仍走 evidence 恢复，不混作状态冲突。

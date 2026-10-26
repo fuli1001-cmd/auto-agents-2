@@ -5,6 +5,7 @@ import json
 
 from .builds import verification_layout
 from .errors import AA2Error
+from .faults import StateConflict
 from .models import CheckProductionAssessment, PlanResult
 from .util import digest
 
@@ -102,7 +103,6 @@ def active_receipt(get, plan=None):
         plan = plan or PlanResult.model_validate(get("plan"))
         validate_receipt(record, plan)
     except (AA2Error, ValueError) as exc:
-        from .faults import StateConflict
         raise StateConflict("Accepted check production receipt is missing, damaged or bound to a different plan/protocol",
                             evidence_refs=[ACTIVE_KEY, REQUIRED_KEY, "plan"]) from exc
     return record
@@ -276,7 +276,7 @@ def observe(get, commands, results, work, environment, artifacts, *, task=None, 
             "checks_hash": digest([r.model_dump() for r in results]), "source_hash": results[0].source_hash,
             "environment_hash": environment.fingerprint, "closed": closed,
             "scope": "Actual producer evidence at this gate; semantic/source review remains required."}
-    except ProductionGap:
+    except (ProductionGap, StateConflict):
         raise
     except (KeyError, ValueError, AA2Error) as exc:
         raise ProductionGap(str(exc)) from exc
