@@ -111,7 +111,10 @@ async def test_two_rejected_timing_amendments_exclude_repetition_not_other_repai
     assert 'plan_patch' in exclusions
     assert len(exclusions['plan_patch']['operations']) == 2
     choices = workflow.recovery_policy.diagnosis_actions(rid, record, work, plan)
-    assert 'plan_patch' not in choices and {'diagnose', 'repair'} <= choices.keys()
+    # Both rejected amendments followed an actual completed diagnosis on the same facts.
+    assert 'plan_patch' not in choices and 'diagnose' not in choices
+    assert {'recheck', 'repair'} <= choices.keys()
+    assert len(exclusions['diagnose']['operations']) == 2
     assert workflow.store.get(rid, 'plan') == plan.model_dump()
     assert not workflow.store.pending(rid) and not workflow.store.get(rid, 'develop/done')
 

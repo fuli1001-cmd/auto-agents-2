@@ -190,7 +190,9 @@ class RecoveryPolicy:
             candidates = None
         force_decision = force_decision or diagnosis_assessment
         cid = self.cycle_id(failure, active)
-        if candidates is None:
+        bounded_progress = (candidates is None or 'diagnose' in candidates) and not (
+            self.store.get(rid, 'delivery/journal') or {}).get('publication_started')
+        if bounded_progress:
             operation = self.progress.resume_operation(rid, failure, work, plan, cid, operation)
         cycle_key = "recovery/cycles/" + cid
         permit_key = "recovery/permits/" + digest([cid, operation])
@@ -227,7 +229,9 @@ class RecoveryPolicy:
         if suggested.action == "preview_recheck" and (
                 not preview_binding or suggested.task_ids != [failure.task_id]):
             raise StateConflict("Preview evidence refresh requires an accepted preview, human consent and the current task")
-        exclusions = self.progress.exclusions(rid, failure, work, plan) if candidates is None else {}
+        exclusions = self.progress.exclusions(rid, failure, work, plan) if bounded_progress else {}
+        if candidates is not None and not prior:
+            choices = {action: choice for action, choice in choices.items() if action not in exclusions}
         # An issued permit retains its exact scope; only a NEW selection excludes exhausted paths.
         if not prior and suggested.action in exclusions:
             if bound is not None:

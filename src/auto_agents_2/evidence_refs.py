@@ -130,8 +130,15 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
     history = context.get("history") or {}
     if isinstance(history, dict):
         for index, row in enumerate(history.get("recent", [])):
+            origins[f"history.recent[{index}].action.reason"] = "proposal"
+            for target in range(len((row.get("action") or {}).get("repair_targets", []))):
+                origins[f"history.recent[{index}].action.repair_targets[{target}].reason"] = "proposal"
             origins[f"history.recent[{index}].outcome.diagnosis"] = "proposal"
             origins[f"history.recent[{index}].outcome.feedback.diagnosis"] = "proposal"
+    for action, exclusion in (context.get("excluded_actions") or {}).items():
+        for operation in exclusion.get("operations", {}):
+            origins[f"excluded_actions.{action}.operations.{operation}.diagnosis"] = "proposal"
+    origins["diagnosis_request.proposal"] = "proposal"
     origins["diagnosis_feedback.diagnosis"] = "proposal"
     for name in ("diagnosis", "original_proposal", "raw_response"):
         if name in context:

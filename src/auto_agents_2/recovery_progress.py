@@ -57,6 +57,37 @@ class RecoveryProgress:
             facts['checks'] = check_rows(evidence)
         return digest([STAGE_CONTRACT_VERSION, action, source_hash, facts, materials])
 
+    def diagnosis_basis(self, rid, failure, work, plan, operation):
+        key = 'recovery/diagnosis-progress-basis/' + operation
+        saved = self.store.get(rid, key)
+        if saved is None:
+            # Use exactly the same factual projection as exclusions, including
+            # for delivery's explicit action catalog. Presentation is not progress.
+            saved = self.basis(self.inputs(rid, failure, work, plan), tree_hash(work), 'diagnose')
+            self.store.checkpoint(rid, key, saved)
+        return saved
+
+    def enroll_diagnosis(self, rid, owner, basis, operation, outcome, *, completed):
+        key = 'recovery/diagnosis-progress-enrollment/' + operation
+        expected = {'owner': owner, 'basis': basis, 'outcome_hash': digest(outcome)}
+        saved = self.store.get(rid, key)
+        if saved is not None and saved != expected:
+            raise StateConflict('Diagnostic progress enrollment changed; preserve its completed observation')
+        if saved is None and not completed:
+            # Persist before completion. A crash after completion can finish the
+            # ledger; old completed results without enrollment are not backfilled.
+            self.store.checkpoint(rid, key, expected)
+
+    def complete_diagnosis(self, rid, owner, basis, operation, outcome):
+        saved = self.store.get(rid, 'recovery/diagnosis-progress-enrollment/' + operation)
+        if saved is None:
+            return
+        if saved != {'owner': owner, 'basis': basis, 'outcome_hash': digest(outcome)}:
+            raise StateConflict('Diagnostic progress does not match its completed observation')
+        self.record(rid, owner, 'diagnose', basis, operation,
+            {'status': 'completed_without_execution', 'evidence_ref': 'invocation/' + operation,
+             'diagnosis': outcome['diagnosis']})
+
     def record(self, rid, owner, action, basis, operation, outcome):
         key = f'recovery/no-progress/{action}/{basis}'
         saved = self.store.get(rid, key, {'action': action, 'basis': basis, 'operations': {}})
@@ -117,7 +148,7 @@ class RecoveryProgress:
             saved = self.store.get(rid, key)
             if saved and len(saved['operations']) >= NO_PROGRESS_LIMIT:
                 excluded[action] = {**saved, 'evidence_ref': key,
-                    'reason': 'Two inconclusive diagnoses on identical facts' if action == 'diagnose' else
+                    'reason': 'Two completed diagnoses without new execution evidence on identical facts' if action == 'diagnose' else
                               'Two rejected contract amendments on identical facts',
                     'resume_condition': 'New relevant source, plan, specification, design or supplied evidence; '
                                         'another wording, permission or invocation is not new evidence.'}

@@ -43,6 +43,7 @@ from .recovery import (
     failure_summary,
     implemented_candidate,
 )
+from .recovery_handoff import diagnosis_handoff
 from .source_history import SourceHistory
 from .stage_responsibilities import (
     correction_contract,
@@ -207,8 +208,13 @@ class RecoveryController:
                 "constraint": "Delivery may only repair within supplied allowed_paths or recheck. Gate/plan changes require user reconciliation; never invalidate a published journal.",
                 "allowed_actions": policy.proposal_actions(
                     self._delivery_candidates(failure, adjudicate(failure), diagnosed=True))}
+            progress_operation = f"recovery/diagnose/{failure.id}/{saved['round']}"
+            diagnosis_context.update(diagnosis_handoff(self.engine, rid, failure, permit, progress_operation))
+            progress_basis = (policy.progress.diagnosis_basis(rid, failure, work, None, progress_operation)
+                              if not published else None)
             diagnosis = policy.completed_diagnosis(rid, permit, failure, active, work, None,
                 authorization_failure=authorization_failure)
+            completed_diagnosis = diagnosis is not None
             schema_error = None
             if diagnosis is None:
                 diagnosis, schema_error = await self._diagnose(diagnosis_context,
@@ -226,8 +232,13 @@ class RecoveryController:
                     f"recovery/diagnosis-rejections/{failure.id}/{saved['round']}": rejection})
                 self._reject_diagnosis(rid, permit, rejection)
                 return None
-            policy.complete(rid, permit, {"status": "validated", "diagnosis": diagnosis.model_dump()})
+            outcome = {"status": "validated", "diagnosis": diagnosis.model_dump()}
             if not published:
+                policy.progress.enroll_diagnosis(rid, failure.origin_id, progress_basis, progress_operation,
+                    outcome, completed=completed_diagnosis)
+            policy.complete(rid, permit, outcome)
+            if not published:
+                policy.progress.complete_diagnosis(rid, failure.origin_id, progress_basis, progress_operation, outcome)
                 decision, assess = self._diagnosis_assessment(failure, decision)
                 options = self._delivery_candidates(failure, decision, diagnosed=True)
                 decision, permit = await policy.authorize(rid, failure, active, work, None, decision,
@@ -444,11 +455,8 @@ class RecoveryController:
                 if plan and plan.preview:
                     diagnosis_context["preview_contracts"] = PreviewEvidence(engine).contracts(rid, plan)
                 progress_operation = f"recovery/diagnose/{failure.id}/{active['diagnosis_round']}"
-                progress_key = "recovery/diagnosis-progress-basis/" + progress_operation
-                progress_basis = self.store.get(rid, progress_key)
-                if progress_basis is None:
-                    progress_basis = policy.progress.basis(diagnosis_context, tree_hash(work), "diagnose")
-                    self.store.checkpoint(rid, progress_key, progress_basis)
+                diagnosis_context.update(diagnosis_handoff(engine, rid, failure, permit, progress_operation))
+                progress_basis = policy.progress.diagnosis_basis(rid, failure, work, plan, progress_operation)
                 diagnosis = policy.completed_diagnosis(rid, permit, failure, active, work, plan)
                 completed_diagnosis = diagnosis is not None
                 schema_error = None
@@ -477,11 +485,11 @@ class RecoveryController:
                         f"recovery/diagnosis-rejections/{failure.id}/{rejected_round}": rejection})
                     self._reject_diagnosis(rid, permit, rejection)
                     return
-                policy.complete(rid, permit, {"status": "validated", "diagnosis": diagnosis.model_dump()})
-                if diagnosis.action in {"diagnose", "blocked"}:
-                    policy.progress.record(rid, failure.origin_id, "diagnose", progress_basis, progress_operation,
-                        {"status": "inconclusive", "evidence_ref": "invocation/" + progress_operation,
-                         "diagnosis": diagnosis.model_dump()})
+                outcome = {"status": "validated", "diagnosis": diagnosis.model_dump()}
+                policy.progress.enroll_diagnosis(rid, failure.origin_id, progress_basis, progress_operation,
+                    outcome, completed=completed_diagnosis)
+                policy.complete(rid, permit, outcome)
+                policy.progress.complete_diagnosis(rid, failure.origin_id, progress_basis, progress_operation, outcome)
                 active.pop("diagnosis_feedback", None)
                 active.pop("diagnosis_errors", None)
                 suggested, assess = self._diagnosis_assessment(failure, suggested)
