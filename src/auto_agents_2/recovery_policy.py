@@ -49,6 +49,7 @@ class ActionPermit(Record):
     authority_sources: dict = {}
     authority_transition: dict = {}
     authority_patch: str = ""
+    resolution_diagnosis: dict = {}
 
 
 class RecoveryCycle(Record):
@@ -189,6 +190,11 @@ class RecoveryPolicy:
             diagnosis_assessment = True
             candidates = None
         force_decision = force_decision or diagnosis_assessment
+        from .resolution_diagnosis import authorization_proof
+        resolution_proof = authorization_proof(self, rid, failure, active, work, plan, operation)
+        if resolution_proof == {}:
+            suggested = suggested.model_copy(update={"action": "diagnose", "task_ids": [], "repair_targets": []})
+            candidates = {"diagnose": suggested}
         cid = self.cycle_id(failure, active)
         bounded_progress = (candidates is None or 'diagnose' in candidates) and not (
             self.store.get(rid, 'delivery/journal') or {}).get('publication_started')
@@ -223,6 +229,8 @@ class RecoveryPolicy:
         if candidates is None:
             choices, prototype_binding, preview_binding = self.available_actions(
                 rid, failure, work, plan, suggested, include_declared_checks=diagnosis_assessment)
+        if resolution_proof == {} and prior and prior.get("action", {}).get("action") != "diagnose":
+            raise StateConflict("Unknown resolution requires completed diagnosis before another action")
         if suggested.action == "prototype_recheck" and (
                 not prototype_binding or suggested.task_ids != [failure.task_id]):
             raise StateConflict("Prototype evidence refresh requires matching human consent and the current task")
@@ -466,7 +474,7 @@ class RecoveryPolicy:
             raise StateConflict("Preview contracts or consent changed during recovery authorization")
         permit = ActionPermit(cycle_id=cid, owner=failure.origin_id, action=choice.model_dump(),
                               actor=actor, source_hash=source, plan_hash=plan_hash,
-                              authority_failure=failure.model_dump(),
+                              authority_failure=failure.model_dump(), resolution_diagnosis=resolution_proof or {},
                               authority_sources=self.engine.authority.identity(rid), authority_transition=transition,
                               reason=result.reason, expected_result=result.expected_result,
                               task_scopes={task.id: task.allowed_paths for task in scoped},
@@ -502,6 +510,8 @@ class RecoveryPolicy:
         permit = self.store.get(rid, key)
         if not permit:
             raise StateConflict("Dispatched action lost its authorization receipt")
+        from .resolution_diagnosis import validate_permit
+        validate_permit(self, rid, permit)
         action = permit["action"]["action"]
         if expected is not None and action not in expected:
             raise StateConflict("Dispatched action belongs to another responsibility")
@@ -555,14 +565,15 @@ class RecoveryPolicy:
         self.store.event(rid, "recovery.result_reused", {"permit": key, "action": saved["action"]["action"]})
         return outcome
 
-    def completed_diagnosis(self, rid, key, failure, active, work, plan, *, authorization_failure=None):
+    def completed_diagnosis(self, rid, key, failure, active, work, plan, *, authorization_failure=None, allow_invalid=False):
         """A completed action is replayed from its bound outcome, not a transport cache."""
         if not key:
             return None  # Legacy or published-delivery calls without an action permit.
         outcome = self.completed_outcome(rid, key, action="diagnose")
         saved = self.store.get(rid, key)
         permit = ActionPermit.model_validate(saved)
-        if permit.action.get("action") != "diagnose" or outcome is not None and permit.outcome.get("status") != "validated":
+        invalid = allow_invalid and outcome is not None and permit.outcome.get("status") == "invalid"
+        if permit.action.get("action") != "diagnose" or outcome is not None and not invalid and permit.outcome.get("status") != "validated":
             raise StateConflict("Completed diagnosis has no validated outcome; preserve recovery state")
         binding = self.store.get(rid, key.replace("recovery/permits/", "recovery/authorization-inputs/", 1), {})
         source, plan_hash = tree_hash(work), digest(plan.model_dump() if plan else None)
@@ -583,7 +594,7 @@ class RecoveryPolicy:
                 or permit.cycle_id != self.cycle_id(failure, active)
                 or permit.task_scopes != {task.id: task.allowed_paths for task in tasks}):
             raise StateConflict("Completed diagnosis inputs changed; preserve its original outcome and candidate")
-        if outcome is None:
+        if outcome is None or invalid:
             return None
         try:
             result = Diagnosis.model_validate(permit.outcome.get("diagnosis"))

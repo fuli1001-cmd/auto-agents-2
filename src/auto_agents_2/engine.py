@@ -252,7 +252,7 @@ class WorkflowEngine:
                         await self._resume_environment_waits(rid)
                         if self.store.get(rid, "recovery/active"):
                             await self.recovery.resume(rid)
-                            if self.store.get(rid, "recovery/active"):
+                            if self.store.get(rid, "recovery/active") or self._environment_waits(rid):
                                 continue
                         if self.store.get(rid, "replanning/pending"):
                             if self.store.get(rid, "replanning/pending").get("controller_owned"):
@@ -365,6 +365,11 @@ class WorkflowEngine:
         if current:
             await self._wait_prerequisite(rid, self._environment_boundary(current))
         while pending := self._environment_waits(rid):
+            active = self.store.get(rid, "recovery/active") or {}
+            if active.get("failure", {}).get("evidence", {}).get("resolution_diagnosis"):
+                # Validate the entire queue even while its admitted read-only
+                # recovery runs. Other prerequisites retain their old semantics.
+                return
             await self._wait_prerequisite(rid, self._environment_boundary(next(iter(pending.values()))))
 
     async def _wait_prerequisite(self, rid, error):
@@ -378,6 +383,9 @@ class WorkflowEngine:
         if observed_environment:
             pending = {"version": 1, "identity": identity, "reason_code": error.reason_code,
                        "phase": error.phase, "requirement": requirement}
+            from .resolution_diagnosis import admit
+            if admit(self, rid, pending):
+                return
             previous = self.store.get(rid, wait_key)
             if previous and previous != pending:
                 raise StateConflict("Another environment observation is awaiting its original answer")
@@ -1912,8 +1920,8 @@ class WorkflowEngine:
         try:
             return await self._task(rid, task, base, plan, context)
         except EnvironmentCommandError as exc:
-            # Declared resolution failures belong to task diagnosis. An unknown
-            # external failure only permits rechecking the original prerequisite.
+            # Persist every task before aggregation. The shared waiting consumer
+            # may admit a fully bound unknown npm failure to read-only diagnosis.
             if isinstance(exc, DependencyResolutionError) or exc.evidence.get("authority") != "external_command_observation":
                 raise
             boundary = known_exception(exc, "develop")
@@ -1949,7 +1957,8 @@ class WorkflowEngine:
         self.store.checkpoint(rid, "rounds/" + owner, {**counters, "stalled": progress.get("stalled", 0)})
         return progress
 
-    def _task_failure(self, rid, task, saved, *, kind=None, step="checks", proposal=None, verification_error=None):
+    def _task_failure(self, rid, task, saved, *, kind=None, step="checks", proposal=None, verification_error=None,
+                      record_outcome=True):
         feedback = saved.get("feedback", {})
         current = saved if any(k in saved for k in ("checks", "review", "environment_error", "candidate_error")) else feedback
         evidence = {k: current.get(k) for k in
@@ -1966,8 +1975,9 @@ class WorkflowEngine:
                     else "review" if evidence["review"] and not evidence["review"].get("approved") else "checks")
         if kind == "integration":
             evidence["baseline_refresh"] = feedback["baseline_refresh"]
-        self.recovery_policy.task_outcome(rid, saved, task.id, {"status": "failed", "kind": kind,
-            "evidence": "develop/task/" + task.id, "observation": digest(evidence)})
+        if record_outcome:
+            self.recovery_policy.task_outcome(rid, saved, task.id, {"status": "failed", "kind": kind,
+                "evidence": "develop/task/" + task.id, "observation": digest(evidence)})
         return FailureRecord.create(kind=kind, component="implementation", origin_id=task.origin_id or task.id,
             task_id=task.id, step=step, obligations=task.requirement_ids, evidence_refs=["develop/task/" + task.id],
             evidence=evidence, proposal=proposal or {})

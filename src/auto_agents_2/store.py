@@ -600,6 +600,46 @@ class Store:
                        (rid, f"replan-stalled/{pending['evaluation']}"))
             self._event(db, rid, event, {"task": task_key, "recovery": recovery_key})
 
+    @staticmethod
+    def _resolution_wait_questions(db, rid, keys):
+        rows = []
+        for key in keys:
+            prefix = key + "/history/"
+            rows.extend(dict(row) for row in db.execute(
+                "SELECT id,key,artifact_hash,answer,superseded FROM questions WHERE run_id=? "
+                "AND (key=? OR substr(key,1,?)=?) ORDER BY id", (rid, key, len(prefix), prefix)))
+        return rows
+
+    def resolution_wait_questions(self, rid, keys):
+        with self.connect() as db:
+            return self._resolution_wait_questions(db, rid, keys)
+
+    def admit_resolution_diagnosis(self, rid, receipt, record, guards, updates, question_keys, questions):
+        """CAS one original external wait into diagnosis; never answer a question."""
+        from .faults import StateConflict
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            status = db.execute("SELECT status FROM runs WHERE id=?", (rid,)).fetchone()[0]
+            if status not in {"RUNNING", "WAITING_USER"}:
+                raise StateConflict("Resolution admission requires the normal running controller")
+            for key, expected in guards.items():
+                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                if (json.loads(row[0]) if row else None) != expected:
+                    raise StateConflict("Resolution admission inputs changed; preserve the original wait")
+            current = self._resolution_wait_questions(db, rid, question_keys)
+            if current != questions or any(q["answer"] is not None for q in current):
+                raise StateConflict("Resolution admission cannot replace a concurrent human answer")
+            for key, value in updates.items():
+                self._put(db, rid, key, value)
+            self._put(db, rid, receipt, record)
+            for key in question_keys:
+                db.execute("UPDATE questions SET superseded=1 WHERE run_id=? AND key=? AND answer IS NULL",
+                           (rid, key))
+            self._event(db, rid, "environment.diagnosis_admitted", {
+                "receipt": receipt, "observation": record["observation"],
+                "failure": record["failure"]["id"], "initial_action": "diagnose",
+                "questions": [q["id"] for q in questions]})
+
     def refresh_design_questions(self, rid, previous, updated, keys, questions, history_key, record):
         """Publish a reconciled design proposal without losing concurrent human answers."""
         with self.connect() as db:
