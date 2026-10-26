@@ -1,0 +1,1888 @@
+{
+  "run_id": "run_22419c9eef564f2b",
+  "journal_key": "plan_revision/journal/6ddaebc4bf90bb9dcbe22cdf50667190ebe2cb16d65740ea6003f7565c69fac3/2",
+  "journal_hash": "5e9f9a6bf229c3c4378e2300c5e93908bde45e3bf9cdf00254c9478a8cb65b1d",
+  "revision_1": {
+    "summary": "提交两项顺序实施任务，保留原任务来源、人工原型批准和全部业务验收。原生取消改用项目自有的 Xvfb/XTEST 自动化路径，并提供官方机制依据；实际执行与附件仍须后续检查和独立审核。本轮未修改文件、安装依赖或执行产品测试。",
+    "document": "本计划依据 source_ref=specification、source_ref=design.document（material_id=material-e76706d3ee867b7c589e）及 source_ref=design_review。已完整读取工作区的正式设计和需求文档；sha256sum 返回 docs/aa2/design.md 的哈希为 380ea397da833e241d0e8168b1c38835a67e8cca6e1f330d39142537c7fc85c7，与批准记录一致。文件发现列出 15 个公开文件，内容为需求、设计、研究和原型；本轮没有产品执行结果。过滤视图不用于判断执行主机的依赖或生成目录是否存在。\n\nsource_ref=prototype_approval.status 为 approved，人工 question_id=question_84fc53abd6b149f1，artifact_hash=d37d428ea28a27ea032c95a71119b9fe99a0667b4c0efdd322ff9e4f5fd1089b。该回执满足原型门禁；不修改 DESIGN.md 的历史文字，不重新请求批准。正式设计规定产品入口为 /，它对应原型 /reading/index.html 的同一业务页面；原型 scenario 参数和 responsive.html 是演示设施，不是新增产品路由。\n\n任务图只有 TASK-001 → TASK-002。两个 origin_id 分别继承 source_ref=task_origins 的同名记录，不重置预算。TASK-001 独占业务源码、依赖清单、构建配置、单元测试和原生桌面辅助模块；TASK-002 读取这些成果，新增浏览器用例、浏览器配置和证据辅助模块。第二项不得修改业务源码或第一项已有断言；发现缺陷按原任务范围修复。DESIGN.md、docs/aa2、docs/requirements、design/prototypes 均不进入实施任务的可写范围。\n\n针对 source_ref=feedback.correction_request、source_ref=unresolved_issues[0] 和 source_ref=unresolved_issues[1]，本轮正式替换未落实的人工执行方法。真实取消、可见反馈、完整集合比较、刷新比较和操作记录全部保留。人工辅助是先前模型的方法选择；本轮选择由测试进程创建私有 X11 会话并操作真实系统选择器，不要求用户访问控制器桌面，也不要求控制器增加桌面交互服务。\n\n对应更正如下：EVID-TASK-002-NATIVE-EXECUTION 继续绑定 TASK-002.acceptance[4]；EVID-TASK-002-NATIVE-CHECK-EXECUTION 继续绑定 TASK-002.checks[1]；EVID-FINAL-NATIVE-EXECUTION 继续绑定 final_checks[3]。旧的未知外部操作者依赖改为下述声明依赖、项目夹具、直接运行器和有界操作流程。三个条目中的附件收集映射到已有 test_file_attachments；真实操作由项目测试代码执行，附件能力本身不执行或证明原生操作。这项更正仍须计划独立审核，不自行关闭历史发现。\n\n自动化方法的依据逐项如下，均只支持机制可行性，不证明当前环境已安装或产品已通过：\n\n- Playwright 官方 CI 文档明确支持 Linux 上通过 Xvfb 运行有界面浏览器。版本为 2026-10-25 查阅的在线文档。[官方说明](https://playwright.dev/docs/ci#running-headed)\n- conda-forge 的 xorg-xvfb-server 配方声明 Linux 包、Xvfb 二进制及启动检查；本次读取的配方版本为 21.1.25。它是可声明的环境依赖，不作为本项目安装成功证据。[完整配方](https://raw.githubusercontent.com/conda-forge/xorg-xvfb-server-feedstock/main/recipe/meta.yaml)\n- XTEST 2.2 协议规定按键输入经 X 服务器进行正常事件传播；python-xlib 0.33 提供对应 KeyPress/KeyRelease 接口。测试将这些输入发送给已识别的真实选择器窗口。[XTEST 协议](https://www.x.org/releases/X11R7.7/doc/xextproto/xtest.html)、[固定版本接口](https://raw.githubusercontent.com/python-xlib/python-xlib/0.33/Xlib/ext/xtest.py)\n- CDP 的文件选择拦截会阻止原生窗口出现，因此原生取消用例必须关闭拦截。Playwright v1.63.0 源码显示该拦截可关闭；该源码版本不是产品已安装版本。[CDP 定义](https://raw.githubusercontent.com/ChromeDevTools/devtools-protocol/master/pdl/domains/Page.pdl)、[Playwright 实现](https://raw.githubusercontent.com/microsoft/playwright/v1.63.0/packages/playwright-core/src/server/chromium/crPage.ts)\n- Chromium 当前 GTK 实现创建真实文件对话框，并将取消响应转交 FileSelectionCanceled；Portal 不可用时存在本地选择器回退。版本为 2026-10-25 读取的 main 分支。[GTK 实现](https://raw.githubusercontent.com/chromium/chromium/main/ui/gtk/select_file_dialog_linux_gtk.cc)、[Portal 回退](https://raw.githubusercontent.com/chromium/chromium/main/ui/shell_dialogs/select_file_dialog_linux_portal.cc)\n\nTASK-001 创建 environment.yml，声明 conda-forge 的 nodejs、python、xorg-xvfb-server、gtk3、python-xlib、pillow。Node 选择兼容工具链的 22.x，至少 22.18；Python 选择 3.12。具体包约束须在候选中依据发布元数据确定，环境阶段检查实际完整解析结果。Python 仅用于测试窗口输入和 PNG 捕获，不引入业务后端。requirements_file 留空，不使用 pytest。package.json 声明 React、react-dom、TypeScript、Vite、Vitest、@playwright/test 及所需类型包；版本必须支持冻结的命令参数并满足 engine/peer 约束。\n\n当前没有产品 package-lock.json；首次 npm 锁由 EnvironmentManager 在清单应用后执行真实解析生成，再执行 npm ci。实施代理不得手写锁或安装依赖。npm 锁是环境阶段材料化的项目文件，不冒称 dependency_locks 收集器提供 npm 解析审计。环境审核读取完整 npm 锁和相关依赖包含链；Conda/Python 的安装身份与锁使用已声明收集能力。没有义务要求收集器提供其未记录的全局求解器配置。安装、构建和检查均位于候选生成、适用的保护审核和应用之后。\n\n原生桌面辅助模块提供启动、窗口查询、输入、截图和清理接口，全部子进程使用参数数组且 shell=false。它以 Xvfb 的自动显示号机制创建私有显示器，关闭 TCP 监听；只向测试子进程传递该 DISPLAY，并采用 X11 浏览器后端。浏览器及文件选择器使用临时配置和测试文件目录，不连接用户浏览器或桌面，不改 HOME、权限或用户数据。原生窗口截图只包含测试内容。可在临时 Chromium 配置中设置 selectfile.last_directory 为测试目录；该偏好有官方定义。[偏好定义](https://chromium.googlesource.com/chromium/src/+/cd97647436f2c251cc6cd74d9302d9ce79a7957f/chrome/common/pref_names.h)\n\nnative-cancel 项目使用环境管理器准备的项目匹配 Chromium，以 headed 模式启动。夹具隔离继承的桌面会话，使本地选择器在私有显示器中出现；缺少库、XTEST、窗口或协议支持均报告具体失败，不自动降级为人工步骤。执行顺序为：\n\n1. 在临时产品浏览器中通过 UI 建立非空集合，独立构造预期数据，保存完整持久化原文和四字段基线。\n2. 只安装观察 cancel 事件的监听器，记录 isTrusted、目标和时间；不安装 Playwright filechooser 拦截监听器，并明确发送 enabled=false 的拦截配置。\n3. 点击产品真实选择文件入口；等待私有 X11 中出现属于该 Chromium 的可见选择器窗口。通过窗口类型、进程归属和 transient 父窗口关系识别，不能把网页 dialog 当作系统窗口。记录窗口属性并从 X11 实际像素生成打开状态 PNG。\n4. 将焦点放到该系统窗口，经 XTEST 发送 Escape 的按下和释放；等待该窗口关闭以及浏览器返回可信 cancel 事件。\n5. 同时断言取消反馈实际可见且文字正确、没有可提交的旧预览、完整集合与基线相同；重新加载产品页面，再比较全部四字段与存储原文。\n6. 保存窗口出现/关闭、输入动作、事件、前后状态和刷新结果，附加实际 PNG/JSON。finally 关闭浏览器、辅助进程和 Xvfb。\n\nXvfb 启动限 15 秒、窗口出现和关闭各限 15 秒，单个原生业务测试限 120 秒，整个原生命令限 240 秒，清理限 10 秒。禁止 dispatchEvent 伪造 cancel、CDP cancel=true、setInputFiles([])、页面键盘事件或手写成功标志替代上述系统窗口操作。XTEST 是驱动真实窗口的输入方法，窗口及业务结果仍必须独立观测。\n\nruntime-probe.mjs 是最长 60 秒的非持久健康检查：读取项目依赖身份、导入运行工具、检查 Python 模块及 GTK 加载、启动临时 Xvfb、查询 XTEST 并启动/关闭 about:blank 的 headed Chromium。它不操作产品数据、不运行产品文件取消验收、不留下服务。通过这个探针仅证明当次启动条件；不能代替 native-cancel 用例。\n\nTASK-001 按正式设计实现领域、存储、文件、应用控制器和 React UI 的组合边界。保留四字段原值及精确 ID 唯一性；单键 yejian.entries.v1 保存完整 Envelope，只有 setItem 成功后才发布新集合和成功反馈。读取损坏时阻塞危险操作并保留原文。导入采用独立候选和读取序号，整批有效后才显示替换预览，明确确认后才提交；取消或销毁使旧读取失效。导出重新读取完整持久化集合，使用真实 Blob 下载。搜索覆盖三字段，标签取交集，区分无记录与无匹配。页面沿用批准的中文视觉、模态框、焦点与响应式规则。\n\n冻结 24 个 Vitest 用例，三个文件各 8 个，不以空用例凑数：\n\n| 文件 | 八项业务检查 |\n| --- | --- |\n| tests/unit/entries.test.ts | 有效原值与扩展字段；混合坏批次整批失败；精确 ID 与空白规则；新增 ID 碰撞/生成异常；编辑稳定 ID 与不可变输入；删除目标及不存在目标；三字段搜索；精确标签、无标签和交集 |\n| tests/unit/storage.test.ts | 缺键不写入；有效完整读取；getter 失败；getItem 失败；损坏/版本/坏记录保留原文；有效保存只写一次；setItem 异常不回写；无效候选不写入 |\n| tests/unit/library.test.ts | 提交失败保留集合和草稿；导入确认前不写及确认一次提交；读取/解析失败不提交；读取中取消；旧读取晚于新读取；销毁后读取结束；重复确认不重复提交；导出读取完整持久化集合及读取失败处理 |\n\n冻结普通 Chromium 项目 66 个浏览器用例，native-cancel 项目 1 个。普通项目只在 responsive.spec.ts 参数化三个视口，不把所有业务用例乘以视口数量。\n\n| 用例组 | 数量 | 检查内容 |\n| --- | ---: | --- |\n| CRUD | 3 | UI 新增两条不同标签记录并编辑、稳定 ID/刷新；删除取消；删除确认及刷新 |\n| 搜索筛选 | 4 | 标题、正文、标签搜索各一项；标签、无标签、交集、清除及无匹配一项 |\n| 表单错误 | 10 | 新增/编辑 × 标题/正文 × 空/纯空白共八项；两个模式的双字段同时错误各一项 |\n| 存储失败 | 10 | getter/getItem、损坏 JSON、未知版本、坏记录共五项；新增/编辑/删除/导入写失败四项；导出重新读取失败一项 |\n| 文件导出及往返 | 3 | 筛选时完整下载；空集合真实下载；实际下载文件在独立上下文上传及刷新比较 |\n| 有效导入与取消 | 5 | 原值、长文本、空标签及再次选择同一文件；正常预览取消；空数组取消再确认；文件读取失败；读取中取消及过期结果 |\n| 非法导入 | 28 | 非法 JSON 一项；顶层 null/数组/标量三项；版本缺失/错误数字/字符串三项；entries 缺失/null/对象三项；成员 null/数组/标量三项；四字段逐项缺失四项；四字段逐项错误类型四项；重复 ID 一项；ID/标题/正文分别空和纯空白六项 |\n| 响应式 | 3 | 1280×800、390×844、320×844 各一项 |\n\n每类非法导入使用实际磁盘文件，并至少有一批有效记录在前、坏记录在后。失败、取消和确认前均比较完整集合，刷新后再次比较；错误和成功消息同时检查可见性及对应文字。存储或文件读取故障只由测试夹具注入，撤销故障后刷新复查，不增加产品演示开关。\n\n真实往返必须先等待 download，点击导出并 saveAs，在来源上下文关闭前保存文件；独立 BrowserContext 先建立不同的目标数据，再通过 filechooser.setFiles 上传刚保存的同一路径。比较真实文件的数字 schemaVersion、全部记录和四字段；验证预览数量、替换说明、确认前不变、确认后成功反馈及刷新结果。有效原值包括换行、前后空白、空标签和长正文。预期值由测试输入和业务步骤独立建立，不调用产品序列化或校验函数生成预期。\n\n响应式用例在三个真实产品视口逐一操作新增、编辑、删除及导入确认/取消，并检查搜索和导出可用。覆盖长标题、正文、标签、表单错误、导入错误和确认区域；检查文档横向溢出、控件边界、祖先裁切、可见性、滚动可达性及实际操作结果。记录真实视口 PNG；不使用缩放 iframe、截图尺寸或 DOM 文本存在代替可用性。\n\n每个浏览器用例把相关 checkpoint 合并为一个完整状态 JSON，减少重复附件而不删减内容。JSON 包含测试/上下文标识、URL、实际视口、完整存储原文、完整四字段集合、可见卡片原文、独立预期、逐 ID 比较、消息和必要几何数据；失败和取消同时保存前后及刷新状态。文件链记录实际路径、字节长度、哈希、来源和目标上下文、预览及确认结果。原生用例另存窗口和输入操作记录。字符串精确比较不采用会规范化空白的文本断言代替。\n\n所有必需 PNG、JSON、下载文件先写到 testInfo.outputPath，再 await testInfo.attach(name, {path, contentType})。遵守控制器选定的输出目录；本地默认 test-results。只使用临时合成数据，关闭可选视频，trace 默认关闭、仅诊断时开启。附件失败保留原始测试错误并报告缺口；数量、路径或 capture complete 都不能替代完整内容及来源身份。必需附件超出收集策略时保留缺失结论，不截断或降低断言。\n\n只读验证配置：tsconfig.json 设 noEmit=true、incremental=false、composite=false，不生成声明或 tsbuildinfo；类型检查包含业务和测试 TypeScript。Vite 使用原生加载的 vite.config.mjs，避免在源目录生成临时配置；Vitest 使用 runner 配置加载，关闭结果及磁盘模块缓存，必要临时文件仅放系统临时目录。[Vite 配置加载](https://vite.dev/config/#config-loading)、[Vitest CLI](https://vitest.dev/guide/cli#configloader)、[Vitest 缓存](https://vitest.dev/config/cache)。具体依赖版本在环境阶段核对这些选项，不因运行器参数错误修改业务断言。\n\nruntime_prepare 的生产构建在每个消费工作区及主检出中形成 dist；生成目录不依赖 Git 任务集成转移。浏览器夹具只对已有 dist 启动 127.0.0.1 静态预览，使用临时端口，测试结束关闭，不调用 build。缺少或漂移的构建产物导致失败，不能跳过测试。最终顺序为环境准备、当前源码生产构建、类型和单元检查、66 项浏览器检查、1 项原生取消检查、只读产品预览及最终独立审核。实际执行顺序以控制器提供的 verification_contract 为准；本轮未收到执行观察，不虚构指纹或成功回执。\n\nevidence_contract 使用供应的 catalog/source hashes。安装快照和 Conda/Python 锁只承担其声明的观察范围；共享浏览器身份仅在共享缓存启用且选定产品浏览器时要求。普通编译退出状态和直接运行器测试报告由命令合同处理，不虚构新的收集器。浏览器业务附件的验收条款、任务命令和最终命令全部列入证据映射。审核仍须分别检查源码状态转换、实际断言和已收集完整内容，不能仅凭通过数量接受产品。",
+    "mode": "implementation",
+    "tasks": [
+      {
+        "id": "TASK-001",
+        "origin_id": "TASK-001",
+        "title": "实现页间应用、单元检查与测试环境基础",
+        "description": "依照已批准正式设计实现 React/Vite/TypeScript 产品及 24 个单元用例。创建 npm/Conda 清单、只读构建配置、非持久启动探针，以及供后续原生取消检查调用的私有 Xvfb/XTEST 辅助模块。环境管理器负责依赖安装、首次 npm 锁生成和匹配浏览器准备。仅提出本任务路径内的候选变更。",
+        "requirement_ids": [
+          "REQ-001",
+          "REQ-002",
+          "REQ-003",
+          "REQ-004",
+          "REQ-005",
+          "REQ-006",
+          "REQ-007",
+          "REQ-008",
+          "REQ-009",
+          "REQ-011",
+          "REQ-012"
+        ],
+        "depends_on": [],
+        "allowed_paths": [
+          ".gitignore",
+          "package.json",
+          "environment.yml",
+          "index.html",
+          "tsconfig.json",
+          "vite.config.mjs",
+          "vitest.config.mjs",
+          "src/",
+          "tests/unit/",
+          "tests/support/native-desktop.mjs",
+          "tests/support/native-x11.py",
+          "scripts/runtime-probe.mjs"
+        ],
+        "acceptance": [
+          "遵循已批准的 docs/aa2/design.md；人工原型批准依据为 question_84fc53abd6b149f1 与 artifact_hash=d37d428ea28a27ea032c95a71119b9fe99a0667b4c0efdd322ff9e4f5fd1089b，不修改阶段拥有的设计、需求或原型文件。",
+          "中文单页完整实现四字段、稳定唯一 ID、CRUD、三字段搜索、单标签及无标签筛选、两类空状态、完整集合导出和校验后替换导入；运行不依赖业务后端、账号或外部服务。",
+          "统一提交先完整校验并保存再发布；读取损坏、写入失败、无效输入和取消均保留已有数据，显示具体可见反馈；导入原值、空数组确认和过期读取处理符合正式设计。",
+          "页面保持批准的视觉与交互结构、纯文本换行、可访问表单和模态框；支持 1280×800、390×844、320×844，产品不包含原型演示设施。",
+          "落地全部直接运行器及只读配置；首次 package-lock.json 由 EnvironmentManager 在应用清单后真实生成，再执行 npm ci。审阅完整 npm 锁、engine、peer 和包含链，不手写锁或修改既有保护断言。",
+          "环境阶段提供当前选定 Python 运行时及原生测试依赖的实际安装身份和来源记录；仅按 installed_dependency_snapshot 的记录范围判断，not_recorded 不作为来源已验证。",
+          "环境阶段提供当前 Conda/Python 完整安装锁及身份哈希，核对 environment.yml 与依赖边；dependency_locks 不替代 npm 锁，也不证明未收集的全局求解配置。",
+          "原生辅助模块通过声明依赖创建私有 X11 会话，支持真实窗口查询、XTEST 输入、实际像素 PNG 和有界清理；启动探针不依赖人工桌面、不留下服务、不接触用户数据。",
+          "24 个规定单元用例和无输出类型检查通过，runtime_prepare 生产构建成功；缺少依赖、探针失败或生成产物缺失时如实失败，不跳过检查。"
+        ],
+        "checks": [
+          {
+            "argv": [
+              "node",
+              "node_modules/typescript/bin/tsc",
+              "--project",
+              "tsconfig.json",
+              "--noEmit"
+            ],
+            "cwd": ".",
+            "timeout": 120,
+            "expected_tests": 0,
+            "inputs": [
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "src",
+              "tests/unit"
+            ],
+            "outputs": []
+          },
+          {
+            "argv": [
+              "node",
+              "node_modules/vitest/vitest.mjs",
+              "run",
+              "tests/unit",
+              "--config",
+              "vitest.config.mjs",
+              "--configLoader",
+              "runner",
+              "--no-cache"
+            ],
+            "cwd": ".",
+            "timeout": 180,
+            "expected_tests": 24,
+            "inputs": [
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "vitest.config.mjs",
+              "src",
+              "tests/unit"
+            ],
+            "outputs": []
+          },
+          {
+            "argv": [
+              "node",
+              "scripts/runtime-probe.mjs"
+            ],
+            "cwd": ".",
+            "timeout": 60,
+            "expected_tests": 0,
+            "inputs": [
+              "environment.yml",
+              "package.json",
+              "package-lock.json",
+              "scripts/runtime-probe.mjs",
+              "tests/support/native-desktop.mjs",
+              "tests/support/native-x11.py"
+            ],
+            "outputs": []
+          }
+        ]
+      },
+      {
+        "id": "TASK-002",
+        "origin_id": "TASK-002",
+        "title": "完成真实浏览器业务验收与证据归档",
+        "description": "在 TASK-001 的生产构建上新增 66 个普通 Chromium 用例和 1 个原生取消用例，覆盖独立上下文真实文件往返、所有非法输入、失败与取消不变、刷新和三视口操作。使用项目自有桌面辅助模块完成原生操作；使用已有附件协议提交完整实际文件。测试预期独立于业务实现。",
+        "requirement_ids": [
+          "REQ-001",
+          "REQ-002",
+          "REQ-003",
+          "REQ-004",
+          "REQ-005",
+          "REQ-006",
+          "REQ-007",
+          "REQ-008",
+          "REQ-009",
+          "REQ-010",
+          "REQ-011",
+          "REQ-012"
+        ],
+        "depends_on": [
+          "TASK-001"
+        ],
+        "allowed_paths": [
+          "playwright.config.ts",
+          "tests/e2e/",
+          "tests/support/browser-fixtures.ts",
+          "tests/support/evidence.ts",
+          "tests/support/product-server.ts"
+        ],
+        "acceptance": [
+          "通过真实操作验证 CRUD、搜索筛选、表单错误和存储失败；反馈同时断言可见性及对应文字，完整四字段集合在操作后和刷新后比较，并保存完整状态 JSON。",
+          "实际下载完整及空集合 JSON；筛选不影响导出。在独立上下文通过文件选择器上传实际下载的同一文件，验证预览、替换、可见成功反馈及刷新后的逐 ID 四字段精确相等，归档实际文件和来源链。",
+          "28 类非法导入逐项使用真实文件，显示具体可见错误；包括好坏混合批次，操作前、失败后和刷新后的完整集合相同，归档输入及完整状态比较。",
+          "有效导入保留空标签、换行、前后空白和长文本；预览取消、读取中取消及过期结果不写入；空数组取消不变、明确确认后清空且刷新保持，归档完整状态。",
+          "实际打开并取消产品系统文件选择器，观察真实窗口出现和关闭、可信 cancel 事件及可见取消反馈；完整集合在取消前后和刷新后相同，归档实际窗口 PNG、操作记录和完整状态 JSON。",
+          "在 1280×800、390×844、320×844 实际操作主要流程，验证长内容、错误、确认和取消控件的可见性、位置及可达性且无横向溢出，归档原尺寸 PNG、几何数据与业务状态。",
+          "所有必需 PNG、JSON 和下载文件写入 testInfo.outputPath 后以 path 附件提交；验收读取实际捕获内容及来源身份，缺失或截断阻止接受，视频默认关闭。",
+          "启用共享缓存并选定产品浏览器时，核对 shared_product_browser_identity 的实际绑定；未启用时不要求该条件记录。测试附件仍记录实际驱动和浏览器版本，不使用原型身份代替。",
+          "普通项目完成 66 项、原生项目完成 1 项，不以跳过、合成取消或降低断言取得通过；保留测试保护及最终独立审核。"
+        ],
+        "checks": [
+          {
+            "argv": [
+              "node",
+              "node_modules/@playwright/test/cli.js",
+              "test",
+              "--config",
+              "playwright.config.ts",
+              "--project",
+              "chromium"
+            ],
+            "cwd": ".",
+            "timeout": 900,
+            "expected_tests": 66,
+            "inputs": [
+              "dist",
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "vite.config.mjs",
+              "playwright.config.ts",
+              "tests/e2e",
+              "tests/support"
+            ],
+            "outputs": []
+          },
+          {
+            "argv": [
+              "node",
+              "node_modules/@playwright/test/cli.js",
+              "test",
+              "--config",
+              "playwright.config.ts",
+              "--project",
+              "native-cancel"
+            ],
+            "cwd": ".",
+            "timeout": 240,
+            "expected_tests": 1,
+            "inputs": [
+              "dist",
+              "environment.yml",
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "vite.config.mjs",
+              "playwright.config.ts",
+              "tests/e2e/native-cancel.spec.ts",
+              "tests/support"
+            ],
+            "outputs": []
+          }
+        ]
+      }
+    ],
+    "final_checks": [
+      {
+        "argv": [
+          "node",
+          "node_modules/typescript/bin/tsc",
+          "--project",
+          "tsconfig.json",
+          "--noEmit"
+        ],
+        "cwd": ".",
+        "timeout": 120,
+        "expected_tests": 0,
+        "inputs": [
+          "package.json",
+          "package-lock.json",
+          "tsconfig.json",
+          "src",
+          "tests",
+          "playwright.config.ts"
+        ],
+        "outputs": []
+      },
+      {
+        "argv": [
+          "node",
+          "node_modules/vitest/vitest.mjs",
+          "run",
+          "tests/unit",
+          "--config",
+          "vitest.config.mjs",
+          "--configLoader",
+          "runner",
+          "--no-cache"
+        ],
+        "cwd": ".",
+        "timeout": 180,
+        "expected_tests": 24,
+        "inputs": [
+          "package.json",
+          "package-lock.json",
+          "tsconfig.json",
+          "vitest.config.mjs",
+          "src",
+          "tests/unit"
+        ],
+        "outputs": []
+      },
+      {
+        "argv": [
+          "node",
+          "node_modules/@playwright/test/cli.js",
+          "test",
+          "--config",
+          "playwright.config.ts",
+          "--project",
+          "chromium"
+        ],
+        "cwd": ".",
+        "timeout": 900,
+        "expected_tests": 66,
+        "inputs": [
+          "dist",
+          "package.json",
+          "package-lock.json",
+          "tsconfig.json",
+          "vite.config.mjs",
+          "playwright.config.ts",
+          "tests/e2e",
+          "tests/support"
+        ],
+        "outputs": []
+      },
+      {
+        "argv": [
+          "node",
+          "node_modules/@playwright/test/cli.js",
+          "test",
+          "--config",
+          "playwright.config.ts",
+          "--project",
+          "native-cancel"
+        ],
+        "cwd": ".",
+        "timeout": 240,
+        "expected_tests": 1,
+        "inputs": [
+          "dist",
+          "environment.yml",
+          "package.json",
+          "package-lock.json",
+          "tsconfig.json",
+          "vite.config.mjs",
+          "playwright.config.ts",
+          "tests/e2e/native-cancel.spec.ts",
+          "tests/support"
+        ],
+        "outputs": []
+      }
+    ],
+    "environment_file": "environment.yml",
+    "requirements_file": "",
+    "preview": {
+      "command": {
+        "argv": [
+          "node",
+          "node_modules/vite/bin/vite.js",
+          "preview",
+          "--config",
+          "vite.config.mjs",
+          "--configLoader",
+          "native",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "{port}",
+          "--strictPort"
+        ],
+        "cwd": ".",
+        "timeout": 60,
+        "expected_tests": 0,
+        "inputs": [
+          "dist",
+          "package.json",
+          "package-lock.json",
+          "vite.config.mjs"
+        ],
+        "outputs": []
+      },
+      "routes": [
+        "/"
+      ],
+      "actions": [
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#page-title",
+          "value": "值得留下的文字"
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#new-entry",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#save-entry",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_visible",
+          "selector": "#title-error",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#title-error",
+          "value": "标题不能为空或只含空白，请填写标题。"
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#excerpt-error",
+          "value": "正文不能为空或只含空白，请填写摘录正文。"
+        },
+        {
+          "route": "/",
+          "action": "fill",
+          "selector": "#entry-title",
+          "value": "预览验收摘录"
+        },
+        {
+          "route": "/",
+          "action": "fill",
+          "selector": "#entry-excerpt",
+          "value": "第一行阅读笔记。\n第二行阅读笔记。"
+        },
+        {
+          "route": "/",
+          "action": "fill",
+          "selector": "#entry-tag",
+          "value": "预览"
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#save-entry",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#notice-message",
+          "value": "已新增摘录。"
+        },
+        {
+          "route": "/",
+          "action": "fill",
+          "selector": "#search",
+          "value": "预览验收摘录"
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#entries .entry-title",
+          "value": "预览验收摘录"
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#entries [data-action=\"edit\"]",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "fill",
+          "selector": "#entry-title",
+          "value": "预览验收摘录（修订）"
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#save-entry",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#notice-message",
+          "value": "已保存修改。"
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#entries .entry-title",
+          "value": "预览验收摘录（修订）"
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#entries [data-action=\"delete\"]",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_visible",
+          "selector": "#delete-dialog",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#cancel-delete",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#notice-message",
+          "value": "已取消删除，摘录未更改。"
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#open-import",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_visible",
+          "selector": "#choose-file",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#cancel-import",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#notice-message",
+          "value": "已取消导入，摘录未更改。"
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#clear-filters",
+          "value": ""
+        }
+      ]
+    },
+    "runtime_prepare": [
+      {
+        "argv": [
+          "node",
+          "node_modules/vite/bin/vite.js",
+          "build",
+          "--config",
+          "vite.config.mjs",
+          "--configLoader",
+          "native"
+        ],
+        "cwd": ".",
+        "timeout": 180,
+        "expected_tests": 0,
+        "inputs": [
+          "package.json",
+          "package-lock.json",
+          "index.html",
+          "tsconfig.json",
+          "vite.config.mjs",
+          "src"
+        ],
+        "outputs": [
+          "dist"
+        ]
+      }
+    ],
+    "runtime_probes": [
+      {
+        "argv": [
+          "node",
+          "scripts/runtime-probe.mjs"
+        ],
+        "cwd": ".",
+        "timeout": 60,
+        "expected_tests": 0,
+        "inputs": [
+          "environment.yml",
+          "package.json",
+          "package-lock.json",
+          "scripts/runtime-probe.mjs",
+          "tests/support/native-desktop.mjs",
+          "tests/support/native-x11.py"
+        ],
+        "outputs": []
+      }
+    ],
+    "evidence_contract": {
+      "version": 1,
+      "catalog_hash": "fc67f751fb1b2af2fee31fb34c29b3ef4b7729ac3318c6102dad13255072b12a",
+      "source_binding": "6da8c69f8d4fa08837ee312c7bbf9aa70164f07cc2f748701ea759abbb95d885",
+      "obligations": [
+        {
+          "id": "EVID-TASK-001-INSTALLED-DEPENDENCIES",
+          "target": "acceptance",
+          "task_id": "TASK-001",
+          "index": 5,
+          "value": "环境阶段提供当前选定 Python 运行时及原生测试依赖的实际安装身份和来源记录；仅按 installed_dependency_snapshot 的记录范围判断，not_recorded 不作为来源已验证。",
+          "origin": "model_derived",
+          "requirement_ids": [
+            "REQ-001",
+            "REQ-009",
+            "REQ-012"
+          ],
+          "capability": "installed_dependency_snapshot",
+          "capability_version": 1,
+          "producer": "EnvironmentManager",
+          "production_stage": "environment",
+          "required_stage": "environment"
+        },
+        {
+          "id": "EVID-TASK-001-DEPENDENCY-LOCKS",
+          "target": "acceptance",
+          "task_id": "TASK-001",
+          "index": 6,
+          "value": "环境阶段提供当前 Conda/Python 完整安装锁及身份哈希，核对 environment.yml 与依赖边；dependency_locks 不替代 npm 锁，也不证明未收集的全局求解配置。",
+          "origin": "model_derived",
+          "requirement_ids": [
+            "REQ-001",
+            "REQ-009",
+            "REQ-012"
+          ],
+          "capability": "dependency_locks",
+          "capability_version": 1,
+          "producer": "EnvironmentManager",
+          "production_stage": "environment",
+          "required_stage": "environment"
+        },
+        {
+          "id": "EVID-TASK-002-CRUD-STATE",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 0,
+          "value": "通过真实操作验证 CRUD、搜索筛选、表单错误和存储失败；反馈同时断言可见性及对应文字，完整四字段集合在操作后和刷新后比较，并保存完整状态 JSON。",
+          "origin": "user",
+          "requirement_ids": [
+            "REQ-002",
+            "REQ-003",
+            "REQ-004",
+            "REQ-005",
+            "REQ-010",
+            "REQ-011"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-FILE-ROUNDTRIP",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 1,
+          "value": "实际下载完整及空集合 JSON；筛选不影响导出。在独立上下文通过文件选择器上传实际下载的同一文件，验证预览、替换、可见成功反馈及刷新后的逐 ID 四字段精确相等，归档实际文件和来源链。",
+          "origin": "user",
+          "requirement_ids": [
+            "REQ-006",
+            "REQ-007",
+            "REQ-010",
+            "REQ-011"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-INVALID-IMPORT",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 2,
+          "value": "28 类非法导入逐项使用真实文件，显示具体可见错误；包括好坏混合批次，操作前、失败后和刷新后的完整集合相同，归档输入及完整状态比较。",
+          "origin": "user",
+          "requirement_ids": [
+            "REQ-008",
+            "REQ-011"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-IMPORT-CANCELLATION",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 3,
+          "value": "有效导入保留空标签、换行、前后空白和长文本；预览取消、读取中取消及过期结果不写入；空数组取消不变、明确确认后清空且刷新保持，归档完整状态。",
+          "origin": "user",
+          "requirement_ids": [
+            "REQ-007",
+            "REQ-009",
+            "REQ-011"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-NATIVE-EXECUTION",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 4,
+          "value": "实际打开并取消产品系统文件选择器，观察真实窗口出现和关闭、可信 cancel 事件及可见取消反馈；完整集合在取消前后和刷新后相同，归档实际窗口 PNG、操作记录和完整状态 JSON。",
+          "origin": "user",
+          "requirement_ids": [
+            "REQ-009",
+            "REQ-011"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-RESPONSIVE",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 5,
+          "value": "在 1280×800、390×844、320×844 实际操作主要流程，验证长内容、错误、确认和取消控件的可见性、位置及可达性且无横向溢出，归档原尺寸 PNG、几何数据与业务状态。",
+          "origin": "user",
+          "requirement_ids": [
+            "REQ-011"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-ARCHIVE",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 6,
+          "value": "所有必需 PNG、JSON 和下载文件写入 testInfo.outputPath 后以 path 附件提交；验收读取实际捕获内容及来源身份，缺失或截断阻止接受，视频默认关闭。",
+          "origin": "user",
+          "requirement_ids": [
+            "REQ-010",
+            "REQ-011",
+            "REQ-012"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-SHARED-BROWSER",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 7,
+          "value": "启用共享缓存并选定产品浏览器时，核对 shared_product_browser_identity 的实际绑定；未启用时不要求该条件记录。测试附件仍记录实际驱动和浏览器版本，不使用原型身份代替。",
+          "origin": "model_derived",
+          "requirement_ids": [
+            "REQ-010",
+            "REQ-011",
+            "REQ-012"
+          ],
+          "capability": "shared_product_browser_identity",
+          "capability_version": 1,
+          "producer": "EnvironmentManager",
+          "production_stage": "environment",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-BROWSER-CHECK",
+          "target": "checks",
+          "task_id": "TASK-002",
+          "index": 0,
+          "value": {
+            "argv": [
+              "node",
+              "node_modules/@playwright/test/cli.js",
+              "test",
+              "--config",
+              "playwright.config.ts",
+              "--project",
+              "chromium"
+            ],
+            "cwd": ".",
+            "timeout": 900,
+            "expected_tests": 66,
+            "inputs": [
+              "dist",
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "vite.config.mjs",
+              "playwright.config.ts",
+              "tests/e2e",
+              "tests/support"
+            ],
+            "outputs": []
+          },
+          "origin": "model_derived",
+          "requirement_ids": [
+            "REQ-001",
+            "REQ-002",
+            "REQ-003",
+            "REQ-004",
+            "REQ-005",
+            "REQ-006",
+            "REQ-007",
+            "REQ-008",
+            "REQ-009",
+            "REQ-010",
+            "REQ-011",
+            "REQ-012"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-NATIVE-CHECK-EXECUTION",
+          "target": "checks",
+          "task_id": "TASK-002",
+          "index": 1,
+          "value": {
+            "argv": [
+              "node",
+              "node_modules/@playwright/test/cli.js",
+              "test",
+              "--config",
+              "playwright.config.ts",
+              "--project",
+              "native-cancel"
+            ],
+            "cwd": ".",
+            "timeout": 240,
+            "expected_tests": 1,
+            "inputs": [
+              "dist",
+              "environment.yml",
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "vite.config.mjs",
+              "playwright.config.ts",
+              "tests/e2e/native-cancel.spec.ts",
+              "tests/support"
+            ],
+            "outputs": []
+          },
+          "origin": "model_derived",
+          "requirement_ids": [
+            "REQ-009",
+            "REQ-011",
+            "REQ-012"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-FINAL-BROWSER",
+          "target": "final_checks",
+          "task_id": "",
+          "index": 2,
+          "value": {
+            "argv": [
+              "node",
+              "node_modules/@playwright/test/cli.js",
+              "test",
+              "--config",
+              "playwright.config.ts",
+              "--project",
+              "chromium"
+            ],
+            "cwd": ".",
+            "timeout": 900,
+            "expected_tests": 66,
+            "inputs": [
+              "dist",
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "vite.config.mjs",
+              "playwright.config.ts",
+              "tests/e2e",
+              "tests/support"
+            ],
+            "outputs": []
+          },
+          "origin": "model_derived",
+          "requirement_ids": [
+            "REQ-001",
+            "REQ-002",
+            "REQ-003",
+            "REQ-004",
+            "REQ-005",
+            "REQ-006",
+            "REQ-007",
+            "REQ-008",
+            "REQ-009",
+            "REQ-010",
+            "REQ-011",
+            "REQ-012"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "final_review"
+        },
+        {
+          "id": "EVID-FINAL-NATIVE-EXECUTION",
+          "target": "final_checks",
+          "task_id": "",
+          "index": 3,
+          "value": {
+            "argv": [
+              "node",
+              "node_modules/@playwright/test/cli.js",
+              "test",
+              "--config",
+              "playwright.config.ts",
+              "--project",
+              "native-cancel"
+            ],
+            "cwd": ".",
+            "timeout": 240,
+            "expected_tests": 1,
+            "inputs": [
+              "dist",
+              "environment.yml",
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "vite.config.mjs",
+              "playwright.config.ts",
+              "tests/e2e/native-cancel.spec.ts",
+              "tests/support"
+            ],
+            "outputs": []
+          },
+          "origin": "model_derived",
+          "requirement_ids": [
+            "REQ-009",
+            "REQ-011",
+            "REQ-012"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "final_review"
+        }
+      ]
+    }
+  },
+  "revision_2": {
+    "summary": "提交两项顺序实施任务，保留原任务来源、人工原型批准和全部业务验收。原生取消改用项目自有的 Xvfb/XTEST 自动化路径，并提供官方机制依据；实际执行与附件仍须后续检查和独立审核。本轮未修改文件、安装依赖或执行产品测试。",
+    "document": "本计划依据 source_ref=specification、source_ref=design.document（material_id=material-e76706d3ee867b7c589e）及已接受的 source_ref=plan。正式设计文件 docs/aa2/design.md 的实读哈希为 380ea397da833e241d0e8168b1c38835a67e8cca6e1f330d39142537c7fc85c7；原计划文档哈希为 e89d631d3098d1fa5ba9b30870ae70102d48a5bbaa1b202fae5ec8cc259a0509。过滤视图不用于判断执行主机的依赖、产品源码或生成目录是否存在。\n\n本次针对 failure.id=6ddaebc4bf90bb9dcbe22cdf50667190ebe2cb16d65740ea6003f7565c69fac3 提出 base_revision=1 的最小检查合同修订。source_ref=failure.evidence.checks 只有 tsc、Vitest 和 runtime-probe 三条命令；source_ref=failure.evidence.review.findings[0]、[1] 保留生产构建结果及 dist 完整性证据缺口。TASK-001.acceptance[8] 已要求生产构建成功，原 plan.runtime_prepare[0] 已声明命令，因此在 TASK-001.checks[3] 原样追加该构建命令，含完整 inputs 和 outputs=[dist]。不修改任何验收文字、原检查参数、测试目标、测试数量或实施范围；runtime_prepare、runtime_probes、最终检查、预览和环境文件选择均保持原合同。\n\n已读取 source_ref=source_history，artifact_hash=8a65471b0acceaa8324ea8042dc16ba987f81c2f27c3aaf5b9c5fdf4efb9e432 的 version=4 覆盖合同。baseline 绑定 commit=e9b9cb4361165b23d523b7ad39151909ae123e9e、root_tree=4b825dc642cb6eb9a060e54bf8d69288fbee4904，private_paths_omitted=false；这是该历史提交的完整 tracked tree 边界。observed_only 记录绑定源码 edb4e2f793fe12a11ec463198f43da19a2bc7a91295d4c17d9f5d2587972cdf1，没有完整路径清单；current 的未收录项和比较中的 null 不证明当前产品文件被删除。已读其中 Vite 配置快照 4975838076df8f9edb83862185e0b32daec7cdfd74c4682f5db96994ff23dcda，声明 outDir=dist。它仅支持既有命令与配置的对应关系，不证明构建已执行；历史提案也不证明应用或接受。\n\n沿用 source_ref=plan.tasks[0].acceptance[0] 和 source_ref=failure.evidence.review 记录的人工原型批准：question_id=question_84fc53abd6b149f1，artifact_hash=d37d428ea28a27ea032c95a71119b9fe99a0667b4c0efdd322ff9e4f5fd1089b。不修改 DESIGN.md 的历史文字，不重新请求批准。正式设计规定产品入口为 /，对应原型 /reading/index.html 的同一业务页面；原型 scenario 参数和 responsive.html 是演示设施，不是新增产品路由。\n\n任务图只有 TASK-001 → TASK-002。两个 origin_id 分别继承 source_ref=task_origins 的同名记录，不重置预算。TASK-001 独占业务源码、依赖清单、构建配置、单元测试和原生桌面辅助模块；TASK-002 读取这些成果，新增浏览器用例、浏览器配置和证据辅助模块。第二项不得修改业务源码或第一项已有断言；发现缺陷按原任务范围修复。DESIGN.md、docs/aa2、docs/requirements、design/prototypes 均不进入实施任务的可写范围。\n\n既有计划选择由测试进程创建私有 X11 会话并操作真实系统选择器，不要求用户访问控制器桌面，也不要求控制器增加桌面交互服务。真实取消、可见反馈、完整集合比较、刷新比较和操作记录全部保留。该方法及其历史更正依据见 source_ref=plan.document，本次不重新选择或修改原生自动化方法。\n\nEVID-TASK-002-NATIVE-EXECUTION 继续绑定 TASK-002.acceptance[4]；EVID-TASK-002-NATIVE-CHECK-EXECUTION 继续绑定 TASK-002.checks[1]；EVID-FINAL-NATIVE-EXECUTION 继续绑定 final_checks[3]。项目使用下述声明依赖、夹具、直接运行器和有界操作流程。三个条目中的附件收集映射到已有 test_file_attachments；真实操作由项目测试代码执行，附件能力本身不执行或证明原生操作。\n\n以下机制依据沿用 source_ref=plan.document 的既有研究，本次未重新研究；它们不证明当前环境已安装或产品已通过：\n\n- Playwright 官方 CI 文档支持 Linux 上通过 Xvfb 运行有界面浏览器。原记录版本为 2026-10-25 查阅的在线文档。[官方说明](https://playwright.dev/docs/ci#running-headed)\n- conda-forge 的 xorg-xvfb-server 配方声明 Linux 包、Xvfb 二进制及启动检查；原记录配方版本为 21.1.25。它是可声明的环境依赖，不作为本项目安装成功证据。[完整配方](https://raw.githubusercontent.com/conda-forge/xorg-xvfb-server-feedstock/main/recipe/meta.yaml)\n- XTEST 2.2 协议规定按键输入经 X 服务器正常传播；python-xlib 0.33 提供对应 KeyPress/KeyRelease 接口。测试将这些输入发送给已识别的真实选择器窗口。[XTEST 协议](https://www.x.org/releases/X11R7.7/doc/xextproto/xtest.html)、[固定版本接口](https://raw.githubusercontent.com/python-xlib/python-xlib/0.33/Xlib/ext/xtest.py)\n- CDP 文件选择拦截会阻止原生窗口出现，因此原生取消用例必须关闭拦截。既有研究引用的 Playwright v1.63.0 不是产品已安装版本。[CDP 定义](https://raw.githubusercontent.com/ChromeDevTools/devtools-protocol/master/pdl/domains/Page.pdl)、[Playwright 实现](https://raw.githubusercontent.com/microsoft/playwright/v1.63.0/packages/playwright-core/src/server/chromium/crPage.ts)\n- 既有研究引用 Chromium GTK 创建文件对话框及取消响应实现，以及 Portal 不可用时的本地选择器回退；原记录为 2026-10-25 读取的 main 分支。[GTK 实现](https://raw.githubusercontent.com/chromium/chromium/main/ui/gtk/select_file_dialog_linux_gtk.cc)、[Portal 回退](https://raw.githubusercontent.com/chromium/chromium/main/ui/shell_dialogs/select_file_dialog_linux_portal.cc)\n\nTASK-001 创建 environment.yml，声明 conda-forge 的 nodejs、python、xorg-xvfb-server、gtk3、python-xlib、pillow。Node 选择兼容工具链的 22.x，至少 22.18；Python 选择 3.12。具体包约束须在候选中依据发布元数据确定，环境阶段检查实际完整解析结果。Python 仅用于测试窗口输入和 PNG 捕获，不引入业务后端。requirements_file 留空，不使用 pytest。package.json 声明 React、react-dom、TypeScript、Vite、Vitest、@playwright/test 及所需类型包；版本必须支持冻结的命令参数并满足 engine/peer 约束。本次不修改任何依赖选择或锁文件。\n\n首次 npm 锁由 EnvironmentManager 在清单应用后执行真实解析生成，再执行 npm ci。实施代理不得手写锁或安装依赖；已有锁继续受保护。npm 锁是环境阶段材料化的项目文件，不冒称 dependency_locks 收集器提供 npm 解析审计。环境审核读取完整 npm 锁和相关依赖包含链；Conda/Python 的安装身份与锁使用已声明收集能力。没有义务要求收集器提供其未记录的全局求解器配置。按照 source_ref=controller_stage_contract 的生命周期，安装、构建和检查位于候选生成、适用的保护审核和应用之后；该协议只说明阶段时序，不证明产品或环境已通过。\n\n原生桌面辅助模块提供启动、窗口查询、输入、截图和清理接口，全部子进程使用参数数组且 shell=false。它以 Xvfb 的自动显示号机制创建私有显示器，关闭 TCP 监听；只向测试子进程传递该 DISPLAY，并采用 X11 浏览器后端。浏览器及文件选择器使用临时配置和测试文件目录，不连接用户浏览器或桌面，不改 HOME、权限或用户数据。原生窗口截图只包含测试内容。可在临时 Chromium 配置中设置 selectfile.last_directory 为测试目录；沿用既有研究的[偏好定义](https://chromium.googlesource.com/chromium/src/+/cd97647436f2c251cc6cd74d9302d9ce79a7957f/chrome/common/pref_names.h)。\n\nnative-cancel 项目使用环境管理器准备的项目匹配 Chromium，以 headed 模式启动。夹具隔离继承的桌面会话，使本地选择器在私有显示器中出现；缺少库、XTEST、窗口或协议支持均报告具体失败，不自动降级为人工步骤。执行顺序为：\n\n1. 在临时产品浏览器中通过 UI 建立非空集合，独立构造预期数据，保存完整持久化原文和四字段基线。\n2. 只安装观察 cancel 事件的监听器，记录 isTrusted、目标和时间；不安装 Playwright filechooser 拦截监听器，并明确发送 enabled=false 的拦截配置。\n3. 点击产品真实选择文件入口；等待私有 X11 中出现属于该 Chromium 的可见选择器窗口。通过窗口类型、进程归属和 transient 父窗口关系识别，不能把网页 dialog 当作系统窗口。记录窗口属性并从 X11 实际像素生成打开状态 PNG。\n4. 将焦点放到该系统窗口，经 XTEST 发送 Escape 的按下和释放；等待该窗口关闭以及浏览器返回可信 cancel 事件。\n5. 同时断言取消反馈实际可见且文字正确、没有可提交的旧预览、完整集合与基线相同；重新加载产品页面，再比较全部四字段与存储原文。\n6. 保存窗口出现/关闭、输入动作、事件、前后状态和刷新结果，附加实际 PNG/JSON。finally 关闭浏览器、辅助进程和 Xvfb。\n\nXvfb 启动限 15 秒、窗口出现和关闭各限 15 秒，单个原生业务测试限 120 秒，整个原生命令限 240 秒，清理限 10 秒。禁止 dispatchEvent 伪造 cancel、CDP cancel=true、setInputFiles([])、页面键盘事件或手写成功标志替代上述系统窗口操作。XTEST 是驱动真实窗口的输入方法，窗口及业务结果仍必须独立观测。\n\nruntime-probe.mjs 是最长 60 秒的非持久健康检查：读取项目依赖身份、导入运行工具、检查 Python 模块及 GTK 加载、启动临时 Xvfb、查询 XTEST 并启动/关闭 about:blank 的 headed Chromium。它不操作产品数据、不运行产品文件取消验收、不留下服务。通过这个探针仅证明当次启动条件；不能代替 native-cancel 用例。\n\nTASK-001 按正式设计实现领域、存储、文件、应用控制器和 React UI 的组合边界。保留四字段原值及精确 ID 唯一性；单键 yejian.entries.v1 保存完整 Envelope，只有 setItem 成功后才发布新集合和成功反馈。读取损坏时阻塞危险操作并保留原文。导入采用独立候选和读取序号，整批有效后才显示替换预览，明确确认后才提交；取消或销毁使旧读取失效。导出重新读取完整持久化集合，使用真实 Blob 下载。搜索覆盖三字段，标签取交集，区分无记录与无匹配。页面沿用批准的中文视觉、模态框、焦点与响应式规则。\n\n冻结 24 个 Vitest 用例，三个文件各 8 个，不以空用例凑数：\n\n| 文件 | 八项业务检查 |\n| --- | --- |\n| tests/unit/entries.test.ts | 有效原值与扩展字段；混合坏批次整批失败；精确 ID 与空白规则；新增 ID 碰撞/生成异常；编辑稳定 ID 与不可变输入；删除目标及不存在目标；三字段搜索；精确标签、无标签和交集 |\n| tests/unit/storage.test.ts | 缺键不写入；有效完整读取；getter 失败；getItem 失败；损坏/版本/坏记录保留原文；有效保存只写一次；setItem 异常不回写；无效候选不写入 |\n| tests/unit/library.test.ts | 提交失败保留集合和草稿；导入确认前不写及确认一次提交；读取/解析失败不提交；读取中取消；旧读取晚于新读取；销毁后读取结束；重复确认不重复提交；导出读取完整持久化集合及读取失败处理 |\n\n冻结普通 Chromium 项目 66 个浏览器用例，native-cancel 项目 1 个。普通项目只在 responsive.spec.ts 参数化三个视口，不把所有业务用例乘以视口数量。\n\n| 用例组 | 数量 | 检查内容 |\n| --- | ---: | --- |\n| CRUD | 3 | UI 新增两条不同标签记录并编辑、稳定 ID/刷新；删除取消；删除确认及刷新 |\n| 搜索筛选 | 4 | 标题、正文、标签搜索各一项；标签、无标签、交集、清除及无匹配一项 |\n| 表单错误 | 10 | 新增/编辑 × 标题/正文 × 空/纯空白共八项；两个模式的双字段同时错误各一项 |\n| 存储失败 | 10 | getter/getItem、损坏 JSON、未知版本、坏记录共五项；新增/编辑/删除/导入写失败四项；导出重新读取失败一项 |\n| 文件导出及往返 | 3 | 筛选时完整下载；空集合真实下载；实际下载文件在独立上下文上传及刷新比较 |\n| 有效导入与取消 | 5 | 原值、长文本、空标签及再次选择同一文件；正常预览取消；空数组取消再确认；文件读取失败；读取中取消及过期结果 |\n| 非法导入 | 28 | 非法 JSON 一项；顶层 null/数组/标量三项；版本缺失/错误数字/字符串三项；entries 缺失/null/对象三项；成员 null/数组/标量三项；四字段逐项缺失四项；四字段逐项错误类型四项；重复 ID 一项；ID/标题/正文分别空和纯空白六项 |\n| 响应式 | 3 | 1280×800、390×844、320×844 各一项 |\n\n每类非法导入使用实际磁盘文件，并至少有一批有效记录在前、坏记录在后。失败、取消和确认前均比较完整集合，刷新后再次比较；错误和成功消息同时检查可见性及对应文字。存储或文件读取故障只由测试夹具注入，撤销故障后刷新复查，不增加产品演示开关。\n\n真实往返必须先等待 download，点击导出并 saveAs，在来源上下文关闭前保存文件；独立 BrowserContext 先建立不同的目标数据，再通过 filechooser.setFiles 上传刚保存的同一路径。比较真实文件的数字 schemaVersion、全部记录和四字段；验证预览数量、替换说明、确认前不变、确认后成功反馈及刷新结果。有效原值包括换行、前后空白、空标签和长正文。预期值由测试输入和业务步骤独立建立，不调用产品序列化或校验函数生成预期。\n\n响应式用例在三个真实产品视口逐一操作新增、编辑、删除及导入确认/取消，并检查搜索和导出可用。覆盖长标题、正文、标签、表单错误、导入错误和确认区域；检查文档横向溢出、控件边界、祖先裁切、可见性、滚动可达性及实际操作结果。记录真实视口 PNG；不使用缩放 iframe、截图尺寸或 DOM 文本存在代替可用性。\n\n每个浏览器用例把相关 checkpoint 合并为一个完整状态 JSON，减少重复附件而不删减内容。JSON 包含测试/上下文标识、URL、实际视口、完整存储原文、完整四字段集合、可见卡片原文、独立预期、逐 ID 比较、消息和必要几何数据；失败和取消同时保存前后及刷新状态。文件链记录实际路径、字节长度、哈希、来源和目标上下文、预览及确认结果。原生用例另存窗口和输入操作记录。字符串精确比较不采用会规范化空白的文本断言代替。\n\n所有必需 PNG、JSON、下载文件先写到 testInfo.outputPath，再 await testInfo.attach(name, {path, contentType})。遵守控制器选定的输出目录；本地默认 test-results。只使用临时合成数据，关闭可选视频，trace 默认关闭、仅诊断时开启。附件失败保留原始测试错误并报告缺口；数量、路径或 capture complete 都不能替代完整内容及来源身份。必需附件超出收集策略时保留缺失结论，不截断或降低断言。\n\n只读验证配置：tsconfig.json 设 noEmit=true、incremental=false、composite=false，不生成声明或 tsbuildinfo；类型检查包含业务和测试 TypeScript。Vite 使用原生加载的 vite.config.mjs，避免在源目录生成临时配置；Vitest 使用 runner 配置加载，关闭结果及磁盘模块缓存，必要临时文件仅放系统临时目录。沿用既有研究的 [Vite 配置加载](https://vite.dev/config/#config-loading)、[Vitest CLI](https://vitest.dev/guide/cli#configloader)、[Vitest 缓存](https://vitest.dev/config/cache)。具体依赖版本在环境阶段核对这些选项，不因运行器参数错误修改业务断言。\n\nTASK-001 的检查保留原顺序：无输出类型检查、24 项单元检查、启动探针，随后新增显式生产构建。新增命令完整等同于原 plan.runtime_prepare[0]：argv=[node,node_modules/vite/bin/vite.js,build,--config,vite.config.mjs,--configLoader,native]，cwd=.，timeout=180，expected_tests=0，inputs=[package.json,package-lock.json,index.html,tsconfig.json,vite.config.mjs,src]，outputs=[dist]。构建不是测试套件，0 不改变原有测试 minima。此次增补使已有构建验收在任务检查列表中有明确执行入口，不改变验收时点或技术要求。\n\nruntime_prepare 继续在每个消费工作区及主检出中形成 dist；生成目录不依赖 Git 任务集成转移。浏览器夹具只对已有 dist 启动 127.0.0.1 静态预览，使用临时端口，测试结束关闭，不调用 build。缺少或漂移的构建产物导致失败，不能跳过测试。最终顺序为环境准备、当前源码生产构建、类型和单元检查、66 项浏览器检查、1 项原生取消检查、只读产品预览及最终独立审核。实际执行顺序以控制器提供的 verification_contract 为准。\n\n本次修订经契约校验和独立审核后，由控制器在实际 TASK-001 工作区重新执行有效检查合同，形成当前源码及环境绑定的构建 CheckResult，并在接受前验证当前 dist 指纹。既有预览、旧构建或归档提案不能关闭该缺口；产物缺失、漂移或必需回执不可用时继续拒绝接受。本次仅补检查合同，后续动作是重新验证，不要求重新实现或修改测试。TASK-002 的全部业务证据与最终独立审核仍须完成。\n\nevidence_contract 保留全部 14 项既有映射，使用供应的 catalog/source hashes。安装快照和 Conda/Python 锁只承担其声明的观察范围；共享浏览器身份仅在共享缓存启用且选定产品浏览器时要求。普通编译、构建退出状态、生成输出记录和直接运行器测试报告由命令合同处理，不虚构新的收集器。浏览器业务附件的验收条款、任务命令和最终命令全部列入证据映射。审核仍须分别检查源码状态转换、实际断言和已收集完整内容，不能仅凭通过数量接受产品。本轮只读核对材料与合同，未安装依赖、执行产品测试或授予实现接受。\n",
+    "mode": "implementation",
+    "tasks": [
+      {
+        "id": "TASK-001",
+        "origin_id": "TASK-001",
+        "title": "实现页间应用、单元检查与测试环境基础",
+        "description": "依照已批准正式设计实现 React/Vite/TypeScript 产品及 24 个单元用例。创建 npm/Conda 清单、只读构建配置、非持久启动探针，以及供后续原生取消检查调用的私有 Xvfb/XTEST 辅助模块。环境管理器负责依赖安装、首次 npm 锁生成和匹配浏览器准备。仅提出本任务路径内的候选变更。本次修订仅将既有 runtime_prepare 生产构建命令原样追加到任务检查列表；通过独立审核后重新验证，不要求重新实现。",
+        "requirement_ids": [
+          "REQ-001",
+          "REQ-002",
+          "REQ-003",
+          "REQ-004",
+          "REQ-005",
+          "REQ-006",
+          "REQ-007",
+          "REQ-008",
+          "REQ-009",
+          "REQ-011",
+          "REQ-012"
+        ],
+        "depends_on": [],
+        "allowed_paths": [
+          ".gitignore",
+          "package.json",
+          "environment.yml",
+          "index.html",
+          "tsconfig.json",
+          "vite.config.mjs",
+          "vitest.config.mjs",
+          "src/",
+          "tests/unit/",
+          "tests/support/native-desktop.mjs",
+          "tests/support/native-x11.py",
+          "scripts/runtime-probe.mjs"
+        ],
+        "acceptance": [
+          "遵循已批准的 docs/aa2/design.md；人工原型批准依据为 question_84fc53abd6b149f1 与 artifact_hash=d37d428ea28a27ea032c95a71119b9fe99a0667b4c0efdd322ff9e4f5fd1089b，不修改阶段拥有的设计、需求或原型文件。",
+          "中文单页完整实现四字段、稳定唯一 ID、CRUD、三字段搜索、单标签及无标签筛选、两类空状态、完整集合导出和校验后替换导入；运行不依赖业务后端、账号或外部服务。",
+          "统一提交先完整校验并保存再发布；读取损坏、写入失败、无效输入和取消均保留已有数据，显示具体可见反馈；导入原值、空数组确认和过期读取处理符合正式设计。",
+          "页面保持批准的视觉与交互结构、纯文本换行、可访问表单和模态框；支持 1280×800、390×844、320×844，产品不包含原型演示设施。",
+          "落地全部直接运行器及只读配置；首次 package-lock.json 由 EnvironmentManager 在应用清单后真实生成，再执行 npm ci。审阅完整 npm 锁、engine、peer 和包含链，不手写锁或修改既有保护断言。",
+          "环境阶段提供当前选定 Python 运行时及原生测试依赖的实际安装身份和来源记录；仅按 installed_dependency_snapshot 的记录范围判断，not_recorded 不作为来源已验证。",
+          "环境阶段提供当前 Conda/Python 完整安装锁及身份哈希，核对 environment.yml 与依赖边；dependency_locks 不替代 npm 锁，也不证明未收集的全局求解配置。",
+          "原生辅助模块通过声明依赖创建私有 X11 会话，支持真实窗口查询、XTEST 输入、实际像素 PNG 和有界清理；启动探针不依赖人工桌面、不留下服务、不接触用户数据。",
+          "24 个规定单元用例和无输出类型检查通过，runtime_prepare 生产构建成功；缺少依赖、探针失败或生成产物缺失时如实失败，不跳过检查。"
+        ],
+        "checks": [
+          {
+            "argv": [
+              "node",
+              "node_modules/typescript/bin/tsc",
+              "--project",
+              "tsconfig.json",
+              "--noEmit"
+            ],
+            "cwd": ".",
+            "timeout": 120,
+            "expected_tests": 0,
+            "inputs": [
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "src",
+              "tests/unit"
+            ],
+            "outputs": []
+          },
+          {
+            "argv": [
+              "node",
+              "node_modules/vitest/vitest.mjs",
+              "run",
+              "tests/unit",
+              "--config",
+              "vitest.config.mjs",
+              "--configLoader",
+              "runner",
+              "--no-cache"
+            ],
+            "cwd": ".",
+            "timeout": 180,
+            "expected_tests": 24,
+            "inputs": [
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "vitest.config.mjs",
+              "src",
+              "tests/unit"
+            ],
+            "outputs": []
+          },
+          {
+            "argv": [
+              "node",
+              "scripts/runtime-probe.mjs"
+            ],
+            "cwd": ".",
+            "timeout": 60,
+            "expected_tests": 0,
+            "inputs": [
+              "environment.yml",
+              "package.json",
+              "package-lock.json",
+              "scripts/runtime-probe.mjs",
+              "tests/support/native-desktop.mjs",
+              "tests/support/native-x11.py"
+            ],
+            "outputs": []
+          },
+          {
+            "argv": [
+              "node",
+              "node_modules/vite/bin/vite.js",
+              "build",
+              "--config",
+              "vite.config.mjs",
+              "--configLoader",
+              "native"
+            ],
+            "cwd": ".",
+            "timeout": 180,
+            "expected_tests": 0,
+            "inputs": [
+              "package.json",
+              "package-lock.json",
+              "index.html",
+              "tsconfig.json",
+              "vite.config.mjs",
+              "src"
+            ],
+            "outputs": [
+              "dist"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "TASK-002",
+        "origin_id": "TASK-002",
+        "title": "完成真实浏览器业务验收与证据归档",
+        "description": "在 TASK-001 的生产构建上新增 66 个普通 Chromium 用例和 1 个原生取消用例，覆盖独立上下文真实文件往返、所有非法输入、失败与取消不变、刷新和三视口操作。使用项目自有桌面辅助模块完成原生操作；使用已有附件协议提交完整实际文件。测试预期独立于业务实现。",
+        "requirement_ids": [
+          "REQ-001",
+          "REQ-002",
+          "REQ-003",
+          "REQ-004",
+          "REQ-005",
+          "REQ-006",
+          "REQ-007",
+          "REQ-008",
+          "REQ-009",
+          "REQ-010",
+          "REQ-011",
+          "REQ-012"
+        ],
+        "depends_on": [
+          "TASK-001"
+        ],
+        "allowed_paths": [
+          "playwright.config.ts",
+          "tests/e2e/",
+          "tests/support/browser-fixtures.ts",
+          "tests/support/evidence.ts",
+          "tests/support/product-server.ts"
+        ],
+        "acceptance": [
+          "通过真实操作验证 CRUD、搜索筛选、表单错误和存储失败；反馈同时断言可见性及对应文字，完整四字段集合在操作后和刷新后比较，并保存完整状态 JSON。",
+          "实际下载完整及空集合 JSON；筛选不影响导出。在独立上下文通过文件选择器上传实际下载的同一文件，验证预览、替换、可见成功反馈及刷新后的逐 ID 四字段精确相等，归档实际文件和来源链。",
+          "28 类非法导入逐项使用真实文件，显示具体可见错误；包括好坏混合批次，操作前、失败后和刷新后的完整集合相同，归档输入及完整状态比较。",
+          "有效导入保留空标签、换行、前后空白和长文本；预览取消、读取中取消及过期结果不写入；空数组取消不变、明确确认后清空且刷新保持，归档完整状态。",
+          "实际打开并取消产品系统文件选择器，观察真实窗口出现和关闭、可信 cancel 事件及可见取消反馈；完整集合在取消前后和刷新后相同，归档实际窗口 PNG、操作记录和完整状态 JSON。",
+          "在 1280×800、390×844、320×844 实际操作主要流程，验证长内容、错误、确认和取消控件的可见性、位置及可达性且无横向溢出，归档原尺寸 PNG、几何数据与业务状态。",
+          "所有必需 PNG、JSON 和下载文件写入 testInfo.outputPath 后以 path 附件提交；验收读取实际捕获内容及来源身份，缺失或截断阻止接受，视频默认关闭。",
+          "启用共享缓存并选定产品浏览器时，核对 shared_product_browser_identity 的实际绑定；未启用时不要求该条件记录。测试附件仍记录实际驱动和浏览器版本，不使用原型身份代替。",
+          "普通项目完成 66 项、原生项目完成 1 项，不以跳过、合成取消或降低断言取得通过；保留测试保护及最终独立审核。"
+        ],
+        "checks": [
+          {
+            "argv": [
+              "node",
+              "node_modules/@playwright/test/cli.js",
+              "test",
+              "--config",
+              "playwright.config.ts",
+              "--project",
+              "chromium"
+            ],
+            "cwd": ".",
+            "timeout": 900,
+            "expected_tests": 66,
+            "inputs": [
+              "dist",
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "vite.config.mjs",
+              "playwright.config.ts",
+              "tests/e2e",
+              "tests/support"
+            ],
+            "outputs": []
+          },
+          {
+            "argv": [
+              "node",
+              "node_modules/@playwright/test/cli.js",
+              "test",
+              "--config",
+              "playwright.config.ts",
+              "--project",
+              "native-cancel"
+            ],
+            "cwd": ".",
+            "timeout": 240,
+            "expected_tests": 1,
+            "inputs": [
+              "dist",
+              "environment.yml",
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "vite.config.mjs",
+              "playwright.config.ts",
+              "tests/e2e/native-cancel.spec.ts",
+              "tests/support"
+            ],
+            "outputs": []
+          }
+        ]
+      }
+    ],
+    "final_checks": [
+      {
+        "argv": [
+          "node",
+          "node_modules/typescript/bin/tsc",
+          "--project",
+          "tsconfig.json",
+          "--noEmit"
+        ],
+        "cwd": ".",
+        "timeout": 120,
+        "expected_tests": 0,
+        "inputs": [
+          "package.json",
+          "package-lock.json",
+          "tsconfig.json",
+          "src",
+          "tests",
+          "playwright.config.ts"
+        ],
+        "outputs": []
+      },
+      {
+        "argv": [
+          "node",
+          "node_modules/vitest/vitest.mjs",
+          "run",
+          "tests/unit",
+          "--config",
+          "vitest.config.mjs",
+          "--configLoader",
+          "runner",
+          "--no-cache"
+        ],
+        "cwd": ".",
+        "timeout": 180,
+        "expected_tests": 24,
+        "inputs": [
+          "package.json",
+          "package-lock.json",
+          "tsconfig.json",
+          "vitest.config.mjs",
+          "src",
+          "tests/unit"
+        ],
+        "outputs": []
+      },
+      {
+        "argv": [
+          "node",
+          "node_modules/@playwright/test/cli.js",
+          "test",
+          "--config",
+          "playwright.config.ts",
+          "--project",
+          "chromium"
+        ],
+        "cwd": ".",
+        "timeout": 900,
+        "expected_tests": 66,
+        "inputs": [
+          "dist",
+          "package.json",
+          "package-lock.json",
+          "tsconfig.json",
+          "vite.config.mjs",
+          "playwright.config.ts",
+          "tests/e2e",
+          "tests/support"
+        ],
+        "outputs": []
+      },
+      {
+        "argv": [
+          "node",
+          "node_modules/@playwright/test/cli.js",
+          "test",
+          "--config",
+          "playwright.config.ts",
+          "--project",
+          "native-cancel"
+        ],
+        "cwd": ".",
+        "timeout": 240,
+        "expected_tests": 1,
+        "inputs": [
+          "dist",
+          "environment.yml",
+          "package.json",
+          "package-lock.json",
+          "tsconfig.json",
+          "vite.config.mjs",
+          "playwright.config.ts",
+          "tests/e2e/native-cancel.spec.ts",
+          "tests/support"
+        ],
+        "outputs": []
+      }
+    ],
+    "environment_file": "environment.yml",
+    "requirements_file": "",
+    "preview": {
+      "command": {
+        "argv": [
+          "node",
+          "node_modules/vite/bin/vite.js",
+          "preview",
+          "--config",
+          "vite.config.mjs",
+          "--configLoader",
+          "native",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "{port}",
+          "--strictPort"
+        ],
+        "cwd": ".",
+        "timeout": 60,
+        "expected_tests": 0,
+        "inputs": [
+          "dist",
+          "package.json",
+          "package-lock.json",
+          "vite.config.mjs"
+        ],
+        "outputs": []
+      },
+      "routes": [
+        "/"
+      ],
+      "actions": [
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#page-title",
+          "value": "值得留下的文字"
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#new-entry",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#save-entry",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_visible",
+          "selector": "#title-error",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#title-error",
+          "value": "标题不能为空或只含空白，请填写标题。"
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#excerpt-error",
+          "value": "正文不能为空或只含空白，请填写摘录正文。"
+        },
+        {
+          "route": "/",
+          "action": "fill",
+          "selector": "#entry-title",
+          "value": "预览验收摘录"
+        },
+        {
+          "route": "/",
+          "action": "fill",
+          "selector": "#entry-excerpt",
+          "value": "第一行阅读笔记。\n第二行阅读笔记。"
+        },
+        {
+          "route": "/",
+          "action": "fill",
+          "selector": "#entry-tag",
+          "value": "预览"
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#save-entry",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#notice-message",
+          "value": "已新增摘录。"
+        },
+        {
+          "route": "/",
+          "action": "fill",
+          "selector": "#search",
+          "value": "预览验收摘录"
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#entries .entry-title",
+          "value": "预览验收摘录"
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#entries [data-action=\"edit\"]",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "fill",
+          "selector": "#entry-title",
+          "value": "预览验收摘录（修订）"
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#save-entry",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#notice-message",
+          "value": "已保存修改。"
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#entries .entry-title",
+          "value": "预览验收摘录（修订）"
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#entries [data-action=\"delete\"]",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_visible",
+          "selector": "#delete-dialog",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#cancel-delete",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#notice-message",
+          "value": "已取消删除，摘录未更改。"
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#open-import",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_visible",
+          "selector": "#choose-file",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#cancel-import",
+          "value": ""
+        },
+        {
+          "route": "/",
+          "action": "expect_text",
+          "selector": "#notice-message",
+          "value": "已取消导入，摘录未更改。"
+        },
+        {
+          "route": "/",
+          "action": "click",
+          "selector": "#clear-filters",
+          "value": ""
+        }
+      ]
+    },
+    "runtime_prepare": [
+      {
+        "argv": [
+          "node",
+          "node_modules/vite/bin/vite.js",
+          "build",
+          "--config",
+          "vite.config.mjs",
+          "--configLoader",
+          "native"
+        ],
+        "cwd": ".",
+        "timeout": 180,
+        "expected_tests": 0,
+        "inputs": [
+          "package.json",
+          "package-lock.json",
+          "index.html",
+          "tsconfig.json",
+          "vite.config.mjs",
+          "src"
+        ],
+        "outputs": [
+          "dist"
+        ]
+      }
+    ],
+    "runtime_probes": [
+      {
+        "argv": [
+          "node",
+          "scripts/runtime-probe.mjs"
+        ],
+        "cwd": ".",
+        "timeout": 60,
+        "expected_tests": 0,
+        "inputs": [
+          "environment.yml",
+          "package.json",
+          "package-lock.json",
+          "scripts/runtime-probe.mjs",
+          "tests/support/native-desktop.mjs",
+          "tests/support/native-x11.py"
+        ],
+        "outputs": []
+      }
+    ],
+    "evidence_contract": {
+      "version": 1,
+      "catalog_hash": "fc67f751fb1b2af2fee31fb34c29b3ef4b7729ac3318c6102dad13255072b12a",
+      "source_binding": "6da8c69f8d4fa08837ee312c7bbf9aa70164f07cc2f748701ea759abbb95d885",
+      "obligations": [
+        {
+          "id": "EVID-TASK-001-INSTALLED-DEPENDENCIES",
+          "target": "acceptance",
+          "task_id": "TASK-001",
+          "index": 5,
+          "value": "环境阶段提供当前选定 Python 运行时及原生测试依赖的实际安装身份和来源记录；仅按 installed_dependency_snapshot 的记录范围判断，not_recorded 不作为来源已验证。",
+          "origin": "model_derived",
+          "requirement_ids": [
+            "REQ-001",
+            "REQ-009",
+            "REQ-012"
+          ],
+          "capability": "installed_dependency_snapshot",
+          "capability_version": 1,
+          "producer": "EnvironmentManager",
+          "production_stage": "environment",
+          "required_stage": "environment"
+        },
+        {
+          "id": "EVID-TASK-001-DEPENDENCY-LOCKS",
+          "target": "acceptance",
+          "task_id": "TASK-001",
+          "index": 6,
+          "value": "环境阶段提供当前 Conda/Python 完整安装锁及身份哈希，核对 environment.yml 与依赖边；dependency_locks 不替代 npm 锁，也不证明未收集的全局求解配置。",
+          "origin": "model_derived",
+          "requirement_ids": [
+            "REQ-001",
+            "REQ-009",
+            "REQ-012"
+          ],
+          "capability": "dependency_locks",
+          "capability_version": 1,
+          "producer": "EnvironmentManager",
+          "production_stage": "environment",
+          "required_stage": "environment"
+        },
+        {
+          "id": "EVID-TASK-002-CRUD-STATE",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 0,
+          "value": "通过真实操作验证 CRUD、搜索筛选、表单错误和存储失败；反馈同时断言可见性及对应文字，完整四字段集合在操作后和刷新后比较，并保存完整状态 JSON。",
+          "origin": "user",
+          "requirement_ids": [
+            "REQ-002",
+            "REQ-003",
+            "REQ-004",
+            "REQ-005",
+            "REQ-010",
+            "REQ-011"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-FILE-ROUNDTRIP",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 1,
+          "value": "实际下载完整及空集合 JSON；筛选不影响导出。在独立上下文通过文件选择器上传实际下载的同一文件，验证预览、替换、可见成功反馈及刷新后的逐 ID 四字段精确相等，归档实际文件和来源链。",
+          "origin": "user",
+          "requirement_ids": [
+            "REQ-006",
+            "REQ-007",
+            "REQ-010",
+            "REQ-011"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-INVALID-IMPORT",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 2,
+          "value": "28 类非法导入逐项使用真实文件，显示具体可见错误；包括好坏混合批次，操作前、失败后和刷新后的完整集合相同，归档输入及完整状态比较。",
+          "origin": "user",
+          "requirement_ids": [
+            "REQ-008",
+            "REQ-011"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-IMPORT-CANCELLATION",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 3,
+          "value": "有效导入保留空标签、换行、前后空白和长文本；预览取消、读取中取消及过期结果不写入；空数组取消不变、明确确认后清空且刷新保持，归档完整状态。",
+          "origin": "user",
+          "requirement_ids": [
+            "REQ-007",
+            "REQ-009",
+            "REQ-011"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-NATIVE-EXECUTION",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 4,
+          "value": "实际打开并取消产品系统文件选择器，观察真实窗口出现和关闭、可信 cancel 事件及可见取消反馈；完整集合在取消前后和刷新后相同，归档实际窗口 PNG、操作记录和完整状态 JSON。",
+          "origin": "user",
+          "requirement_ids": [
+            "REQ-009",
+            "REQ-011"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-RESPONSIVE",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 5,
+          "value": "在 1280×800、390×844、320×844 实际操作主要流程，验证长内容、错误、确认和取消控件的可见性、位置及可达性且无横向溢出，归档原尺寸 PNG、几何数据与业务状态。",
+          "origin": "user",
+          "requirement_ids": [
+            "REQ-011"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-ARCHIVE",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 6,
+          "value": "所有必需 PNG、JSON 和下载文件写入 testInfo.outputPath 后以 path 附件提交；验收读取实际捕获内容及来源身份，缺失或截断阻止接受，视频默认关闭。",
+          "origin": "user",
+          "requirement_ids": [
+            "REQ-010",
+            "REQ-011",
+            "REQ-012"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-SHARED-BROWSER",
+          "target": "acceptance",
+          "task_id": "TASK-002",
+          "index": 7,
+          "value": "启用共享缓存并选定产品浏览器时，核对 shared_product_browser_identity 的实际绑定；未启用时不要求该条件记录。测试附件仍记录实际驱动和浏览器版本，不使用原型身份代替。",
+          "origin": "model_derived",
+          "requirement_ids": [
+            "REQ-010",
+            "REQ-011",
+            "REQ-012"
+          ],
+          "capability": "shared_product_browser_identity",
+          "capability_version": 1,
+          "producer": "EnvironmentManager",
+          "production_stage": "environment",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-BROWSER-CHECK",
+          "target": "checks",
+          "task_id": "TASK-002",
+          "index": 0,
+          "value": {
+            "argv": [
+              "node",
+              "node_modules/@playwright/test/cli.js",
+              "test",
+              "--config",
+              "playwright.config.ts",
+              "--project",
+              "chromium"
+            ],
+            "cwd": ".",
+            "timeout": 900,
+            "expected_tests": 66,
+            "inputs": [
+              "dist",
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "vite.config.mjs",
+              "playwright.config.ts",
+              "tests/e2e",
+              "tests/support"
+            ],
+            "outputs": []
+          },
+          "origin": "model_derived",
+          "requirement_ids": [
+            "REQ-001",
+            "REQ-002",
+            "REQ-003",
+            "REQ-004",
+            "REQ-005",
+            "REQ-006",
+            "REQ-007",
+            "REQ-008",
+            "REQ-009",
+            "REQ-010",
+            "REQ-011",
+            "REQ-012"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-TASK-002-NATIVE-CHECK-EXECUTION",
+          "target": "checks",
+          "task_id": "TASK-002",
+          "index": 1,
+          "value": {
+            "argv": [
+              "node",
+              "node_modules/@playwright/test/cli.js",
+              "test",
+              "--config",
+              "playwright.config.ts",
+              "--project",
+              "native-cancel"
+            ],
+            "cwd": ".",
+            "timeout": 240,
+            "expected_tests": 1,
+            "inputs": [
+              "dist",
+              "environment.yml",
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "vite.config.mjs",
+              "playwright.config.ts",
+              "tests/e2e/native-cancel.spec.ts",
+              "tests/support"
+            ],
+            "outputs": []
+          },
+          "origin": "model_derived",
+          "requirement_ids": [
+            "REQ-009",
+            "REQ-011",
+            "REQ-012"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "verification"
+        },
+        {
+          "id": "EVID-FINAL-BROWSER",
+          "target": "final_checks",
+          "task_id": "",
+          "index": 2,
+          "value": {
+            "argv": [
+              "node",
+              "node_modules/@playwright/test/cli.js",
+              "test",
+              "--config",
+              "playwright.config.ts",
+              "--project",
+              "chromium"
+            ],
+            "cwd": ".",
+            "timeout": 900,
+            "expected_tests": 66,
+            "inputs": [
+              "dist",
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "vite.config.mjs",
+              "playwright.config.ts",
+              "tests/e2e",
+              "tests/support"
+            ],
+            "outputs": []
+          },
+          "origin": "model_derived",
+          "requirement_ids": [
+            "REQ-001",
+            "REQ-002",
+            "REQ-003",
+            "REQ-004",
+            "REQ-005",
+            "REQ-006",
+            "REQ-007",
+            "REQ-008",
+            "REQ-009",
+            "REQ-010",
+            "REQ-011",
+            "REQ-012"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "final_review"
+        },
+        {
+          "id": "EVID-FINAL-NATIVE-EXECUTION",
+          "target": "final_checks",
+          "task_id": "",
+          "index": 3,
+          "value": {
+            "argv": [
+              "node",
+              "node_modules/@playwright/test/cli.js",
+              "test",
+              "--config",
+              "playwright.config.ts",
+              "--project",
+              "native-cancel"
+            ],
+            "cwd": ".",
+            "timeout": 240,
+            "expected_tests": 1,
+            "inputs": [
+              "dist",
+              "environment.yml",
+              "package.json",
+              "package-lock.json",
+              "tsconfig.json",
+              "vite.config.mjs",
+              "playwright.config.ts",
+              "tests/e2e/native-cancel.spec.ts",
+              "tests/support"
+            ],
+            "outputs": []
+          },
+          "origin": "model_derived",
+          "requirement_ids": [
+            "REQ-009",
+            "REQ-011",
+            "REQ-012"
+          ],
+          "capability": "test_file_attachments",
+          "capability_version": 1,
+          "producer": "VerificationService",
+          "production_stage": "verification",
+          "required_stage": "final_review"
+        }
+      ]
+    }
+  }
+}

@@ -265,6 +265,8 @@ def validate_contract_journal(journal, get, *, legacy_contexts=None):
     candidate, affected, reopen = apply_patch(previous, patch, journal['base_revision'],
         {context.get('failure', {}).get('id')}, {t.id: t.origin_id for t in previous.tasks},
         coverage_verified=coverage_verified, source_correction=plan_source_correction(get, previous))
+    from .check_production import journal_affected
+    affected |= journal_affected(previous, candidate, journal)
     if (journal.get('contract_review_binding') != contract_review_binding(journal)
             or candidate.model_dump() != journal['plan'] or set(journal['affected']) != affected
             or set(journal['reopen']) != reopen):

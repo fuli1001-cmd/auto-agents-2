@@ -168,6 +168,8 @@ def setup_correction(tmp_path, **kwargs):
                     'document': 'Original goals are authoritative'},
         'task_origins': {t.id: t.origin_id for t in original.tasks},
         'rounds/T3': {'round': 17}, 'develop/done': ['T1', 'T2', 'T3', 'T4']})
+    from evidence_test_fixtures import seed_check_production
+    seed_check_production(workflow, rid, original)
     return workflow, rid, work, original, record, agent
 
 

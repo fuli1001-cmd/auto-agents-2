@@ -311,6 +311,9 @@ class Store:
                 origins[task["id"]] = task["origin_id"]
             self._put(db, rid, "task_origins", origins)
             self._put(db, rid, "plan", journal["plan"])
+            from .check_production import activation_updates
+            for name, value in activation_updates(journal.get("evidence_admission", {})).items():
+                self._put(db, rid, name, value)
             self._put(db, rid, "plan_revision/current", {"version": 1, "revision": revision + 1})
             done = set(rows.get("develop/done", [])) - set(journal["affected"])
             done &= {t["id"] for t in journal["plan"]["tasks"]}

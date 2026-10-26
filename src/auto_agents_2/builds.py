@@ -120,6 +120,11 @@ def verification_commands(commands: list[Command], workspace: Path, preparations
     Task gates select only preparations their inputs require. Candidate acceptance
     also requires every runtime preparation, before any tests or runtime probes.
     """
+    return verification_layout(commands, workspace, preparations, prepare_all=prepare_all)[0]
+
+
+def verification_layout(commands, workspace, preparations=(), *, prepare_all=False):
+    """Return scheduled commands and the exact merged check/preparation identities."""
     checks = [normalized(c, workspace) for c in commands]
     prepare = [normalized(c, workspace) for c in preparations]
     builds = {}
@@ -166,4 +171,4 @@ def verification_commands(commands: list[Command], workspace: Path, preparations
 
     for command in [*(prepare if prepare_all else []), *checks]:
         visit(command)
-    return ordered
+    return ordered, checks, prepare

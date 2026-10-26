@@ -214,6 +214,27 @@ class ReviewResult(Record):
         return self
 
 
+class CheckProducer(Record):
+    index: int = Field(ge=0)
+    command: Command
+
+
+class CheckProductionBinding(Record):
+    target: Literal["acceptance", "final_checks"]
+    task_id: str = ""
+    index: int = Field(ge=0)
+    value: str | Command
+    kind: Literal["build", "typecheck", "tests", "attachments", "command", "review"]
+    producers: list[CheckProducer] = []
+    attachment_formats: list[Literal["png", "json"]] = []
+    reason: str = Field(min_length=1)
+
+
+class CheckProductionAssessment(Record):
+    version: Literal[1] = 1
+    bindings: list[CheckProductionBinding]
+
+
 class EvidenceAssessment(Record):
     candidate_hash: str
     catalog_hash: str
@@ -224,6 +245,14 @@ class EvidenceAssessment(Record):
     requirements_preserved: bool
     unsupported_user_obligations: list[str] = []
     explanation: str = Field(min_length=1)
+    check_production: CheckProductionAssessment | None = None
+
+    @model_serializer(mode="wrap")
+    def historical_assessment(self, handler):
+        result = handler(self)
+        if self.check_production is None:
+            result.pop("check_production", None)
+        return result
 
 
 class EvidencePlanReview(ReviewResult):

@@ -906,26 +906,28 @@ class RecoveryController:
             self._reject_patch(rid, active, failure, identity, {"patch": patch.model_dump(), "validation_error": str(exc)})
             return False
         snapshots, candidates = {}, {}
-        for task_id in affected | set(patch.remove_tasks):
-            saved = self.store.get(rid, "develop/task/" + task_id, {})
-            path = Path(saved["workspace"]) if saved.get("workspace") else None
-            if path and path.is_dir():
-                if saved.get("source_hash") and tree_hash(path) != saved["source_hash"]:
-                    raise StateConflict("Task source changed before plan amendment; preserve user changes and reconcile first")
-                ref = f"refs/aa2/{rid}/plan-patches/{revision}/{task_id}"
-                snapshot = saved_snapshots.get(task_id)
-                if snapshot is None:
-                    snapshot = {"workspace": str(path), "ref": ref, "source_hash": tree_hash(path),
-                                "intent": engine.workspaces.checkpoint_intent(path, ref)}
-                    saved_snapshots[task_id] = snapshot
-                    self.store.checkpoint(rid, snapshot_key, saved_snapshots)
-                if not snapshot.get("commit"):
-                    snapshot["commit"] = engine.workspaces.finish_checkpoint(path, snapshot["intent"])
-                snapshots[task_id] = snapshot
-                if path.resolve() == work.resolve():
-                    baseline["base_commit"] = snapshot["commit"]
-                self.store.checkpoints(rid, {snapshot_key: saved_snapshots, baseline_key: baseline})
-                candidates[task_id] = {"state": saved, "project": engine.contexts.build(path)}
+        def retain_candidates(task_ids):
+            for task_id in task_ids:
+                saved = self.store.get(rid, "develop/task/" + task_id, {})
+                path = Path(saved["workspace"]) if saved.get("workspace") else None
+                if path and path.is_dir():
+                    if saved.get("source_hash") and tree_hash(path) != saved["source_hash"]:
+                        raise StateConflict("Task source changed before plan amendment; preserve user changes and reconcile first")
+                    ref = f"refs/aa2/{rid}/plan-patches/{revision}/{task_id}"
+                    snapshot = saved_snapshots.get(task_id)
+                    if snapshot is None:
+                        snapshot = {"workspace": str(path), "ref": ref, "source_hash": tree_hash(path),
+                                    "intent": engine.workspaces.checkpoint_intent(path, ref)}
+                        saved_snapshots[task_id] = snapshot
+                        self.store.checkpoint(rid, snapshot_key, saved_snapshots)
+                    if not snapshot.get("commit"):
+                        snapshot["commit"] = engine.workspaces.finish_checkpoint(path, snapshot["intent"])
+                    snapshots[task_id] = snapshot
+                    if path.resolve() == work.resolve():
+                        baseline["base_commit"] = snapshot["commit"]
+                    self.store.checkpoints(rid, {snapshot_key: saved_snapshots, baseline_key: baseline})
+                    candidates[task_id] = {"state": saved, "project": engine.contexts.build(path)}
+        retain_candidates(affected | set(patch.remove_tasks))
         review_context = {**recovery_context, "review_kind": "plan_patch",
             "unsupported_evidence_obligations": unsupported, "evidence_candidate_hash": digest(candidate.model_dump()), "previous_plan": plan.model_dump(),
             "patch": patch.model_dump(), "plan": candidate.model_dump(), "failure": failure.model_dump(),
@@ -961,6 +963,11 @@ class RecoveryController:
             self._reject_patch(rid, active, failure, identity, {"patch": patch.model_dump(),
                 "patch_review": review.model_dump(), "validation_error": str(exc)})
             return False
+        from .check_production import additional_affected
+        closure_affected = additional_affected(plan, candidate, review_context.get("accepted_check_production"),
+                                              review.evidence_assessment.check_production)
+        retain_candidates(closure_affected - affected)
+        affected |= closure_affected
         for task_id, snapshot in snapshots.items():
             if tree_hash(Path(snapshot["workspace"])) != snapshot["source_hash"]:
                 raise StateConflict("Task source changed during plan review; preserve user changes before activation")

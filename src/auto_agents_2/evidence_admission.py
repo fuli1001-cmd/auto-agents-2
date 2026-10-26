@@ -60,8 +60,10 @@ def current_requirement_source(value):
 
 
 def admission_context(get, *, shared_browsers=False):
+    from .check_production import PROTOCOL_KEY, accepted_projection, active_receipt, protocol
     return {"controller_evidence_capabilities": capability_catalog(shared_browsers=shared_browsers),
-            "evidence_requirement_source": requirement_source(get)}
+            "evidence_requirement_source": requirement_source(get), PROTOCOL_KEY: protocol(),
+            "accepted_check_production": accepted_projection(active_receipt(get))}
 
 
 def empty_contract(context):
@@ -169,6 +171,8 @@ def validate_admission_review(plan, review, context, *, allow_user_blocker=True)
     verdict = EvidencePlanReview.model_validate({k: v for k, v in data.items()
                                                if k not in {"timing_reviews", "contract_reviews"}})
     assessment = verdict.evidence_assessment
+    from .check_production import validate_review
+    validate_review(plan, verdict, context)
     unsupported = validate_obligations(plan, context)
     authority = None
     if verdict.authority is not None or context.get("controller_review_basis"):
@@ -206,6 +210,11 @@ def admission_record(plan, review, context, *, previous=None, patch=None, affect
             "previous_hash": digest(previous.model_dump()) if previous else None,
             "patch_hash": digest(patch.model_dump()) if patch else None,
             "affected": sorted(affected), "reopen": sorted(reopen), "coverage": coverage}
+    from .check_production import PROTOCOL_KEY
+    if PROTOCOL_KEY in context:
+        body["context"].update({key: context.get(key) for key in (PROTOCOL_KEY, "accepted_check_production")})
+        production = review.evidence_assessment.check_production
+        body["check_production"] = production.model_dump() if production else None
     if context.get("controller_review_basis"):
         body["authority"] = context["controller_review_basis"]
     return {**body, "binding": digest(body)}
@@ -230,6 +239,13 @@ def validate_admission_journal(journal, get, *, shared_browsers=False):
         valid_coverage_receipt,
     )
     context = admission_context(get, shared_browsers=shared_browsers)
+    from .check_production import PROTOCOL_KEY, REQUIRED_KEY, journal_affected
+    if PROTOCOL_KEY not in record.get("context", {}):
+        if get(REQUIRED_KEY):
+            raise AA2Error("Prepared admission cannot downgrade the active check production protocol")
+        # Frozen pre-upgrade approval: retain original source/capability validation.
+        context.pop(PROTOCOL_KEY)
+        context.pop("accepted_check_production")
     if record.get("context") != context:
         raise AA2Error("Prepared evidence admission source/capability context is stale")
     if record.get("authority") or journal.get("review", {}).get("authority"):
@@ -250,6 +266,7 @@ def validate_admission_journal(journal, get, *, shared_browsers=False):
         source_correction=plan_source_correction(get, previous))
     review = EvidencePatchReview.model_validate(journal["review"])
     validate_admission_review(candidate, review, context, allow_user_blocker=False)
+    affected |= journal_affected(previous, candidate, journal)
     expected = admission_record(candidate, review, context, previous=previous, patch=patch,
                                 affected=affected, reopen=reopen, coverage=coverage)
     if (record != expected or candidate.model_dump() != candidate_data
@@ -260,7 +277,16 @@ def validate_admission_journal(journal, get, *, shared_browsers=False):
 def evidence_instructions(purpose):
     if purpose not in {"design", "plan", "plan_patch", "implement", "implementation", "test_changes", "verify", "recovery_diagnosis", "decision"}:
         return ""
-    return ("\nFinite evidence admission: use controller_evidence_capabilities when supplied. New PlanResult/PlanPatch must "
+    return ("\nCheck production closure: independent plan/PlanPatch review must include evidence_assessment.check_production "
+            "using controller_check_production. Map EVERY existing task acceptance and final_checks entry exactly once. "
+            "Use zero-based indexes and complete command snapshots. A task producer must be one of that task's checks; "
+            "do not confuse available runtime_prepare with a scheduled task check, or demand every final command at every task. "
+            "Classify semantic/source/environment review separately; never use review-only to waive an actual build, tsc, test "
+            "or attachment requirement. Mapping identifies existing obligations only, not new requirements. Unknown semantic "
+            "coverage remains for independent judgment; controller validates identities and actual production. "
+            "Preserve prior command/file obligations unless the existing formal clause correction authorizes their revision. "
+            "Attachment formats png/json refer to actual archived bytes, not names or counts.\n"
+            "\nFinite evidence admission: use controller_evidence_capabilities when supplied. New PlanResult/PlanPatch must "
             "include a complete evidence_contract with the supplied catalog/source hashes, mapping every controller evidence "
             "obligation to its exact clause or full command. An explicit empty list requires independent completeness review; "
             "it cannot hide a user requirement. Unknown capability must be declared, never invented or silently dropped. "

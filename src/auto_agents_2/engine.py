@@ -1674,6 +1674,9 @@ class WorkflowEngine:
                 stage_data["verified_sources"] = [{k: v for k, v in source.items() if k != "excerpt"} for source in retrieved]
                 context.pop("selected_design_sources", None)
             updates = {stage: stage_data}
+            if stage == "plan":
+                from .check_production import activation_updates
+                updates.update(activation_updates(self.store.get(rid, "evidence_admission/initial")))
             if stage in {"design", "plan"}:
                 updates.update(self.authority.acceptance(rid, stage, stage_data, review))
             self.store.checkpoints(rid, updates)
@@ -1785,14 +1788,14 @@ class WorkflowEngine:
             raise RecoveryNeeded(FailureRecord.create(kind="review", component="final_review", origin_id="final",
                 step="final_review", obligations=[r.id for r in result.requirements], evidence_refs=["verify/review", "verify/checks"],
                 evidence={"review": review.model_dump(), "checks": [r.model_dump() for r in evidence]}))
-        ReviewEvidence(self.store).complete(rid, consumer_key(), [r.model_dump() for r in evidence],
-            updates={"verify/review": review.model_dump(), "verify/review_identity": review_key})
         self._task_design_context(rid, work)
         if (git(work, "rev-parse", "HEAD") != candidate or tree_hash(work) != candidate_hash
                 or git(work, "diff", "--name-only", "HEAD")):
             raise StateConflict("Candidate changed during verification")
         self._require_candidate_evidence(rid, commands, evidence, work, environment,
                                          phase="final", expected_source=candidate_hash)
+        ReviewEvidence(self.store).complete(rid, consumer_key(), [r.model_dump() for r in evidence],
+            updates={"verify/review": review.model_dump(), "verify/review_identity": review_key})
         self._final_progress(rid, plan, observation_round, frontend=result.frontend, visuals=visuals, approved=True)
         self._task_approval_context(rid, work, context)
         self.store.update(rid, external_dependencies=bool(context.get("provider_research", {}).get("sources")))
@@ -1970,10 +1973,11 @@ class WorkflowEngine:
             evidence=evidence, proposal=proposal or {})
 
     def _require_task_evidence(self, rid, task, saved, commands, checks, work, environment):
+        production = {}
         failure = self._verification_problem(rid, commands, checks, work, environment, phase="task",
-                                             task=task, expected_source=saved.get("source_hash"))
+                                             task=task, expected_source=saved.get("source_hash"), production_out=production)
         if failure is None:
-            return self._verification_observation(commands, checks, environment)
+            return self._verification_observation(commands, checks, environment, production)
         # Verification drift is a new evidence observation, not an implementation
         # defect or implicit permission to accept a stale review.
         saved["phase"] = "reverify"
@@ -1981,7 +1985,7 @@ class WorkflowEngine:
         state = self.store.get(rid, state_key, {})
         self.store.checkpoints(rid, {"develop/task/" + task.id: saved,
             state_key: {**state, "evidence": "stale"}})
-        raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="evidence", step="verification_inputs",
+        raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="contract" if failure.kind == "contract" else "evidence", step="verification_inputs",
             verification_error=failure.evidence["verification_error"]).model_copy(update={
                 "reason_code": failure.reason_code,
                 "evidence": {**self._task_failure_evidence(task, saved), **failure.evidence}}))
@@ -1992,7 +1996,7 @@ class WorkflowEngine:
                 "environment_error": saved.get("environment_error"), "candidate_error": saved.get("candidate_error"),
                 **({"environment_failure": saved["environment_failure"]} if saved.get("environment_failure") else {})}
 
-    def _verification_problem(self, rid, commands, checks, work, environment, *, phase, task=None, expected_source=None):
+    def _verification_problem(self, rid, commands, checks, work, environment, *, phase, task=None, expected_source=None, production_out=None):
         """Shared gate assessment. Stage adapters own the recovery dispatch, never its classification."""
         reuse = reusable(commands, checks, work, environment, self.artifacts)
         source = tree_hash(work)
@@ -2001,7 +2005,16 @@ class WorkflowEngine:
             raise StateConflict("Verified task source changed; preserve the candidate and user edits"
                                 if task else "Verified candidate source changed; preserve the candidate and user edits", phase=phase)
         if reuse.allowed:
-            return None
+            from .check_production import ProductionGap, observe
+            from .evidence import EvidenceIssue, ReuseDecision
+            try:
+                production = observe(lambda key: self.store.get(rid, key), commands, checks, work, environment,
+                                     self.artifacts, task=task, phase=phase)
+                if production_out is not None and production is not None:
+                    production_out["check_production"] = production
+                return None
+            except ProductionGap as exc:
+                reuse = ReuseDecision(False, str(exc), (EvidenceIssue("check_production_gap", -1, ".", (), exc.kind),))
         evidence = {"commands": [c.model_dump() for c in commands], "checks": [c.model_dump() for c in checks],
                     "verification_error": reuse.reason, "verification_assessment": reuse.record()}
         key = "develop/task/" + task.id if task else "verify/checks"
@@ -2014,26 +2027,28 @@ class WorkflowEngine:
         self.store.checkpoints(rid, updates)
         self.store.event(rid, "evidence.invalidated", {"phase": phase, **reuse.record()})
         code = reuse.issues[0].code if reuse.issues else "evidence_unavailable"
-        return FailureRecord.create(kind="checks" if reuse.issues and all(i.category == "checks" for i in reuse.issues) else "evidence",
+        return FailureRecord.create(kind=("contract" if any(i.category == "contract" for i in reuse.issues) else
+            "checks" if reuse.issues and all(i.category == "checks" for i in reuse.issues) else "evidence"),
             component="verification", origin_id=(task.origin_id or task.id) if task else "final", task_id=task.id if task else "",
             step="verification_inputs", phase=phase, reason_code=code,
             obligations=task.requirement_ids if task else [digest(c.model_dump()) for c in commands], evidence_refs=[key], evidence=evidence)
 
     def _require_candidate_evidence(self, rid, commands, checks, work, environment, *, phase, expected_source=None):
+        production = {}
         failure = self._verification_problem(rid, commands, checks, work, environment,
-                                             phase=phase, expected_source=expected_source)
+                                             phase=phase, expected_source=expected_source, production_out=production)
         if failure:
             raise RecoveryNeeded(failure)
-        return self._verification_observation(commands, checks, environment)
+        return self._verification_observation(commands, checks, environment, production)
 
     @staticmethod
-    def _verification_observation(commands, checks, environment):
+    def _verification_observation(commands, checks, environment, production=None):
         """Present only the successful gate assessment just performed by the caller.
 
         This is an observation, not a reusable permit or an independent approval.
         Gate entry and post-review checks still use reusable() against real inputs.
         """
-        return {"version": 1, "status": "valid_at_gate_entry",
+        return {"version": 1, "status": "valid_at_gate_entry", **(production or {}),
                 "source_hash": checks[0].source_hash,
                 "environment_hash": environment.fingerprint,
                 "commands_hash": digest([command.model_dump() for command in commands]),
@@ -2390,6 +2405,15 @@ class WorkflowEngine:
         inherited = self.store.run(source_run)["data"] if source_run else {"external_dependencies": True}
         plan_data = self.store.get(source_run, "plan") if source_run else None
         if source_run:
+            from .check_production import activation_updates, active_receipt
+            inherited_production = active_receipt(lambda key: self.store.get(source_run, key))
+            if inherited_production:
+                # Original admission source is retained, not relabeled as current.
+                self.store.checkpoints(rid, {"plan": plan_data, **activation_updates(inherited_production),
+                    "evidence_admission/inherited": {"run_id": source_run, "plan_hash": digest(plan_data),
+                        "source_binding": inherited_production["context"]["evidence_requirement_source"]["hash"],
+                        "current_capture_hash": digest(self.store.get(rid, "capture")),
+                        "current_coverage_hash": digest(self.store.get(rid, "clarify"))}})
             for key in ("plan", "design", "prototype", "prototype_approval", "provider_research", "verify/identity", "verify/checks", "verify/review"):
                 value = self.store.get(source_run, key)
                 if value is not None:

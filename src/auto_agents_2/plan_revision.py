@@ -152,6 +152,8 @@ def validate_timing_journal(journal):
     previous = PlanResult.model_validate(journal['previous_plan'])
     candidate, affected, reopen = apply_patch(previous, patch, journal['base_revision'],
         set(patch.failure_ids), {t.id: t.origin_id for t in previous.tasks})
+    from .check_production import journal_affected
+    affected |= journal_affected(previous, candidate, journal)
     validate_timing_review(patch, journal['review'])
     protocol = journal.get('controller_stage_contract')
     if protocol is not None and not current_stage_contract(protocol):

@@ -4,7 +4,7 @@ import sys
 
 import pytest
 from authority_review_fixtures import authority_review, seed_original
-from evidence_test_fixtures import empty_contract, seed_requirements
+from evidence_test_fixtures import empty_contract, seed_check_production, seed_requirements
 from test_workflow import CodingAgent, engine
 
 from auto_agents_2.errors import AA2Error
@@ -500,6 +500,9 @@ async def test_local_patch_recovers_each_side_effect_boundary(tmp_path, monkeypa
     workflow.store.checkpoints(rid, {"plan": original.model_dump(), "develop/done": ["T1", "T2"],
         "task_origins": {t.id: t.origin_id for t in original.tasks}, "rounds/T3": {"round": 3},
         "develop/task/T3": {"workspace": str(worker), "phase": "implementing"}})
+    # This scenario tests interruption of an already current-protocol plan,
+    # not first migration from a plan whose closure mapping never existed.
+    seed_check_production(workflow, rid, original)
     record = failure()
     workflow.recovery.submit(rid, record)
     active = workflow.store.get(rid, "recovery/active")
