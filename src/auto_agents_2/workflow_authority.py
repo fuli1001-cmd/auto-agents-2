@@ -196,14 +196,17 @@ class WorkflowAuthority:
             "plan/authority-reaudit/" + digest(data), fresh=True)
         context = self.context(rid, review, context)
         validate_admission_review(plan, review, context)
-        from .check_production import activation_updates, additional_affected
+        from .check_production import activation_updates, mapping_changed
         from .evidence_admission import admission_record
-        changed = additional_affected(plan, plan, context.get("accepted_check_production"),
-                                      review.evidence_assessment.check_production)
-        if changed & set(self.store.get(rid, "develop/done", [])):
+        # Accepted but not yet integrated consumers are absent from develop/done.
+        # A reaudit has no transaction to invalidate them (or final-only evidence).
+        if mapping_changed(plan, context.get("accepted_check_production"),
+                           review.evidence_assessment.check_production):
             from .recovery import FailureRecord, RecoveryNeeded
             raise RecoveryNeeded(FailureRecord.create(kind="contract", component="plan_review", origin_id="final",
                 step="check_production_mapping", evidence_refs=["plan"],
+                obligations=[*[value for task in plan.tasks for value in task.acceptance],
+                             *[digest(command.model_dump()) for command in plan.final_checks]],
                 evidence={"reason": "Changed closure mapping requires a formal PlanPatch with task invalidation",
                           "plan": data, "review": review.model_dump()}))
         record = admission_record(plan, review, context)

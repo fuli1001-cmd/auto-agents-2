@@ -265,7 +265,8 @@ def validate_admission_journal(journal, get, *, shared_browsers=False):
         {t.id: t.origin_id for t in previous.tasks}, coverage_verified=coverage_verified,
         source_correction=plan_source_correction(get, previous))
     review = EvidencePatchReview.model_validate(journal["review"])
-    validate_admission_review(candidate, review, context, allow_user_blocker=False)
+    validate_admission_review(candidate, review, {**context, "previous_plan": previous.model_dump(),
+        "patch": patch.model_dump()}, allow_user_blocker=False)
     affected |= journal_affected(previous, candidate, journal)
     expected = admission_record(candidate, review, context, previous=previous, patch=patch,
                                 affected=affected, reopen=reopen, coverage=coverage)

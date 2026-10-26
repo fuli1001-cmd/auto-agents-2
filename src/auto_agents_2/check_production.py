@@ -135,6 +135,16 @@ def _semantic(row):
     return {key: value for key, value in row.model_dump().items() if key != "reason"}
 
 
+def _mapping_rows(assessment):
+    return {(r.target, r.task_id, r.index): _semantic(r) for r in assessment.bindings}
+
+
+def mapping_changed(plan, old_record, assessment):
+    """Reaudit may refresh an explanation, never activate a changed consumer contract."""
+    return assessment is not None and (not old_record or
+        _mapping_rows(prior_assessment(old_record, plan)) != _mapping_rows(assessment))
+
+
 def preserve_mapping(previous, candidate, old_record, assessment, patch):
     if not old_record:
         return
@@ -180,8 +190,7 @@ def additional_affected(previous, candidate, old_record, assessment):
     if not old_record:
         return {t.id for t in candidate.tasks}  # Explicit migration, not old evidence relabeling.
     before = prior_assessment(old_record, previous)
-    old = {(r.target, r.task_id, r.index): _semantic(r) for r in before.bindings}
-    new = {(r.target, r.task_id, r.index): _semantic(r) for r in assessment.bindings}
+    old, new = _mapping_rows(before), _mapping_rows(assessment)
     delta = {k for k in old.keys() | new.keys() if old.get(k) != new.get(k)}
     if any(k[0] == "final_checks" for k in delta):
         return {t.id for t in candidate.tasks}
