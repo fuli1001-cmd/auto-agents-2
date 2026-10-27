@@ -176,8 +176,14 @@ async def test_runtime_failures_are_bounded_across_restarts(tmp_path, monkeypatc
         return {}
     async def prepare(*args):
         pass
+    # This coordinator unit fixture supplies its dependency explicitly;
+    # real Engine final-evidence validation is covered by test_delivery_final_evidence.
+    def final_evidence(*args, **kwargs):
+        return {"verify/identity": "proof"}
+    store.checkpoint(rid, "verify/identity", "proof")
     for _ in range(6):
-        delivery = DeliveryCoordinator(store, workspace, SimpleNamespace(), SimpleNamespace(prepare_delivery=prepare), verify, runtime)
+        delivery = DeliveryCoordinator(store, workspace, SimpleNamespace(), SimpleNamespace(prepare_delivery=prepare),
+                                       verify, runtime, final_evidence=final_evidence)
         with pytest.raises(AA2Error):
             await delivery.finish(rid)
     assert len(calls) == 2

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 
 from .config import ConfigStore
@@ -19,10 +20,16 @@ class RuntimeVerificationError(AA2Error):
 class DeliveryCoordinator:
     """Durable publication; no provider transport, dependency installation or GC policy."""
 
-    def __init__(self, store, workspaces, resources, environments, verify, runtime, *, browser_version=None):
+    def __init__(self, store, workspaces, resources, environments, verify, runtime, *, browser_version=None, final_evidence=None):
         self.store, self.workspaces, self.resources = store, workspaces, resources
         self.environments, self.verify, self.runtime = environments, verify, runtime
         self.browser_version = browser_version
+        self.final_evidence = final_evidence
+
+    def require_final_evidence(self, rid, journal, *, fresh=False):
+        if self.final_evidence is None:
+            raise StateConflict("Final delivery evidence validator is unavailable", phase="delivery")
+        return self.final_evidence(rid, journal, fresh=fresh)
 
     def application_browser_version(self):
         version = self.browser_version() if self.browser_version else None
@@ -160,6 +167,9 @@ class DeliveryCoordinator:
                     or git(Path(journal["work"]), "rev-parse", "HEAD") != journal["candidate"]
                     or git(Path(journal["work"]), "diff", "--name-only", "HEAD")):
                 raise StateConflict("已验证候选工作区发生变化，不能发布")
+            # Every new publication consumes the full final observation, including
+            # a new candidate after a previous publication or a target-advance race.
+            self.require_final_evidence(rid, journal, fresh=True)
             policy = self.workspaces.checkout_policy(Path(journal["work"]), sorted(self.workspaces.entries(journal["candidate"])))
             expected = self.store.get(rid, "verify/checkout_policy")
             if expected is not None and policy != expected:
@@ -191,6 +201,7 @@ class DeliveryCoordinator:
                 await self.upgrade_legacy(rid, journal)
                 if journal["phase"] == "ready":
                     return None
+            self.require_final_evidence(rid, journal)
             self.workspaces.clean_target(journal["target"])
             if self.workspaces.head(journal["target"]) != journal["candidate"]:
                 raise StateConflict("发布后的目标提交发生变化；保留用户提交，需人工核对后继续完成环境交接")
@@ -299,6 +310,7 @@ class DeliveryCoordinator:
                 raise StateConflict("Pending runtime evidence source changed", phase="completion")
             self._invalidate_completion(rid, journal, assessment.record())
             return None
+        final = self.require_final_evidence(rid, journal)
         receipt = journal.get("completion_receipt")
         if receipt is None:
             receipt = {"version": 1, "run_id": rid, "target": journal["target"], "candidate": journal["candidate"],
@@ -318,10 +330,18 @@ class DeliveryCoordinator:
             self.save(rid, journal)
         if digest({k: v for k, v in receipt.items() if k != "digest"}) != receipt["digest"]:
             raise StateConflict("Pending delivery receipt integrity mismatch")
-        with artifacts.reading(receipt["runtime"]["evidence"], rid):
+        if any(receipt["evidence"].get(key) != value for key, value in final.items()):
+            raise StateConflict("Pending receipt no longer matches its final evidence", phase="completion")
+        # Only the current final and runtime observations are required here.
+        # Historical failed observations are retained history, not fresh gates.
+        with ExitStack() as readers:
+            try:
+                readers.enter_context(artifacts.reading({"runtime": receipt["runtime"]["evidence"], "final": final}, rid))
+            except (OSError, ValueError) as exc:
+                raise StateConflict("Required delivery artifacts changed before completion", phase="completion",
+                                    evidence_refs=tuple(final)) from exc
             write_json(self.store.root / "runtime.json", receipt["runtime"])
-        # The pending checkpoint retains evidence after temporary reader holds close.
-        self.store.complete_delivery(rid, receipt)
+            self.store.complete_delivery(rid, receipt)
         self.resources.finish_delivery(rid)
         return self.store.run(rid)
 

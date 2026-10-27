@@ -345,8 +345,14 @@ def delivery_fixture(tmp_path, monkeypatch):
                 rows = await verifier.run(runtime_commands(None, tmp_path, environment), tmp_path, environment)
                 evidence = {**evidence, "checks": [row.model_dump() for row in rows]}
             return evidence
+        # Explicit dependency for this fake-Git coordinator fixture. Actual
+        # final checks and browser archives are exercised by Engine fixtures.
+        def final_evidence(*args, **kwargs):
+            return {"verify/identity": "proof"}
+        store.checkpoint(rid, "verify/identity", "proof")
         return DeliveryCoordinator(store, workspace, SimpleNamespace(finish_delivery=lambda *a: None),
-                                   SimpleNamespace(prepare_delivery=prepare), verify, checked_runtime)
+                                   SimpleNamespace(prepare_delivery=prepare), verify, checked_runtime,
+                                   final_evidence=final_evidence)
     return config, store, rid, make
 
 

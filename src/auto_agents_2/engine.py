@@ -31,7 +31,7 @@ from .design import (
     inspect_prototype,
 )
 from .design_documents import DesignDocuments
-from .environment import EnvironmentManager
+from .environment import Environment, EnvironmentManager
 from .errors import (
     AA2Error,
     DependencyResolutionError,
@@ -174,7 +174,8 @@ class WorkflowEngine:
         self.verifier = VerificationService(self.store.root, self.sandbox, self.resources)
         self.delivery = DeliveryCoordinator(self.store, self.workspaces, self.resources, self.environments,
                                             self._reintegrate_delivery, self._runtime_checks,
-                                            browser_version=lambda: self.browser_check_version())
+                                            browser_version=lambda: self.browser_check_version(),
+                                            final_evidence=self._delivery_final_evidence)
         self.question_handler = question_handler
         self.question_lock = asyncio.Lock()
         self.recovery = RecoveryController(self)
@@ -2892,6 +2893,61 @@ class WorkflowEngine:
             self.recovery.complete_delivery_action(rid, pending.get("recovery_permit"),
                 {"status": "applied", "commit": pending["commit"], "source_hash": pending["result_source"]})
             return
+
+    def _delivery_final_evidence(self, rid, journal, *, fresh):
+        """Assess the current final observation without changing recovery state or authority."""
+        snapshot = {key: self.store.get(rid, key) for key in
+                    ("plan", "verify/identity", "verify/checks", "verify/visuals")}
+        try:
+            plan_data = snapshot["plan"]
+            plan = PlanResult.model_validate(plan_data) if plan_data else None
+            journal_plan = PlanResult.model_validate(journal["plan"]) if journal["plan"] else None
+            checks = [CheckResult.model_validate(row) for row in snapshot["verify/checks"] or []]
+            if (not checks or not snapshot["verify/identity"]
+                    or snapshot["verify/identity"] != journal["validation"]
+                    or plan != journal_plan
+                    or any(row.source_hash != journal["source_hash"]
+                           or row.environment_hash != journal["environment"]["fingerprint"] for row in checks)):
+                raise ValueError("Final observation is not bound to this candidate and plan")
+            for row in checks:
+                if row.test_runner:
+                    if row.report_status != "valid" or not row.report:
+                        raise ValueError("Required final machine report is missing")
+                    self.artifacts.bytes(row.report)
+                for ref in [*row.logs, *(item["artifact"] for item in row.attachments)]:
+                    if not self.artifacts.released(ref):
+                        self.artifacts.bytes(ref)
+                if row.environment_resolution:
+                    self.artifacts.bytes(row.environment_resolution)
+            raw_visuals = snapshot["verify/visuals"]
+            if raw_visuals is not None and not isinstance(raw_visuals, list):
+                raise ValueError("Final browser observations must be a list")
+            visuals = list(raw_visuals or [])
+            required_visuals = bool(plan and plan.preview)
+            if required_visuals and not visuals:
+                raise ValueError("Required final browser observations are missing")
+            while visuals:
+                visual = visuals.pop()
+                if not isinstance(visual, dict) or not isinstance(visual.get("tiles", []), list):
+                    raise ValueError("Malformed final browser observation")
+                if required_visuals or visual.get("screenshot") or "image_artifact" in visual:
+                    self.artifacts.bytes(visual["image_artifact"])
+                visuals.extend(visual.get("tiles", []))
+            with self.artifacts.reading(snapshot, rid):
+                if fresh:
+                    work = Path(journal["work"])
+                    saved = journal["environment"]
+                    environment = Environment(Path(saved["prefix"]), saved["fingerprint"], saved.get("resolution", {}))
+                    commands = self._candidate_checks(plan, work) if plan else (
+                        IntakeResult.model_validate(self.store.get(rid, "clarify")).verification
+                        or self.config.load().verification)
+                    assessment = reusable(commands, checks, work, environment, self.artifacts)
+                    if not assessment.allowed:
+                        raise ValueError(assessment.reason)
+        except (OSError, ValueError, TypeError, KeyError, AA2Error) as exc:
+            raise StateConflict(f"Final delivery evidence is unavailable or no longer matches: {exc}",
+                                phase="delivery", evidence_refs=tuple(snapshot)) from exc
+        return snapshot
 
     async def _review_research(self, rid, work, document, retrieved):
         review = await self._invoke("review", {"review_kind": "research", "research": document,

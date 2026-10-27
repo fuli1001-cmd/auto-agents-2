@@ -57,7 +57,28 @@ def setup(tmp_path, monkeypatch, *, preview=True):
     return workflow, rid, version, observed
 
 
+async def prepare_final_observation(workflow, rid):
+    """Create the real prerequisite evidence for a fixture starting at runtime.
+
+    Runtime application counters intentionally exclude this earlier final check.
+    Normal Engine reentry still invokes its independent authority reviewer.
+    """
+    from auto_agents_2.design import inspect_application
+    journal = workflow.store.get(rid, 'delivery/journal')
+    plan = PlanResult.model_validate(journal['plan'])
+    work = Path(journal['work'])
+    environment = Environment(Path(journal['environment']['prefix']), journal['environment']['fingerprint'])
+    workflow.store.checkpoint(rid, 'plan', plan.model_dump())
+    checks = await workflow._checks(rid, workflow._candidate_checks(plan, work), work, environment)
+    assert checks and all(row.exit_code == 0 for row in checks)
+    visuals = await inspect_application(plan.preview, work, workflow.store.root / 'visuals' / rid / 'final-fixture',
+                                       environment, workflow.sandbox, workflow.store.root) if plan.preview else []
+    workflow.store.checkpoints(rid, {'verify/identity': journal['validation'],
+        'verify/checks': [row.model_dump() for row in checks], 'verify/visuals': workflow._archive_visuals(visuals)})
+
+
 async def interrupted_completion(workflow, rid, monkeypatch):
+    await prepare_final_observation(workflow, rid)
     def cut(*args):
         raise asyncio.CancelledError()
     with monkeypatch.context() as patch:
@@ -163,3 +184,29 @@ async def test_identity_change_during_application_check_retains_stale_observatio
     observation = workflow.store.get(rid, 'delivery/runtime-browser-stale')
     assert observation['browser_version'] == '8:fixture-browser' and observation['visuals']
     assert workflow.store.run(rid)['status'] != 'SUCCEEDED'
+
+
+@pytest.mark.parametrize('defect', ['empty', 'both_fields', 'invalid_row', 'invalid_tiles', 'missing_tile'])
+async def test_delivery_rejects_missing_required_final_visual_shape(browser_cache, tmp_path, monkeypatch, defect):
+    workflow, rid, _, calls = setup(tmp_path, monkeypatch)
+    await prepare_final_observation(workflow, rid)
+    rows = workflow.store.get(rid, 'verify/visuals')
+    assert rows and all(row.get('image_artifact') for row in rows)
+    if defect == 'empty':
+        rows = []
+    elif defect == 'both_fields':
+        rows[0].pop('screenshot')
+        rows[0].pop('image_artifact')
+    elif defect == 'invalid_row':
+        rows[0] = None
+    elif defect == 'invalid_tiles':
+        rows[0]['tiles'] = {}
+    else:
+        rows[0]['tiles'] = [{'viewport': 320}]
+    workflow.store.checkpoint(rid, 'verify/visuals', rows)
+    before = workflow.store.get(rid, 'delivery/journal')
+    with pytest.raises(StateConflict, match='Final delivery evidence'):
+        await workflow._execute(rid)
+    assert workflow.store.run(rid)['status'] != 'SUCCEEDED'
+    assert workflow.store.get(rid, 'delivery/journal') == before
+    assert calls['application'] == 0
