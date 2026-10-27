@@ -1548,6 +1548,14 @@ class WorkflowEngine:
                 continue
             cached = self.store.get(rid, stage)
             if cached:
+                if (stage == "provider_research"
+                        and self.authority.author_scope(rid, stage)["correction"]):
+                    # Old versions could cache research without closing its correction.
+                    # Review that exact retained document, including controller metadata;
+                    # an older acceptance cannot settle a newer active dispute.
+                    review = await self._review_research(rid, work, cached, cached.get("verified_sources", []))
+                    self.store.checkpoints(rid, {stage: cached,
+                        **self.authority.acceptance(rid, stage, cached, review)})
                 if stage == "design":
                     if not self.authority.accepted(rid, stage, cached):
                         await DesignDocuments(self).reaudit(rid, work, cached, context)
@@ -1632,13 +1640,11 @@ class WorkflowEngine:
                                       for f in review.findings)
                     raise Replan("design", review.summary + details)
                 context["design_review"] = DesignDocuments(self).context(rid, work)
-            if stage == "provider_research" and document.sources:
-                retrieved = await ResearchService(self.artifacts).verify(document.sources)
-                review = await self._invoke("review", {"review_kind": "research", "research": document.model_dump(),
-                                                     "retrieved_sources": retrieved}, ReviewResult,
-                                            work, rid, "research-review", fresh=True)
-                if not review.approved:
-                    raise Replan(stage, review.summary)
+            if stage == "provider_research":
+                review = None
+                if document.sources or self.authority.author_scope(rid, stage)["correction"]:
+                    retrieved = await ResearchService(self.artifacts).verify(document.sources)
+                    review = await self._review_research(rid, work, document.model_dump(), retrieved)
             if stage == "plan":
                 self._replan_contract(rid, "plan", False)
                 unmet = {c.requirement_id for c in result.coverage if c.status != "satisfied"}
@@ -1712,7 +1718,7 @@ class WorkflowEngine:
             if stage == "plan":
                 from .check_production import activation_updates
                 updates.update(activation_updates(self.store.get(rid, "evidence_admission/initial")))
-            if stage in {"design", "plan"}:
+            if stage in {"design", "plan"} or stage == "provider_research" and review is not None:
                 updates.update(self.authority.acceptance(rid, stage, stage_data, review))
             self.store.checkpoints(rid, updates)
             context[stage] = stage_data
@@ -2886,6 +2892,14 @@ class WorkflowEngine:
             self.recovery.complete_delivery_action(rid, pending.get("recovery_permit"),
                 {"status": "applied", "commit": pending["commit"], "source_hash": pending["result_source"]})
             return
+
+    async def _review_research(self, rid, work, document, retrieved):
+        review = await self._invoke("review", {"review_kind": "research", "research": document,
+                                             "retrieved_sources": retrieved}, ReviewResult,
+                                    work, rid, "research-review", fresh=True)
+        if not review.approved:
+            raise Replan("provider_research", review.summary)
+        return review
 
     def _candidate_checks(self, plan, work):
         # Whole-source evidence remains conservative: accepted implementation is
