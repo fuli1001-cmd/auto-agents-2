@@ -336,7 +336,9 @@ class _Selection:
         if index_ref:
             index = self.artifacts.json(index_ref)
         elif retrieval.get("raw"):
-            extracted, _, index = extract_sections(self.artifacts.bytes(retrieval["raw"]), retrieval.get("mime_type", "text/plain"))
+            source_url = retrieval.get("final_url", "") if retrieval.get("extractor_version") == "structured-text-v4" else ""
+            extracted, _, index = extract_sections(self.artifacts.bytes(retrieval["raw"]),
+                                                   retrieval.get("mime_type", "text/plain"), source_url=source_url)
             if extracted != text:
                 raise ProviderError("Research section index does not match the retained text")
             index_ref = self.artifacts.put(index, "research_section_index")

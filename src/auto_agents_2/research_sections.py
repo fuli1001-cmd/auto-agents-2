@@ -88,7 +88,7 @@ class SectionExtractor(TextExtractor):
                       "headings": headings, "anchors": anchors}
 
 
-def extract_sections(raw: bytes, mime: str):
+def extract_sections(raw: bytes, mime: str, *, source_url: str = ""):
     text, encoding = decode_document(raw, mime)
     if mime.partition(";")[0].strip().lower() not in {"text/html", "application/xhtml+xml"}:
         return text, encoding, {"version": SECTION_VERSION, "characters": len(text), "text_hash": digest(text),
@@ -96,8 +96,20 @@ def extract_sections(raw: bytes, mime: str):
     parser = SectionExtractor()
     parser.feed(text)
     parser.close()
-    text, index = parser.index()
-    return text, encoding, index
+    visible, index = parser.index()
+    if source_url:
+        from .research_embedded import embedded_document
+        embedded = embedded_document(text, source_url)
+        if embedded:
+            # Preserve visible caveats as well as the exact public Markdown export.
+            # Existing HTML ranges stay bound to the visible portion; absent
+            # Markdown anchors use the existing full-text/index fallback.
+            start = len(visible) + len("\n\n[Public document Markdown export]\n")
+            visible += "\n\n[Public document Markdown export]\n" + embedded["text"]
+            index["embedded_documents"] = [{k: v for k, v in embedded.items() if k != "text"} |
+                                           {"start": start, "end": len(visible)}]
+            index.update(characters=len(visible), text_hash=digest(visible))
+    return visible, encoding, index
 
 
 def select_section(index, fragment):

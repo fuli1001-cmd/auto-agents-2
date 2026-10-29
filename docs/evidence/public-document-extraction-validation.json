@@ -1,0 +1,190 @@
+{
+  "baseline_commit": "bda948b6d5993bb445845df066c6c56bc41d16b9",
+  "root_cause": {
+    "run_id": "run_48e9da6525b14121",
+    "question_id": "question_6496b61501b14c3e",
+    "question_binding": "b646ea137b8d4c21a5ccbcc0263fcf05fe0899494fb603ec387a92afcbe39be8",
+    "decision_evidence": {
+      "facts": {
+        "environment.python_version": "3.11",
+        "environment.node_version": "22"
+      }
+    },
+    "decision_action": "ask_user",
+    "cause": "Visible-HTML extraction skipped the current public document Markdown serialized in strict page-bound JSON; the technical clarification fact set is intentionally narrow.",
+    "comparisons": [
+      {
+        "url": "https://docs.volcengine.com/docs/doubao-voice/unidirectional-streaming-text-to-speech-http?lang=zh",
+        "legacy_characters": 15321,
+        "current_characters": 40983,
+        "body_characters": 25626,
+        "complete_body_in_legacy": false,
+        "complete_body_in_current": true,
+        "raw_sha256": "3963d8bcc10ad78744df1b488fc76121ae39a6b44940021a85c7ca5241bd64b7",
+        "markdown_sha256": "5f3b79ebf6dfdfd963d1e7c358301f12d59fb730511e8e9bab90262d7a054c50"
+      },
+      {
+        "url": "https://docs.volcengine.com/docs/doubao-voice/task-submission-http-1?lang=zh",
+        "legacy_characters": 15281,
+        "current_characters": 33704,
+        "body_characters": 18387,
+        "complete_body_in_legacy": false,
+        "complete_body_in_current": true,
+        "raw_sha256": "68b61b7e330791ebb6aee209c1591b5cf26810aa68f8fa49b33c350bb42ff735",
+        "markdown_sha256": "0ffa94f66615a099d17103d842b698a0b3c2f6aeb342c6c80c71bbd3d3f30fda"
+      },
+      {
+        "url": "https://docs.volcengine.com/docs/ark/seedance-portrait-asset-guide?lang=zh",
+        "legacy_characters": 10587,
+        "current_characters": 37922,
+        "body_characters": 27299,
+        "complete_body_in_legacy": false,
+        "complete_body_in_current": true,
+        "raw_sha256": "30d469d25a0f4ca6553705b0fc1b286cbe542f426959174c7d8d3799eb3f2d01",
+        "markdown_sha256": "a2151b4cf2d07f6a758207c41ee75889288fd0e21dc9b1082250d9a5bda07695"
+      }
+    ],
+    "network_policy_changed": false,
+    "javascript_executed": false,
+    "claims_approved_by_capture": false
+  },
+  "official_captures": [
+    {
+      "url": "https://docs.volcengine.com/docs/doubao-voice/unidirectional-streaming-text-to-speech-http?lang=zh",
+      "final_url": "https://docs.volcengine.com/docs/doubao-voice/unidirectional-streaming-text-to-speech-http?lang=zh",
+      "captured_at": 1793244444.5767143,
+      "raw": {
+        "hash": "3963d8bcc10ad78744df1b488fc76121ae39a6b44940021a85c7ca5241bd64b7",
+        "kind": "research_response",
+        "bytes": 376545
+      },
+      "extracted": {
+        "hash": "b6c28c518bb0c1e395b027b40348ba754fcd05e4cdbac540d57009072be7348d",
+        "kind": "research_extracted",
+        "bytes": 47819
+      },
+      "extractor_version": "structured-text-v4",
+      "document": {
+        "document_id": 2528925,
+        "end": 40983,
+        "library_id": 6561,
+        "source": "window._ROUTER_DATA.loaderData.docs/(libid)/(docid$)/page.curDoc.MDContent",
+        "start": 15357,
+        "title": "单向流式语音合成(HTTP)",
+        "updated_time": "2026-10-27T07:36:30Z"
+      },
+      "markdown_sha256": "5f3b79ebf6dfdfd963d1e7c358301f12d59fb730511e8e9bab90262d7a054c50",
+      "supported_version": null
+    },
+    {
+      "url": "https://docs.volcengine.com/docs/doubao-voice/task-submission-http-1?lang=zh",
+      "final_url": "https://docs.volcengine.com/docs/doubao-voice/task-submission-http-1?lang=zh",
+      "captured_at": 1793244444.4235394,
+      "raw": {
+        "hash": "68b61b7e330791ebb6aee209c1591b5cf26810aa68f8fa49b33c350bb42ff735",
+        "kind": "research_response",
+        "bytes": 377108
+      },
+      "extracted": {
+        "hash": "622bd1729a374924628731a715cb0064b7530ac29d672ac90009e3f15565a60b",
+        "kind": "research_extracted",
+        "bytes": 42146
+      },
+      "extractor_version": "structured-text-v4",
+      "document": {
+        "document_id": 2606791,
+        "end": 33704,
+        "library_id": 6561,
+        "source": "window._ROUTER_DATA.loaderData.docs/(libid)/(docid$)/page.curDoc.MDContent",
+        "start": 15317,
+        "title": "任务提交",
+        "updated_time": "2026-10-27T07:18:37Z"
+      },
+      "markdown_sha256": "0ffa94f66615a099d17103d842b698a0b3c2f6aeb342c6c80c71bbd3d3f30fda",
+      "supported_version": null
+    },
+    {
+      "url": "https://docs.volcengine.com/docs/ark/seedance-portrait-asset-guide?lang=zh",
+      "final_url": "https://docs.volcengine.com/docs/ark/seedance-portrait-asset-guide?lang=zh",
+      "captured_at": 1793244444.047952,
+      "raw": {
+        "hash": "30d469d25a0f4ca6553705b0fc1b286cbe542f426959174c7d8d3799eb3f2d01",
+        "kind": "research_response",
+        "bytes": 538917
+      },
+      "extracted": {
+        "hash": "2ba45ef072ab80d1cd8bd70d14deff0bb0b19521da90406f4c2b7bc763824160",
+        "kind": "research_extracted",
+        "bytes": 44464
+      },
+      "extractor_version": "structured-text-v4",
+      "document": {
+        "document_id": 2608626,
+        "end": 37922,
+        "library_id": 82379,
+        "source": "window._ROUTER_DATA.loaderData.docs/(libid)/(docid$)/page.curDoc.MDContent",
+        "start": 10623,
+        "title": "Doubao Seedance 便利创作含肖像视频",
+        "updated_time": "2026-10-08T04:48:23Z"
+      },
+      "markdown_sha256": "a2151b4cf2d07f6a758207c41ee75889288fd0e21dc9b1082250d9a5bda07695",
+      "supported_version": null
+    }
+  ],
+  "final_source_replay": [
+    {
+      "url": "https://docs.volcengine.com/docs/doubao-voice/unidirectional-streaming-text-to-speech-http?lang=zh",
+      "raw_sha256": "3963d8bcc10ad78744df1b488fc76121ae39a6b44940021a85c7ca5241bd64b7",
+      "extracted_sha256": "b6c28c518bb0c1e395b027b40348ba754fcd05e4cdbac540d57009072be7348d",
+      "same_with_final_source": true
+    },
+    {
+      "url": "https://docs.volcengine.com/docs/doubao-voice/task-submission-http-1?lang=zh",
+      "raw_sha256": "68b61b7e330791ebb6aee209c1591b5cf26810aa68f8fa49b33c350bb42ff735",
+      "extracted_sha256": "622bd1729a374924628731a715cb0064b7530ac29d672ac90009e3f15565a60b",
+      "same_with_final_source": true
+    },
+    {
+      "url": "https://docs.volcengine.com/docs/ark/seedance-portrait-asset-guide?lang=zh",
+      "raw_sha256": "30d469d25a0f4ca6553705b0fc1b286cbe542f426959174c7d8d3799eb3f2d01",
+      "extracted_sha256": "2ba45ef072ab80d1cd8bd70d14deff0bb0b19521da90406f4c2b7bc763824160",
+      "same_with_final_source": true
+    }
+  ],
+  "validation": {
+    "full_suite": {
+      "tests": 2970,
+      "errors": 0,
+      "failures": 0,
+      "skipped": 0,
+      "seconds": 4554.673,
+      "new_test_cases": 26,
+      "captured_output_characters": 0,
+      "tested_input_files": 258,
+      "source_manifest_sha256": "be2ac18dde85cadb3fa10bf465b0d15b2ebbe5c88e8cb56487eb70d0d6acac37",
+      "junit_sha256": "2cafdf4aaa32a6831e174cfe9a17478fa39d5422ecf25fd49c08fe4e6a69368a",
+      "baseline_head": "bda948b6d5993bb445845df066c6c56bc41d16b9",
+      "console_result": "2970 passed in 4555.19s (1:15:55)"
+    },
+    "command": ".conda-env/bin/python -m pytest -q --junitxml=/tmp/muya-aa2-embedded-final-suite.xml",
+    "exit_code": 0,
+    "related_suite": {
+      "passed": 111,
+      "seconds": 66.15,
+      "overlaps_full_suite": true
+    },
+    "ruff_check_src_tests": "passed before final full suite",
+    "pip_check": "passed in selected project Conda environment",
+    "source_inputs_unchanged_after_suite": true,
+    "interrupted_previous_suite_counted": false
+  },
+  "recovery_at_validation": {
+    "status": "not yet submitted",
+    "run_id": "run_48e9da6525b14121",
+    "question_id": "question_6496b61501b14c3e",
+    "binding": "b646ea137b8d4c21a5ccbcc0263fcf05fe0899494fb603ec387a92afcbe39be8",
+    "total_tokens_before_recovery": 9991601,
+    "prototype_approval": false,
+    "paid_media_calls": false
+  }
+}

@@ -124,7 +124,7 @@ def execute(root, request):
         kind = request["mime"]
     if action == "research":
         from .research_sections import extract_sections
-        text, encoding, sections = extract_sections(raw, kind)
+        text, encoding, sections = extract_sections(raw, kind, source_url=request["final_url"])
     else:
         text, encoding = extract_document(raw, kind)
     if action in {"local_requirements", "requirements"}:
@@ -137,7 +137,7 @@ def execute(root, request):
     raw_ref = artifacts.put(raw, "research_response")
     extracted = artifacts.put(text, "research_extracted")
     metadata = {"source": request["source"], "final_url": request["final_url"], "mime_type": kind,
-                "encoding": encoding, "captured_at": now(), "extractor_version": "structured-text-v3",
+                "encoding": encoding, "captured_at": now(), "extractor_version": "structured-text-v4",
                 "raw": raw_ref, "artifact": extracted, "hash": extracted["hash"],
                 "section_index": artifacts.put(sections, "research_section_index")}
     return {**metadata, "manifest": artifacts.put(metadata, "research_manifest"), "excerpt": text}
