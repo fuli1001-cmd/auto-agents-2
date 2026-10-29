@@ -27,20 +27,35 @@ class PrototypeCoverage(Record):
 
 
 class PrototypeFinding(Finding):
-    criterion_id: str
-    kind: Literal["defect", "evidence_gap", "advisory"]
+    criterion_id: str = Field(description="Exact criterion ID from prototype_review_basis; never invent an ID.")
+    kind: Literal["defect", "evidence_gap", "advisory"] = Field(
+        description="defect requires violated coverage and owner=prototype; evidence_gap requires unverified "
+                    "coverage and a supported owner/capability pair; advisory is minor and never blocks.")
     observation: str = Field(min_length=1)
     evidence_refs: list[str] = Field(min_length=1)
-    owner: Literal["prototype", "clarify", "controller"]
+    owner: Literal["prototype", "clarify", "controller"] = Field(
+        description="Use clarify for unresolved source interpretation or an explicit submitted-answer/accepted-specification "
+                    "conflict requiring formal specification revision: kind=evidence_gap, coverage=unverified, "
+                    "requested_capability=none. This routes to the owning stage, not automatically to the user. "
+                    "A defect always belongs to prototype; controller gaps require an unavailable capability.")
     requested_capability: Literal["none", "supported_browser_actions", "source_inspection", "unavailable"]
-    source_quote: str = ""
+    source_quote: str = Field(default="", description="For clarify/controller evidence gaps, quote the same criterion: "
+                             "raw_requirements for user:original, otherwise that criterion's exact statement. "
+                             "A quote from a different criterion or candidate prose does not establish this binding.")
 
 
 class PrototypeReview(ReviewResult):
     basis_hash: str
     candidate_hash: str
-    coverage: list[PrototypeCoverage]
-    findings: list[PrototypeFinding] = []
+    coverage: list[PrototypeCoverage] = Field(
+        description="Assess every supplied criterion exactly once. Every violated or unverified criterion must have "
+                    "a non-advisory finding for that exact ID, and every such finding must match its coverage: "
+                    "defect=violated, evidence_gap=unverified. The unresolved and non-advisory finding ID sets must "
+                    "be equal; deleting a finding cannot leave its coverage unresolved. Do not mark an unverified "
+                    "criterion satisfied merely to satisfy this response contract.")
+    findings: list[PrototypeFinding] = Field(default=[], description="Ground every unresolved coverage row with "
+                                            "an observed, non-advisory finding; a rejection needs at least one. "
+                                            "An approval cannot have unresolved coverage or blocking/major findings.")
 
 
 class InvalidPrototypeReview(InvalidStructuredResponse):
@@ -201,10 +216,19 @@ def review_instructions():
         "A later_stage assessment requires a requirements citation and a rationale preserving the complete later obligation; "
         "never defer an explicitly current user requirement or the fixed stage criterion. Findings separate criterion_id, "
         "observation, evidence_refs and resolution (advice only). Defects are major/blocking with violated coverage, "
-        "owner=prototype and requested_capability=none. Missing evidence is major/blocking with unverified coverage: "
-        "prototype can add only supported_browser_actions or source_inspection. An ambiguous requirement uses owner=clarify, "
-        "requested_capability=none and an exact source_quote; a genuinely required unsupported capability uses owner=controller, "
-        "requested_capability=unavailable and an exact original/specification source_quote. Explain why an existing method "
+        "owner=prototype and requested_capability=none. Every violated or unverified coverage criterion needs a "
+        "non-advisory finding for that exact ID, and every non-advisory finding needs matching coverage; these ID sets "
+        "must be equal. Correcting/removing a finding must not leave an orphaned coverage row or falsely mark it satisfied. "
+        "Missing evidence is major/blocking with kind=evidence_gap and unverified coverage: prototype can add only "
+        "supported_browser_actions or source_inspection. Unresolved source interpretation OR an explicit new submitted "
+        "answer conflicting with the accepted specification uses kind=evidence_gap, owner=clarify, "
+        "requested_capability=none and unverified coverage for the affected source/specification criterion. "
+        "This requests formal specification-stage correction and does not itself ask the user to decide an already "
+        "explicit change; it does not authorize the prototype stage to edit upstream files. Quote that exact criterion: "
+        "raw_requirements for user:original, otherwise its statement in the basis, including submitted answers. "
+        "Do not attach an answer's quote to a different specification criterion; describe the conflicting sources in "
+        "the observation while binding source_quote to the chosen criterion. A genuinely required unsupported capability "
+        "uses owner=controller, requested_capability=unavailable and the same exact-source rule. Explain why an existing method "
         "cannot decide the real requirement; personal preference for a collector is advisory, not an obligation. "
         "Advisory findings are minor, owner=prototype and cannot cause rejection. approved=false requires grounded unresolved "
         "findings; approved=true requires every current criterion satisfied and no unresolved facts. No schema field grants "
