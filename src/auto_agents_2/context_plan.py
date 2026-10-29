@@ -30,9 +30,9 @@ LINKED_INLINE = 4000
 SHARED = {"controller_review_basis", "controller_authority_scope", "task", "mandatory", "constraints", "global_constraints", "prototype_approval", "design_review", "source_history", "feedback",
           "controller_feedback", "controller_attachment_capture", "controller_recording_recovery", "controller_evidence_capabilities", "evidence_requirement_source", "evidence_candidate_hash", "unsupported_evidence_obligations", "evidence_reference_contract", "controller_stage_contract", "validation_feedback"}
 CONTRACTS = {
-    "clarify": {"raw_requirements", "raw_requirements_truncated", "history", "project", "decisions",
+    "clarify": {"raw_requirements", "raw_requirements_truncated", "history", "project", "decisions", "submitted_answers",
                 "review_feedback", "additional_evidence", "regression_evidence", "coverage_verification"},
-    "coverage_review": {"raw_requirements", "raw_requirements_truncated", "history", "project", "decisions",
+    "coverage_review": {"raw_requirements", "raw_requirements_truncated", "history", "project", "decisions", "submitted_answers",
                         "assessment", "review_feedback", "coverage_verification"},
     "provider_research": {"specification", "project", "provider_research_answer"},
     "research": {"research", "retrieved_sources"},
@@ -494,7 +494,7 @@ class _Selection:
             else:
                 # Explicit unknown constraints are never silently discarded.
                 self.result.payload[key] = (copy.deepcopy(value) if key in {
-                    "controller_review_basis", "controller_authority_scope"} else
+                    "controller_review_basis", "controller_authority_scope", "submitted_answers"} else
                     self.compact(value, key) if key in KNOWN else copy.deepcopy(value))
             self.mark(key, "inline", "Stage input contract" if key in KNOWN else "Unclassified mandatory extension", value)
         self.evidence_dependencies()

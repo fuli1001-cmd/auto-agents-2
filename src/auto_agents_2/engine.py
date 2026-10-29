@@ -1460,6 +1460,10 @@ class WorkflowEngine:
         assessment = self.store.get(rid, "clarify")
         if not assessment:
             for turn in range(20):
+                # Replans may originate after prototype/design answers, outside this
+                # loop. Reload bound external answers rather than trusting summaries
+                # or a persisted snapshot; automatic decisions are not requirements.
+                context["submitted_answers"] = self.store.submitted_answers(rid)
                 result = await self._invoke("clarify", context, IntakeResult, work, rid, "clarify")
                 if result.questions:
                     response = await self._questions(rid, f"clarify/{turn}", result.questions, digest(result.model_dump()))

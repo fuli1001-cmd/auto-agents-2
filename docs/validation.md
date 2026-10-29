@@ -490,3 +490,11 @@ AA2_BROWSER_CACHE="$PWD/.cache/browsers" python tests/manual_frontend.py
 ```
 
 该脚本创建自己的临时项目，保存源码、锁文件、检查结果与截图，结束后回收依赖和构建目录。无 Chromium 或系统沙箱条件时，相应自动测试会明确 skip；上面的本机记录中这些检查实际执行。
+
+## 已提交答复贯通澄清修复（2026-10-29）
+
+原型等后续阶段的正式反馈此前仅由独立审查读取；回退到 clarify 时，生成输入可能只保留审查摘要，导致重复索取已保存全文。本次在每轮澄清重载有效 submitted_answers，并在澄清及覆盖审查上下文中完整保留原问题、原始答复和版本绑定；审批与自动技术决策继续排除在需求来源外。
+
+在 aa2 项目 Conda 环境执行：专项 7 项通过，相关回归 163 项通过，全量 `python -m pytest -v --tb=short tests --junitxml=…/full-suite.xml` 共 2984 项全部通过，失败、错误、跳过均为 0，耗时 4293.73 秒。全量运行前后及最终审查时的 258 个源码、测试和配置输入指纹一致，因此最终审查没有重复运行全套。Ruff 与 Git 差异检查通过。
+
+本机原始证据保存在 `/tmp/muya-clarify-answers-repair-20261029/`：`repro.log` 记录修复前失败，`focused.xml`、`related.xml`、`full-suite.xml` 和相应日志记录通过结果，`full-source-before.json` 与 `full-source-after.json` 保存完整输入指纹。全量 JUnit SHA-256 为 `ac82834d10b0ec2f4e1871496e0fed01d1f34d2410c859a58b8b3e1b67dae711`。此结果验证控制器修复，不代表 Muya 新原型已通过人工审核。
