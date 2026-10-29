@@ -141,6 +141,7 @@ from .workspace import (
     source_manifest,
     source_manifest_hash,
     tree_hash,
+    validate_prepared,
 )
 
 STAGES = list(GATES)
@@ -1326,7 +1327,9 @@ class WorkflowEngine:
                 raise Replan("prototype", "Cite the chosen pinned DESIGN.md candidate URL in sources before producing a new design")
             retrieved = await ResearchService(self.artifacts).verify(selected) if selected else []
             prior_pages = git(work, "ls-tree", "-r", "--name-only", self.store.get(rid, "baseline"), "--", "design/prototypes")
-            scopes = specification.prototype_paths if prior_pages else ["design/prototypes", "DESIGN.md"]
+            scopes = specification.prototype_paths
+            if not scopes and not prior_pages:
+                scopes = ["design/prototypes", "DESIGN.md"]
             if prior_pages and document.files and not scopes:
                 raise Replan("clarify", "Existing prototypes require explicit prototype_paths; preserve unrelated designs")
             if any(not (p == "DESIGN.md" or p.startswith("design/prototypes/")) for p in specification.prototype_paths):
@@ -1339,12 +1342,19 @@ class WorkflowEngine:
             document = document.model_copy(update={"files": files})
             pending.update(document=document.model_dump(), retrieved=retrieved, prepared=prepared)
             self.store.checkpoint(rid, key, pending)
-        self._replan_contract(rid, "prototype_scope", True)
         if "fingerprint" not in pending:
-            validate_stage_writes("prototype", pending["prepared"], specification.prototype_paths or ["design/prototypes", "DESIGN.md"])
+            try:
+                validate_stage_writes("prototype", pending["prepared"], specification.prototype_paths or ["design/prototypes", "DESIGN.md"])
+            except PolicyViolation as exc:
+                # A rejected saved proposal cannot hide concurrent file drift.
+                validate_prepared(work, pending["prepared"])
+                self._replan_contract(rid, "prototype_scope", False)
+                raise Replan("prototype", str(exc)) from exc
+            # Actual file drift or permission failures must still block application.
             apply_prepared(work, pending["prepared"])
             pending["fingerprint"] = self._prototype_hash(work)
             self.store.checkpoint(rid, key, pending)
+        self._replan_contract(rid, "prototype_scope", True)
         fingerprint = self._prototype_hash(work)
         legacy_fingerprint = digest([legacy_tree_hash(work / "design/prototypes"),
                                     (work / "DESIGN.md").read_text() if (work / "DESIGN.md").exists() else ""])

@@ -253,7 +253,8 @@ def validate_patch_structure(prepared):
             raise PolicyViolation("Conflicting ancestor/descendant file changes")
 
 
-def apply_prepared(root: Path, prepared: list[dict]):
+def validate_prepared(root: Path, prepared: list[dict]) -> list[dict]:
+    """Check replay safety and return application order without writing files."""
     validate_patch_structure(prepared)
     ordered = sorted(prepared, key=lambda row: (row["after"] is not None,
                      -len(Path(row["path"]).parts) if row["after"] is None else len(Path(row["path"]).parts)))
@@ -269,6 +270,11 @@ def apply_prepared(root: Path, prepared: list[dict]):
         current = digest(path.read_bytes()) if path.is_file() else None
         if current not in {item["before"], item["after"]}:
             raise PolicyViolation(f"File changed after candidate preparation: {item['path']}")
+    return ordered
+
+
+def apply_prepared(root: Path, prepared: list[dict]):
+    ordered = validate_prepared(root, prepared)
     for item in ordered:
         path, _ = write_path(root, item["path"])
         op, content = item["operation"], item["content"]
