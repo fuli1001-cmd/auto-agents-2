@@ -29,6 +29,8 @@ from .util import atomic_write, digest, identifier, scrub_text, write_json
 from .workspace import file_digest
 
 INPUT_LIMIT_DIAGNOSTIC = "provider 输入超过 CLI 长度上限"
+CONTEXT_LIMIT_DIAGNOSTIC = "provider 会话超过模型上下文容量"
+MODEL_UNAVAILABLE_DIAGNOSTIC = "provider 所选模型不可用或不受支持"
 
 
 class _ConfirmedProviderCancellation(asyncio.CancelledError):
@@ -44,6 +46,8 @@ def diagnostic_summary(text: str) -> str:
     lower = text.lower()
     for needles, label in (
         (("input_too_large", "input exceeds the maximum length"), INPUT_LIMIT_DIAGNOSTIC),
+        (("context_window_exceeded", "ran out of room in the model's context window"), CONTEXT_LIMIT_DIAGNOSTIC),
+        (("model_not_found", "model is not supported"), MODEL_UNAVAILABLE_DIAGNOSTIC),
         (("429", "rate limit", "capacity", "overloaded"), "provider 限流或容量不足"),
         (("retry", "reconnect"), "provider 正在重试或重连"),
         (("connection", "disconnect", "503"), "provider 连接异常"),
@@ -508,7 +512,8 @@ class ProviderRouter:
                     message = decoder.error or "".join(errors)
                     diagnostic = diagnostic_summary(message)
                     raise ProviderError(diagnostic + f"；未取得完整结果（退出码 {process.returncode}）",
-                        retryable=diagnostic != INPUT_LIMIT_DIAGNOSTIC and any(t in message.lower() for t in
+                        retryable=diagnostic not in {INPUT_LIMIT_DIAGNOSTIC, CONTEXT_LIMIT_DIAGNOSTIC, MODEL_UNAVAILABLE_DIAGNOSTIC}
+                        and any(t in message.lower() for t in
                             ("timeout", "timed out", "429", "503", "connection", "rate limit", "capacity", "overloaded")))
                 from .safe_files import read_regular
                 try:

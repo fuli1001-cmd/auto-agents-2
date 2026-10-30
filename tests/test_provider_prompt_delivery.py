@@ -257,3 +257,41 @@ sys.exit(1)
     assert finished["diagnostic"] == "provider 输入超过 CLI 长度上限"
     assert store.get(rid, "provider-result/failure") is None
     assert "EXAMPLE_PLACEHOLDER" not in str(failure.value) + json.dumps(events)
+
+
+@pytest.mark.parametrize(("message", "diagnostic"), [
+    ("context_window_exceeded", "provider 会话超过模型上下文容量"),
+    ("Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
+     "provider 会话超过模型上下文容量"),
+    ("The 'fixture-model' model is not supported when using Codex with a ChatGPT account.",
+     "provider 所选模型不可用或不受支持"),
+    ("model_not_found", "provider 所选模型不可用或不受支持"),
+])
+@pytest.mark.parametrize("structured", [False, True])
+async def test_context_and_model_errors_do_not_retry_incidental_connection_noise(tmp_path, message, diagnostic, structured):
+    router, project, store, rid = fixture_router(tmp_path)
+    binary = tmp_path / "provider"
+    binary.write_text(f"#!{sys.executable}\n" + f"MESSAGE = {message!r}\nSTRUCTURED = {structured!r}\n" + '''
+import json, sys
+sys.stdin.read()
+message = MESSAGE + " API_KEY=EXAMPLE_PLACEHOLDER"
+if STRUCTURED:
+    print(json.dumps({"type": "turn.failed", "error": {"message": message}}), flush=True)
+else:
+    print(message, file=sys.stderr, flush=True)
+print("retry connection timeout", file=sys.stderr, flush=True)
+sys.exit(1)
+''')
+    body = router.config.load().model_dump(mode="json")
+    body["execution"]["infra_retries"] = 1
+    write_json(router.config.path, body)
+    with pytest.raises(ProviderError, match=diagnostic) as failure:
+        await router.invoke("review", {}, ReviewResult, project, rid, "failure", fresh=True)
+    events = store.events(rid)
+    assert len([e for e in events if e["kind"] == "agent.started"]) == 1
+    assert not any(e["kind"] == "agent.retrying" for e in events)
+    finished = next(e["data"] for e in events if e["kind"] == "agent.finished")
+    assert finished["diagnostic"] == diagnostic
+    assert store.get(rid, "infra/failure/codex")["failures"] == 1
+    assert store.get(rid, "provider-result/failure") is None
+    assert "EXAMPLE_PLACEHOLDER" not in str(failure.value) + json.dumps(events)

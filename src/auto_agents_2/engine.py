@@ -1268,7 +1268,10 @@ class WorkflowEngine:
                 with observe_activity(self.store, rid, "准备原型设计参考"):
                     context["design_candidates"] = await DesignCatalog(self.store.root / "cache/design", self.sandbox).candidates(original)
             if document is None:
-                document = await self._invoke("prototype", context, DocumentResult, work, rid, "prototype")
+                # A new candidate has complete current inputs; do not accumulate
+                # prior rounds in the native session. Saved invocation/pending
+                # receipts still resume without redispatching their response.
+                document = await self._invoke("prototype", context, DocumentResult, work, rid, "prototype", fresh=True)
             pending = {"identity": identity, "document": document.model_dump(),
                        "design_candidates": context.get("design_candidates", []),
                        "question_refresh_version": PROTOTYPE_BROWSER_VERSION}
