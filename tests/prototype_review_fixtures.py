@@ -1,5 +1,11 @@
 """Explicit model responses for the finite prototype reviewer schema in tests."""
-from auto_agents_2.prototype_review import PrototypeCoverage, PrototypeFinding, PrototypeReview
+from auto_agents_2.prototype_review import (
+    PrototypeCoverage,
+    PrototypeFinding,
+    PrototypeReview,
+    VisualAssessment,
+)
+from auto_agents_2.visual_design import DIMENSIONS
 
 
 def prototype_verdict(context, *, approved=True, summary="Prototype reviewed", findings=None):
@@ -16,4 +22,9 @@ def prototype_verdict(context, *, approved=True, summary="Prototype reviewed", f
         rationale="Fixture independently inspected the current source and browser observations",
         evidence_refs=["candidate"]) for row in basis["criteria"]]
     return PrototypeReview(approved=approved, summary=summary, basis_hash=basis["hash"],
-        candidate_hash=basis["candidate_hash"], coverage=coverage, findings=findings)
+        candidate_hash=basis["candidate_hash"], coverage=coverage, findings=findings,
+        visual_assessment=[VisualAssessment(dimension=dimension,
+            judgment="supports_goal" if basis.get("visual_evidence") else "not_observable",
+            observation="Fixture inspected the supplied route/viewport images" if basis.get("visual_evidence")
+                        else "This fixture supplies no screenshot observations",
+            image_refs=list(basis.get("visual_evidence", {}))[:1]) for dimension in DIMENSIONS])

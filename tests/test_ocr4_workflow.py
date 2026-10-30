@@ -2,17 +2,27 @@ import json
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 from browser_fixtures import prototype_rows
 from evidence_test_fixtures import empty_contract
 from manual_recovery_snapshot import snapshot
 from test_ocr_manual_tools import paused_project
 from test_workflow import CodingAgent, engine
+from visual_design_fixtures import URL
 
 from auto_agents_2.errors import AA2Error
-from auto_agents_2.models import Change, Command, DocumentResult, PlanResult, PreviewSpec, SourceEvidence
+from auto_agents_2.models import (
+    Change,
+    Command,
+    DesignSelection,
+    DocumentResult,
+    PlanResult,
+    PreviewSpec,
+    SourceEvidence,
+)
 from auto_agents_2.planning import validate_plan
-from auto_agents_2.util import write_json
+from auto_agents_2.util import digest, write_json
 from auto_agents_2.workspace import WorkspaceManager, git, isolated_git
 
 
@@ -21,6 +31,9 @@ async def test_first_satisfied_frontend_gets_contracts_and_approval_without_impl
     project.mkdir()
     requirements = tmp_path / 'requirements.md'
     requirements.write_text('Keep the existing addition interface')
+    design_body = '# Existing addition interface\nKeep the familiar addition workflow and its labels.\n'
+    selection = DesignSelection(url=URL, rationale='The reference preserves the existing addition workflow.',
+                                adaptations=['Keep the current controls and labels unchanged.'])
     (project / 'calc.py').write_text('def add(a, b):\n    return a + b\n')
     (project / 'tests').mkdir()
     (project / 'tests/test_calc.py').write_text('from calc import add\ndef test_sum():\n    assert add(2, 3) == 5\n')
@@ -29,7 +42,7 @@ async def test_first_satisfied_frontend_gets_contracts_and_approval_without_impl
             if stage == 'prototype':
                 self.calls.append((stage, fresh))
                 return DocumentResult(summary='Existing screen contract', document='Prototype',
-                    sources=[SourceEvidence(url='https://fixture.invalid/DESIGN.md', claim='style')],
+                    sources=[SourceEvidence(url=URL, claim='style')], design_selection=[selection],
                     files=[Change(path='design/prototypes/index.html', content='<h1>Addition</h1>'),
                            Change(path='DESIGN.md', content='Existing addition interface')])
             if stage == 'plan':
@@ -49,7 +62,7 @@ async def test_first_satisfied_frontend_gets_contracts_and_approval_without_impl
     workflow = engine(project, agent)
     workflow.workspaces.checkpoint(project, 'refs/aa2/existing', 'existing product')
     original_source = (project / 'calc.py').read_bytes()
-    browser_calls, questions = [], []
+    browser_calls, questions, design_requests = [], [], []
     async def browser(*args):
         browser_calls.append(True)
         directory = args[0] if isinstance(args[0], Path) else args[1] / 'design/prototypes'
@@ -58,9 +71,11 @@ async def test_first_satisfied_frontend_gets_contracts_and_approval_without_impl
     async def installed(*args):
         pass
     async def candidates(*args):
-        return [{'url': 'https://fixture.invalid/DESIGN.md', 'revision': 'fixture'}]
-    async def research(*args):
-        return [{'url': 'https://fixture.invalid/DESIGN.md', 'excerpt': 'Existing addition interface'}]
+        return [{'url': URL, 'revision': 'a' * 40}]
+    def design_response(request):
+        assert request.method == 'GET' and str(request.url) == URL
+        design_requests.append(str(request.url))
+        return httpx.Response(200, content=design_body.encode(), headers={'content-type': 'text/plain'})
     async def approval(question):
         questions.append(question['key'])
         assert question['key'] == 'prototype-approval'
@@ -68,7 +83,8 @@ async def test_first_satisfied_frontend_gets_contracts_and_approval_without_impl
     workflow.question_handler = approval
     workflow._ensure_browser = installed
     monkeypatch.setattr('auto_agents_2.engine.DesignCatalog.candidates', candidates)
-    monkeypatch.setattr('auto_agents_2.engine.ResearchService.verify', research)
+    # Stub only HTTP: the controller must acquire and archive the complete fixture body itself.
+    monkeypatch.setattr('auto_agents_2.research.PublicHTTPTransport', lambda: httpx.MockTransport(design_response))
     monkeypatch.setattr('auto_agents_2.engine.inspect_prototype', browser)
     monkeypatch.setattr('auto_agents_2.engine.inspect_application', browser)
     result = await workflow.start(str(requirements))
@@ -77,6 +93,14 @@ async def test_first_satisfied_frontend_gets_contracts_and_approval_without_impl
     assert (project / 'calc.py').read_bytes() == original_source
     assert workflow.store.get(result['id'], 'plan')['tasks'] == []
     assert all(stage != 'implement' for stage, _ in agent.calls)
+    assert design_requests == [URL]
+    retained = workflow.store.get(result['id'], 'ui_design/sources')['sources']
+    assert len(retained) == 1 and retained[0]['design_selection'] == selection.model_dump()
+    assert retained[0]['pinned_revision'] == 'a' * 40
+    assert retained[0]['body_sha256'] == digest(design_body)
+    assert workflow.artifacts.read(retained[0]['retrieval']['artifact']) == design_body
+    assert workflow.artifacts.bytes(retained[0]['retrieval']['raw']) == design_body.encode()
+    assert 'visual_brief' not in workflow.store.get(result['id'], 'clarify')
 
 
 def test_empty_plan_requires_mode_and_verified_coverage():

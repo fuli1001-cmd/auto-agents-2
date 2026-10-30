@@ -6,9 +6,10 @@ from .context_plan import purpose_for
 from .execution_stages import stage_instructions
 from .prompt_rules import COMMON, instructions
 from .research import request_documents
+from .visual_design import visual_instructions
 
 INVOCATION_CONTRACT_VERSION = "2026-10-16.2"
-PROMPT_VERSION = "2026-10-24.prototype-review-authority-v1"
+PROMPT_VERSION = "2026-10-30.visual-design-v1"
 CORE = COMMON
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
@@ -82,7 +83,7 @@ class PromptCompiler:
             "generic": "Use clear, direct decisions backed by the provided evidence.",
         }.get(family, "Follow the task contract precisely.")
         data = json.dumps(request_documents(context), ensure_ascii=False, indent=2)
-        task = ROLES[stage]
+        task = ROLES[stage] + visual_instructions(purpose)
         if purpose == "prototype":
             from .prototype_contract import prototype_instructions
             from .prototype_review import review_instructions

@@ -1,5 +1,4 @@
 import asyncio
-import json
 import sys
 
 import pytest
@@ -9,7 +8,6 @@ from auto_agents_2.models import Change, DocumentResult, IntakeResult
 from auto_agents_2.providers import ProviderRouter
 from auto_agents_2.util import digest, write_json
 from auto_agents_2.workspace import git
-
 
 PAGE = "design/prototypes/task/index.html"
 
@@ -30,6 +28,7 @@ def fixture(tmp_path):
     binary = tmp_path / "provider"
     response = DocumentResult(summary="revised prototype", document="# Current prototype",
         files=[Change(path=PAGE, content="REVISED_PAGE_MARKER")]).model_dump(mode="json")
+    response["design_selection"] = []  # New strict wire field; legacy saved records still omit it.
     binary.write_text(f"#!{sys.executable}\nRESPONSE = {response!r}\n" + r'''
 import json, pathlib, sys
 args = sys.argv[1:]

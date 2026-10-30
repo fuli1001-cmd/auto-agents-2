@@ -81,6 +81,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":11,"output_tok
             review = value
         elif kind == "author":
             value = DocumentResult(summary="author", document="Local design").model_dump()
+            value["design_selection"] = []  # Full native schema, before the intentional defect below.
             review = value
         else:
             review = authority_review(context).model_dump()

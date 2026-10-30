@@ -19,7 +19,7 @@ from .research_sections import extract_sections, select_section
 from .util import digest
 from .workspace import git_environment, path_allowed
 
-CONTEXT_VERSION = "context-v6"
+CONTEXT_VERSION = "context-v7"
 TEXT_INLINE = 12000
 REFERENCE_INLINE = 2000
 RESEARCH_INLINE = 16000
@@ -28,7 +28,7 @@ LINKED_INLINE = 4000
 # Known workflow slots must be explicitly admitted for each purpose. Unknown
 # extension fields remain mandatory; a new purpose must always be registered.
 SHARED = {"controller_review_basis", "controller_authority_scope", "task", "mandatory", "constraints", "global_constraints", "prototype_approval", "design_review", "source_history", "feedback",
-          "controller_feedback", "controller_attachment_capture", "controller_recording_recovery", "controller_evidence_capabilities", "evidence_requirement_source", "evidence_candidate_hash", "unsupported_evidence_obligations", "evidence_reference_contract", "controller_stage_contract", "validation_feedback"}
+          "ui_design", "controller_feedback", "controller_attachment_capture", "controller_recording_recovery", "controller_evidence_capabilities", "evidence_requirement_source", "evidence_candidate_hash", "unsupported_evidence_obligations", "evidence_reference_contract", "controller_stage_contract", "validation_feedback"}
 CONTRACTS = {
     "clarify": {"raw_requirements", "raw_requirements_truncated", "history", "project", "decisions", "submitted_answers",
                 "review_feedback", "additional_evidence", "regression_evidence", "coverage_verification"},
@@ -441,6 +441,13 @@ class _Selection:
                 elif self.purpose == "prototype":
                     scopes = (context.get("specification") or {}).get("prototype_paths", []) or ["design/prototypes", "DESIGN.md", "frontend/src"]
                 self.result.payload[key] = self.sources.select(self.workspace, scopes=scopes, paths=paths, purpose=self.purpose)
+            elif key == "ui_design":
+                out = copy.deepcopy(value)
+                retained = out.get("sources")
+                if retained:
+                    retained["sources"] = [self.research(row, f"ui_design.sources.sources[{i}]")
+                                           for i, row in enumerate(retained["sources"])]
+                self.result.payload[key] = out
             elif key == "history" and isinstance(value, list):
                 self.result.payload[key] = self.history(value, key)
             elif key in {"retrieved_sources", "design_evidence"} and isinstance(value, list):

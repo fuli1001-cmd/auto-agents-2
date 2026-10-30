@@ -129,6 +129,7 @@ from .verification import (
     passed,
     verification_operation,
 )
+from .visual_design import UI_PURPOSES, UIDesign, VisualBriefStale, validate_brief
 from .workflow_authority import WorkflowAuthority
 from .workspace import (
     WorkspaceManager,
@@ -277,6 +278,9 @@ class WorkflowEngine:
                         self.store.event(rid, "recovery.path_exhausted", {"reason": str(exc)})
                         self.store.update(rid, status="PAUSED", pause_reason=str(exc), last_error=exc.code)
                         return self.store.run(rid)
+                    except VisualBriefStale as exc:
+                        # A product answer may arrive while a UI stage is already running.
+                        self._controller_replan(rid, Replan("clarify", str(exc)))
                     except HumanIntervention as exc:
                         await self._wait_prerequisite(rid, exc)
                     except Exception as exc:
@@ -908,11 +912,15 @@ class WorkflowEngine:
         controlled = prototype_context(self, rid)
         spec = self.store.get(rid, "clarify", {})
         actions = context.get("prototype", {}).get("browser_actions", [])
+        visual = UIDesign(self.store, self.artifacts).context(rid, spec, controlled["prototype_requirement_source"])
         basis = review_basis(controlled["prototype_requirement_source"], spec,
-                             prototype_identity(work, actions), context.get("browser_evidence", []))
-        return {**context, **controlled, "specification": spec, "prototype_review_basis": basis}
+                             prototype_identity(work, actions), context.get("browser_evidence", []), visual.get("ui_design"))
+        return {**context, **controlled, **visual, "specification": spec, "prototype_review_basis": basis}
 
     def _validate_stage_response(self, result, stage, context, rid):
+        if stage == "clarify" and isinstance(result, IntakeResult):
+            validate_brief(result.model_dump(), context.get("raw_requirements", ""),
+                           context.get("submitted_answers", []), required=not result.questions)
         if stage != "review" or context.get("review_kind") != "prototype":
             if self.authority.consumes(type(result)):
                 try:
@@ -948,6 +956,12 @@ class WorkflowEngine:
             raise Replan(owner, reason)
 
     async def _invoke(self, stage, context, schema, workspace, rid, key, fresh=False, *, interactive_retry=True):
+        purpose = context.get("review_kind", "implementation") if stage == "review" else stage
+        if purpose in UI_PURPOSES and not (stage == "review" and purpose == "prototype"):
+            spec = self.store.get(rid, "clarify", {})
+            controlled = prototype_context(self, rid)
+            context = {**context, **UIDesign(self.store, self.artifacts).context(
+                rid, spec, controlled["prototype_requirement_source"])}
         if stage == "prototype":
             context = {**context, **prototype_context(self, rid)}
         elif stage == "review" and context.get("review_kind") == "prototype":
@@ -1261,6 +1275,7 @@ class WorkflowEngine:
                 pending = {}
         if not pending:
             document = self._legacy_prototype(rid)
+            new_protocol = document is None
             if (work / "DESIGN.md").is_file():
                 context["design_baseline"] = (work / "DESIGN.md").read_text()
             else:
@@ -1274,6 +1289,7 @@ class WorkflowEngine:
                 document = await self._invoke("prototype", context, DocumentResult, work, rid, "prototype", fresh=True)
             pending = {"identity": identity, "document": document.model_dump(),
                        "design_candidates": context.get("design_candidates", []),
+                       "ui_design_version": 1 if new_protocol else 0,
                        "question_refresh_version": PROTOTYPE_BROWSER_VERSION}
             self.store.checkpoint(rid, key, pending)
         document = DocumentResult.model_validate(pending["document"])
@@ -1324,11 +1340,28 @@ class WorkflowEngine:
         document = document.model_copy(update={"questions": []})
         if "prepared" not in pending:
             self._replan_contract(rid, "prototype_scope", False)
+            design = UIDesign(self.store, self.artifacts)
+            retained = design.sources(rid)
+            prior_sources = {row["url"]: row for row in (retained or {}).get("sources", [])}
             candidates = {item["url"] for item in pending["design_candidates"]}
-            selected = [source for source in document.sources if source.url in candidates]
+            selected = [source for source in document.sources if source.url in candidates | set(prior_sources)]
             if candidates and not selected:
                 raise Replan("prototype", "Cite the chosen pinned DESIGN.md candidate URL in sources before producing a new design")
-            retrieved = await ResearchService(self.artifacts).verify(selected) if selected else []
+            selections = [row.model_dump() for row in document.design_selection]
+            if pending.get("ui_design_version") and selected and (
+                    len({row["url"] for row in selections}) != len(selections)
+                    or {row["url"] for row in selections} != {row.url for row in selected}):
+                raise Replan("prototype", "Explain each selected design reference's product fit and adaptations in design_selection")
+            fresh_sources = [row for row in selected if row.url not in prior_sources]
+            acquired = await ResearchService(self.artifacts).verify(fresh_sources) if fresh_sources else []
+            by_url = {**prior_sources, **{row["url"]: row for row in acquired}}
+            retrieved = ([{**by_url[row.url], **row.model_dump()} for row in selected]
+                         if selected else list(prior_sources.values()))
+            if retrieved:
+                record = design.retain(rid, retrieved, selections=selections,
+                    origin={"prototype_candidate": digest(document.model_dump()),
+                            "brief": self.store.get(rid, "ui_design/brief")})
+                retrieved = record["sources"]
             prior_pages = git(work, "ls-tree", "-r", "--name-only", self.store.get(rid, "baseline"), "--", "design/prototypes")
             scopes = specification.prototype_paths
             if not scopes and not prior_pages:
@@ -1337,6 +1370,11 @@ class WorkflowEngine:
                 raise Replan("clarify", "Existing prototypes require explicit prototype_paths; preserve unrelated designs")
             if any(not (p == "DESIGN.md" or p.startswith("design/prototypes/")) for p in specification.prototype_paths):
                 raise Replan("clarify", "prototype_paths must refer only to prototype pages or DESIGN.md")
+            if specification.visual_brief and specification.visual_brief.design_update == "required":
+                if "DESIGN.md" not in scopes:
+                    raise Replan("clarify", "Required DESIGN.md synchronization needs formal prototype_paths revision")
+                if not any(change.path == "DESIGN.md" for change in document.files):
+                    raise Replan("prototype", "Synchronize DESIGN.md with the accepted visual brief in the structured proposal")
             try:
                 files, prepared = await self.patch_repair.prepare(rid, work, document.files, scopes,
                     stage="prototype", context=context, operation=f"prototype/{identity}", contracts=True)
@@ -1345,6 +1383,11 @@ class WorkflowEngine:
             document = document.model_copy(update={"files": files})
             pending.update(document=document.model_dump(), retrieved=retrieved, prepared=prepared)
             self.store.checkpoint(rid, key, pending)
+        if not pending.get("retrieved"):
+            retained = UIDesign(self.store, self.artifacts).sources(rid)
+            if retained:
+                pending["retrieved"] = retained["sources"]
+                self.store.checkpoint(rid, key, pending)
         if "fingerprint" not in pending:
             try:
                 validate_stage_writes("prototype", pending["prepared"], specification.prototype_paths or ["design/prototypes", "DESIGN.md"])
@@ -1494,7 +1537,9 @@ class WorkflowEngine:
                     self.store.checkpoint(rid, "clarify_context", context)
                     continue
                 assessment = result.model_dump()
-                self.store.checkpoints(rid, {"clarify": assessment,
+                brief_updates = UIDesign(self.store, self.artifacts).brief_updates(
+                    rid, assessment, prototype_context(self, rid)["prototype_requirement_source"])
+                self.store.checkpoints(rid, {"clarify": assessment, **brief_updates,
                     **self.authority.acceptance(rid, "clarify", assessment, review)})
                 break
             else:
@@ -1505,6 +1550,15 @@ class WorkflowEngine:
             result.frontend = True
             assessment = result.model_dump()
             self.store.checkpoint(rid, "clarify", assessment)
+        if result.frontend and result.ui_changes and result.visual_brief is None and not self.store.get(rid, "prototype"):
+            raise Replan("clarify", "Prepare a source-bound visual_brief and any required DESIGN.md scope revision "
+                         "before changing this legacy UI; preserve its original answers, approval history and counters")
+        if result.visual_brief:
+            try:
+                UIDesign(self.store, self.artifacts).brief(
+                    rid, assessment, prototype_context(self, rid)["prototype_requirement_source"])
+            except VisualBriefStale as exc:
+                raise Replan("clarify", str(exc)) from exc
         all_satisfied, problems = validate_coverage(result, work)
         self._replan_contract(rid, "coverage", not problems and all(c.status != "unknown" for c in result.coverage))
         if problems:
@@ -1597,12 +1651,23 @@ class WorkflowEngine:
                 continue
             context["project"] = self.contexts.build(work)
             if stage == "prototype":
+                visual = UIDesign(self.store, self.artifacts)
+                if not visual.sources(rid):
+                    for previous in self.store.successful():
+                        prior = self.store.get(previous["id"], "prototype")
+                        approval = self.store.get(previous["id"], "prototype_approval", {})
+                        if prior and self.approvals.human(previous["id"], work, prior.get("browser_actions", []),
+                                                         approval, search_history=False):
+                            visual.inherit(rid, previous["id"], assessment,
+                                prototype_context(self, rid)["prototype_requirement_source"])
+                            break
                 reused = None
                 if not result.ui_changes:
                     for previous in self.store.successful():
                         approval = self.store.get(previous["id"], "prototype_approval", {})
                         prior = self.store.get(previous["id"], "prototype")
-                        if prior and self.approvals.human(rid, work, prior.get("browser_actions", []), approval):
+                        if prior and self.approvals.human(previous["id"], work, prior.get("browser_actions", []),
+                                                         approval, search_history=False):
                             reused = prior
                             self.store.checkpoint(rid, "prototype_approval", approval)
                             break
@@ -2496,6 +2561,8 @@ class WorkflowEngine:
         inherited = self.store.run(source_run)["data"] if source_run else {"external_dependencies": True}
         plan_data = self.store.get(source_run, "plan") if source_run else None
         if source_run:
+            UIDesign(self.store, self.artifacts).inherit(rid, source_run, self.store.get(rid, "clarify", {}),
+                prototype_context(self, rid)["prototype_requirement_source"])
             from .check_production import activation_updates, active_receipt
             inherited_production = active_receipt(lambda key: self.store.get(source_run, key))
             if inherited_production:

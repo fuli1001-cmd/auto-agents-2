@@ -14,7 +14,7 @@ from test_workflow import CodingAgent
 from test_workflow import engine as base_engine
 
 from auto_agents_2.check_production import ACTIVE_KEY, REQUIRED_KEY, active_receipt
-from auto_agents_2.models import CheckProducer
+from auto_agents_2.models import CheckProducer, DocumentResult, IntakeResult
 from auto_agents_2.providers import ProviderRouter
 from auto_agents_2.util import write_json
 
@@ -67,7 +67,13 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_toke
                     row.kind = 'command'
                     row.producers = [CheckProducer(index=i, command=c) for i,c in enumerate(tasks[row.task_id].checks)]
                     row.reason = 'Scenario explicitly requires all declared source checks'
-        self.response.write_text(json.dumps(response.model_dump(mode='json')))
+        wire = response.model_dump(mode='json')
+        # Saved legacy records omit empty additions; native responses use the full strict schema.
+        if isinstance(response, IntakeResult):
+            wire.setdefault('visual_brief', None)
+        if isinstance(response, DocumentResult):
+            wire.setdefault('design_selection', [])
+        self.response.write_text(json.dumps(wire))
         return await self.router.invoke(stage, context, schema, workspace, run_id, operation, fresh=fresh)
 
 

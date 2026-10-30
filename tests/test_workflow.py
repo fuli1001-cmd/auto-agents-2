@@ -7,6 +7,7 @@ from authority_review_fixtures import authority_review
 from browser_fixtures import prototype_rows
 from evidence_test_fixtures import empty_contract, evidence_review
 from prototype_review_fixtures import prototype_verdict
+from visual_design_fixtures import URL, acquired_source, visual_brief
 
 from auto_agents_2.config import ConfigStore
 from auto_agents_2.engine import Replan, WorkflowEngine
@@ -15,6 +16,7 @@ from auto_agents_2.models import (
     Change,
     Command,
     Coverage,
+    DesignSelection,
     DocumentResult,
     Finding,
     ImplementationResult,
@@ -219,18 +221,21 @@ async def test_prototype_waits_for_versioned_human_approval_and_external_reply(t
                 self.calls.append((stage, fresh))
                 return DocumentResult(summary="prototype", document="Static counter",
                                       questions=["R008 要求先取得人工批准：请审核原型是否通过？"],
-                                      sources=[SourceEvidence(url="https://fixture.invalid/DESIGN.md", claim="style")],
+                                      sources=[SourceEvidence(url=URL, claim="style")],
+                                      design_selection=[DesignSelection(url=URL, rationale="Simple counter workflow",
+                                          adaptations=["Keep the main operation clear and the controls consistent"])],
                                       files=[Change(path="design/prototypes/index.html", content="<h1>Counter</h1>"),
                                              Change(path="DESIGN.md", content="Simple monochrome counter")])
             result = await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
             if stage == "clarify":
                 result.frontend = True
+                result.visual_brief = visual_brief(update="required")
             if stage == "plan":
                 result.preview = PreviewSpec(command=Command(argv=[sys.executable, "-m", "http.server", "{port}"]))
             return result
 
     async def candidates(*args):
-        return [{"url": "https://fixture.invalid/DESIGN.md", "revision": "fixture"}]
+        return [{"url": URL, "revision": "a" * 40}]
 
     async def browser(*args):
         browser_calls.append(args)
@@ -241,7 +246,7 @@ async def test_prototype_waits_for_versioned_human_approval_and_external_reply(t
         return prototype_rows(directory, actions, workflow.artifacts)
 
     async def research(*args):
-        return [{"url": "https://fixture.invalid/DESIGN.md", "excerpt": "Simple monochrome counter"}]
+        return [acquired_source(workflow.artifacts, body="Simple monochrome counter")]
 
     browser_calls = []
     monkeypatch.setattr("auto_agents_2.engine.DesignCatalog.candidates", candidates)
@@ -293,7 +298,7 @@ async def test_prototype_waits_for_versioned_human_approval_and_external_reply(t
         assert result["status"] == "SUCCEEDED"
         assert workflow.store.get(rid, "prototype_approval")["identity"] == question["artifact_hash"]
         before = len(browser_calls)
-        second = await workflow.start(str(requirements))
+        second = await asyncio.wait_for(workflow.start(str(requirements)), 20)
         assert second["data"]["outcome"] == "NO_CHANGES"
         assert workflow.store.get(second["id"], "prototype_approval")["human"]["question_id"] == question["id"]
         assert len(browser_calls) > before and workflow.store.get(second["id"], "verify/visuals")

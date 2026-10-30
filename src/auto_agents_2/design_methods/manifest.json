@@ -1,0 +1,72 @@
+{
+  "adaptation_sha256": "74f316f4c37530f15325fa57a66684cdd111fa142187cae6da767cb41f499882",
+  "bundled": [
+    {
+      "path": "adaptation.md",
+      "sha256": "74f316f4c37530f15325fa57a66684cdd111fa142187cae6da767cb41f499882"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812"
+    },
+    {
+      "path": "UPSTREAM-NOTICE.md",
+      "sha256": "c60a093c2845fd9fb82f9c6f742ece31f379f8190b535309d32d66c45ccffdcb"
+    }
+  ],
+  "source": {
+    "commit": "414603bf14c7a344edb466bb1f85690c77ce8b7d",
+    "license": "Apache-2.0",
+    "release": "skill-v4.8.0",
+    "repository": "https://github.com/pbakaus/impeccable",
+    "version": "4.8.0"
+  },
+  "upstream_files": [
+    {
+      "bytes": 11762,
+      "path": ".agents/skills/impeccable/SKILL.md",
+      "sha256": "fab04b31f946573b00a8559db1fc070f8ea5825254d491c2b13156e5661a86d7"
+    },
+    {
+      "bytes": 4177,
+      "path": "package.json",
+      "sha256": "6706c7c3a4b1074350b4aa49df8af50e04b9fcaff13485fa3226a75fa59dea07"
+    },
+    {
+      "bytes": 48958,
+      "path": ".agents/skills/impeccable/reference/critique.md",
+      "sha256": "c210c9506877c6c8d88880a337fddd95d4315daf70ed6bc631ee6520481f1a0c"
+    },
+    {
+      "bytes": 5020,
+      "path": ".agents/skills/impeccable/reference/quieter.md",
+      "sha256": "9e03b55c6bbdd4acba28cfa9c3b74ba1a4448cdbd35a7200990ab460c6eecaa0"
+    },
+    {
+      "bytes": 5598,
+      "path": ".agents/skills/impeccable/reference/distill.md",
+      "sha256": "8b9283510e38f0d190652f300ea0793acfb5a514b38b991fdc0a289bade83391"
+    },
+    {
+      "bytes": 4590,
+      "path": ".agents/skills/impeccable/reference/clarify.md",
+      "sha256": "173dd66abe65633910dcb04a51f40d6ff2a793f87088f022a02fc4cad24dd133"
+    },
+    {
+      "bytes": 6646,
+      "path": ".agents/skills/impeccable/reference/polish.md",
+      "sha256": "81666fc7f783b4e3514db6554e713dc0479bd9cdedb06e93d15f8b579aae869a"
+    },
+    {
+      "bytes": 10766,
+      "path": "LICENSE",
+      "sha256": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812"
+    },
+    {
+      "bytes": 503,
+      "path": "NOTICE.md",
+      "sha256": "c60a093c2845fd9fb82f9c6f742ece31f379f8190b535309d32d66c45ccffdcb"
+    }
+  ],
+  "version": 1
+}

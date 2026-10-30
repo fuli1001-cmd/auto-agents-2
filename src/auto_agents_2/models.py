@@ -49,6 +49,28 @@ class UserQuestion(Record):
     purpose: Literal["clarification", "prototype_approval"] = "clarification"
 
 
+class VisualIntent(Record):
+    text: str = Field(min_length=1, max_length=600)
+    source_refs: list[str] = Field(min_length=1, max_length=12)
+
+
+class VisualBrief(Record):
+    audience: VisualIntent
+    primary_task: VisualIntent
+    hierarchy: VisualIntent
+    density: VisualIntent
+    language: VisualIntent
+    components: VisualIntent
+    design_update: Literal["required", "unchanged"]
+    design_update_reason: str = Field(min_length=1, max_length=600)
+
+
+class DesignSelection(Record):
+    url: str
+    rationale: str = Field(min_length=1, max_length=1000)
+    adaptations: list[str] = Field(min_length=1, max_length=12)
+
+
 class IntakeResult(Record):
     summary: str
     document: str
@@ -59,6 +81,16 @@ class IntakeResult(Record):
     frontend: bool = False
     ui_changes: bool = True
     prototype_paths: list[str] = []
+    visual_brief: VisualBrief | None = Field(default=None, description=(
+        "Required for new UI-change clarification; null preserves legacy/backend/unchanged-UI records. "
+        "Interpret the captured requirements and latest submitted feedback with exact source_refs."))
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_shape(self, handler):
+        data = handler(self)
+        if self.visual_brief is None:
+            data.pop("visual_brief", None)
+        return data
 
 
 class SourceEvidence(Record):
@@ -82,6 +114,14 @@ class DocumentResult(Record):
     sources: list[SourceEvidence] = []
     files: list[Change] = []
     browser_actions: list[BrowserAction] = []
+    design_selection: list[DesignSelection] = []
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_shape(self, handler):
+        data = handler(self)
+        if not self.design_selection:
+            data.pop("design_selection", None)
+        return data
 
 
 class TaskSpec(Record):

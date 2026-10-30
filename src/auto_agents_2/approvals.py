@@ -10,6 +10,7 @@ from .models import BrowserAction
 from .prototype_contract import source_context
 from .prototype_review import review_basis, review_current
 from .util import digest
+from .visual_design import UIDesign
 from .workspace import legacy_tree_hash, tree_hash
 
 APPROVAL_CONTEXT_VERSION = 1
@@ -67,13 +68,14 @@ class PrototypeApprovals:
                        for option in interaction.get("options", []))
         return question["answer"].strip() in {"approve", "通过", "批准"}
 
-    def human(self, rid, work, actions, record=None):
-        """Return verifiable consent; a review boolean or a document label cannot grant it."""
+    def human(self, rid, work, actions, record=None, *, search_history=True):
+        """Return verifiable consent; restrict history when selecting one run's materials."""
         binding = prototype_identity(work, actions)
         successful = [row["id"] for row in self.store.successful()]
         allowed_runs = {rid, *successful}
         candidates = [(rid, record if record is not None else self.store.get(rid, "prototype_approval", {}))]
-        candidates.extend((run, self.store.get(run, "prototype_approval", {})) for run in successful if run != rid)
+        if search_history:
+            candidates.extend((run, self.store.get(run, "prototype_approval", {})) for run in successful if run != rid)
         # A crash after the user answered but before the approval checkpoint is safe
         # to recover: the question itself binds the current content AND actions.
         with self.store.connect() as db:
@@ -132,7 +134,9 @@ class PrototypeApprovals:
 
     def review_inputs(self, rid, work, actions, visuals):
         source = source_context(self.store, self.artifacts, rid)["prototype_requirement_source"]
-        basis = review_basis(source, self.store.get(rid, "clarify", {}), prototype_identity(work, actions), visuals)
+        specification = self.store.get(rid, "clarify", {})
+        visual = UIDesign(self.store, self.artifacts).context(rid, specification, source)
+        basis = review_basis(source, specification, prototype_identity(work, actions), visuals, visual.get("ui_design"))
         return basis, source
 
     def automation_current(self, record, binding, actions, browser_version, *, expected_routes, review_inputs=None):

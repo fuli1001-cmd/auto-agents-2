@@ -6,6 +6,7 @@ import pytest
 from browser_fixtures import PNG, prototype_rows
 from prototype_review_fixtures import prototype_verdict
 from test_workflow import CodingAgent, engine
+from visual_design_fixtures import URL, acquired_source
 
 from auto_agents_2.engine import Replan
 from auto_agents_2.errors import AA2Error
@@ -23,7 +24,7 @@ from auto_agents_2.workspace import git
 def prototype_fixture(tmp_path, monkeypatch, *, empty=False):
     document = DocumentResult(summary="prototype", document="Candidate",
         questions=["R008 要求先取得人工批准：请审阅原型，是否批准？"],
-        sources=[SourceEvidence(url="https://fixture.invalid/DESIGN.md", claim="style")],
+        sources=[SourceEvidence(url=URL, claim="style")],
         files=[] if empty else [Change(path="design/prototypes/task/review.html", content="<h1>Review</h1>"),
                               Change(path="design/prototypes/task/index.html", content="<h1>Preview</h1>")])
     calls = []
@@ -48,10 +49,10 @@ def prototype_fixture(tmp_path, monkeypatch, *, empty=False):
     legacy = workflow.store.request(rid, "prototype", document.questions[0], digest(document.model_dump()))
 
     async def candidates(*args):
-        return [{"url": "https://fixture.invalid/DESIGN.md"}]
+        return [{"url": URL}]
 
     async def verify(*args):
-        return [{"url": "https://fixture.invalid/DESIGN.md", "excerpt": "style"}]
+        return [acquired_source(workflow.artifacts)]
 
     async def browser(*args):
         calls.append("browser")

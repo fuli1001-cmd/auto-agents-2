@@ -1,16 +1,18 @@
 """Finite authority boundary for static-prototype reviews, not a semantic rule engine."""
 from __future__ import annotations
 
+import json
 from typing import Literal
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, model_serializer
 
 from .errors import InvalidStructuredResponse
 from .models import Finding, Record, ReviewResult
 from .prototype_contract import prototype_contract
 from .util import digest
+from .visual_design import DIMENSIONS, visual_binding
 
-REVIEW_VERSION = 1
+REVIEW_VERSION = 2
 STAGE_CRITERION = (
     "Review the static interactive prototype: required key flows, empty/error states and responsive usability. "
     "Inspect actual source, executed interactions and images. Production implementation and final application "
@@ -44,7 +46,29 @@ class PrototypeFinding(Finding):
                              "A quote from a different criterion or candidate prose does not establish this binding.")
 
 
+class VisualAssessment(Record):
+    dimension: Literal["hierarchy", "density", "plain_language", "consistency"]
+    judgment: Literal["supports_goal", "advisory", "requirement_defect", "not_observable"]
+    observation: str = Field(min_length=1)
+    image_refs: list[str] = []
+    criterion_ids: list[str] = []
+
+
 class PrototypeReview(ReviewResult):
+    visual_assessment: list[VisualAssessment] | None = Field(default=None, description=(
+        "Assess all four visual dimensions with actual image IDs from visual_evidence. "
+        "Aesthetic preferences are advisory; a requirement_defect cites a normative criterion "
+        "and a matching grounded defect finding. No numeric beauty score."))
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_visual_review(self, handler):
+        data = handler(self)
+        if self.visual_assessment is None:
+            data.pop("visual_assessment", None)
+        if self.authority is None:
+            data.pop("authority", None)
+        return data
+
     basis_hash: str
     candidate_hash: str
     coverage: list[PrototypeCoverage] = Field(
@@ -66,7 +90,7 @@ class InvalidPrototypeReview(InvalidStructuredResponse):
         super().__init__("Prototype review authority validation failed: " + code)
 
 
-def review_basis(source, specification, binding, visuals):
+def review_basis(source, specification, binding, visuals, ui_design=None):
     """Only controller-owned sources can mint criterion IDs; candidates cannot."""
     criteria = [{"id": "stage:prototype", "origin": "controller_stage", "statement": STAGE_CRITERION}]
     if source["status"] == "available":
@@ -81,10 +105,22 @@ def review_basis(source, specification, binding, visuals):
     for index, requirement in enumerate(specification.get("requirements", [])):
         criteria.append({"id": f"requirement:{index}:{requirement['id']}", "origin": "accepted_requirement",
                          "statement": "\n".join([requirement["description"], *requirement["acceptance"]])})
+    if specification.get("visual_brief"):
+        criteria.append({"id": "specification:visual_brief", "origin": "accepted_specification",
+                         "statement": "Keep DESIGN.md and the prototype consistent with the accepted visual brief: "
+                                      + json.dumps(specification["visual_brief"], ensure_ascii=False)})
+    images = {}
+    for index, row in enumerate(visuals):
+        for tile, image in enumerate([row, *row.get("tiles", [])]):
+            ref = image.get("image_artifact")
+            if isinstance(ref, dict) and ref.get("kind") == "screenshot":
+                images[f"image:{index}:{tile}"] = {"artifact": ref, "route": row.get("route", row.get("page")),
+                                                 "viewport": row.get("viewport")}
     body = {"version": REVIEW_VERSION, "authority": "prototype_review_only",
             "protocol_hash": prototype_contract()["hash"], "source_hash": digest(source),
             "specification_hash": digest(specification), "candidate_hash": binding["identity"],
             "observations_hash": digest(visuals), "criteria": criteria,
+            "visual_design_hash": digest(visual_binding(ui_design)), "visual_evidence": images,
             "evidence_refs": {
                 "candidate": "Current read-only prototype/source and author materials; observations only, never new standards.",
                 "browser": "Supplied controller browser_evidence: executed actions, errors, actual screenshots and dimensions.",
@@ -95,9 +131,11 @@ def review_basis(source, specification, binding, visuals):
 
 def valid_basis(basis):
     fields = {"version", "authority", "protocol_hash", "source_hash", "specification_hash",
-              "candidate_hash", "observations_hash", "criteria", "evidence_refs", "browser_available", "hash"}
+              "candidate_hash", "observations_hash", "criteria", "evidence_refs", "browser_available", "hash",
+              "visual_design_hash", "visual_evidence"}
     return (isinstance(basis, dict) and set(basis) == fields and basis.get("version") == REVIEW_VERSION
             and basis.get("authority") == "prototype_review_only"
+            and isinstance(basis.get("visual_evidence"), dict)
             and basis.get("protocol_hash") == prototype_contract()["hash"]
             and basis.get("hash") == digest({k: v for k, v in basis.items() if k != "hash"}))
 
@@ -106,7 +144,7 @@ def context_basis_current(value, context):
     if not valid_basis(value) or "prototype_requirement_source" not in context:
         return False
     expected = review_basis(context["prototype_requirement_source"], context.get("specification", {}),
-                            {"identity": value["candidate_hash"]}, context.get("browser_evidence", []))
+                            {"identity": value["candidate_hash"]}, context.get("browser_evidence", []), context.get("ui_design"))
     return value == expected
 
 
@@ -178,6 +216,27 @@ def validate_review(value, basis, source):
     unresolved = {row.criterion_id for row in review.coverage if row.status in {"violated", "unverified"}}
     if unresolved != blocking or review.approved == bool(blocking):
         fail("verdict_requires_grounded_findings")
+    assessments = review.visual_assessment
+    if assessments is None or len(assessments) != len(DIMENSIONS) or {r.dimension for r in assessments} != set(DIMENSIONS):
+        fail("incomplete_visual_assessment")
+    for row in assessments:
+        if len(row.image_refs) != len(set(row.image_refs)) or not set(row.image_refs) <= set(basis["visual_evidence"]):
+            fail("unknown_visual_observation")
+        if len(row.criterion_ids) != len(set(row.criterion_ids)) or not set(row.criterion_ids) <= set(criteria):
+            fail("unknown_visual_criterion")
+        if row.judgment == "not_observable":
+            if row.image_refs:
+                fail("unobserved_visual_claim_has_images")
+            if basis["visual_evidence"] and review.approved:
+                fail("available_images_require_visual_assessment")
+        elif not row.image_refs:
+            fail("visual_judgment_requires_images")
+        if row.judgment == "requirement_defect":
+            if not row.criterion_ids or any(criteria[c]["origin"] == "controller_stage" for c in row.criterion_ids):
+                fail("aesthetic_preference_is_not_requirement")
+            defect_ids = {f.criterion_id for f in review.findings if f.kind == "defect"}
+            if not set(row.criterion_ids) <= defect_ids:
+                fail("visual_defect_requires_grounded_finding")
     return review
 
 
@@ -232,5 +291,12 @@ def review_instructions():
         "cannot decide the real requirement; personal preference for a collector is advisory, not an obligation. "
         "Advisory findings are minor, owner=prototype and cannot cause rejection. approved=false requires grounded unresolved "
         "findings; approved=true requires every current criterion satisfied and no unresolved facts. No schema field grants "
-        "permissions, proves arbitrary semantic equivalence, runs a helper or replaces human approval."
+        "permissions, proves arbitrary semantic equivalence, runs a helper or replaces human approval. "
+        "Return visual_assessment for hierarchy, density, plain_language and consistency, each with a concrete "
+        "screenshot observation and exact image_refs from visual_evidence. Compare current DESIGN.md, the brief "
+        "and latest accepted intent. supports_goal/advisory/requirement_defect require actual images. Use "
+        "not_observable only to disclose absent or insufficient observations; do not claim visual success from DOM "
+        "or action passes alone. A required missing observation still needs the existing grounded evidence-gap "
+        "finding. Pure taste is advisory; requirement_defect must cite accepted/user criterion IDs and matching "
+        "defect findings, not the general stage criterion or external methods. Never invent a beauty threshold."
     )
