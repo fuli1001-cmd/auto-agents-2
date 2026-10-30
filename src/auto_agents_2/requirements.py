@@ -121,7 +121,7 @@ def extract_document(raw: bytes, content_type: str) -> tuple[str, str]:
 async def capture(source: str, artifacts: ArtifactStore) -> dict:
     if source.startswith(("https://", "http://")):
         label = f"Requirements document download for {urlsplit(source).hostname}"
-        async with acquisition_deadline(ACQUISITION_TIMEOUT, label), httpx.AsyncClient(
+        async with acquisition_deadline(ACQUISITION_TIMEOUT, label, source_url=source), httpx.AsyncClient(
                 follow_redirects=True, timeout=30, headers={"Accept-Encoding": "gzip, deflate"}) as client:
             async with client.stream("GET", source) as response:
                 response.raise_for_status()

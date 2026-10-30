@@ -50,6 +50,19 @@ class DependencySolverError(DependencyResolutionError):
     code = "DEPENDENCY_SOLVER_ERROR"
 
 
+class DocumentAcquisitionTimeout(AA2Error, TimeoutError):
+    """An expired controller-owned HTTP document deadline, not an arbitrary timeout."""
+
+    code = "DOCUMENT_ACQUISITION_TIMEOUT"
+
+    def __init__(self, label, timeout, *, source_url):
+        from .util import digest
+        self.evidence = {"operation": label, "timeout_seconds": timeout,
+                         "source_url_hash": digest(source_url)}
+        super().__init__(f"{label} timed out after {timeout:g}s; check network connectivity and "
+                         "HTTP_PROXY/HTTPS_PROXY in the aa2 process environment")
+
+
 class RetryableInfrastructureError(AA2Error):
     """An explicitly recognized transient transport/timeout failure, not a manifest defect."""
 

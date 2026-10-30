@@ -39,7 +39,7 @@ class ResearchService:
     async def capture(self, url: str) -> dict:
         public_url(url)
         label = f"Research document download for {urlsplit(url).hostname}"
-        async with acquisition_deadline(ACQUISITION_TIMEOUT, label), httpx.AsyncClient(
+        async with acquisition_deadline(ACQUISITION_TIMEOUT, label, source_url=url), httpx.AsyncClient(
                 transport=PublicHTTPTransport(), trust_env=False, follow_redirects=False, timeout=30,
                 headers={"Accept-Encoding": "gzip, deflate"}) as client:
             final = url
