@@ -34,15 +34,21 @@ result = ({"action": "approve", "reason": "fixture scoped continuation", "eviden
            "answers": [], "selected_action": "diagnose", "expected_result": "Observe diagnosis"} if decision else
           {"approved": True, "summary": "fixture response", "findings": []})
 mode = pathlib.Path(MODE).read_text()
+print(json.dumps({"type": "thread.started", "thread_id": "fixture-session"}), flush=True)
+print(json.dumps({"type": "turn.started"}), flush=True)
 if mode == "invalid":
     result["evidence_refs"] = ["not_supplied"]
 if mode in {"success", "invalid", "response_hang", "unconfirmed_response"}:
     pathlib.Path(args[args.index("-o") + 1]).write_text(json.dumps(result))
+if mode == "unconfirmed_response":
+    print(json.dumps({"type": "item.completed", "item": {"type": "reasoning"}}), flush=True)
+if mode in {"stream_error_hang", "empty_stream_error_hang"}:
+    message = "fixture stream failure" if mode == "stream_error_hang" else ""
+    print(json.dumps({"type": "error", "message": message}), flush=True)
 if mode in {"error_hang", "failure"}:
     print(json.dumps({"type": "turn.failed", "error": "fixture provider failure"}), flush=True)
 if mode in {"success", "invalid", "response_hang"}:
     print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 11, "output_tokens": 3}}), flush=True)
-print(json.dumps({"type": "thread.started", "thread_id": "fixture-session"}), flush=True)
 if mode not in {"success", "invalid", "failure"}:
     time.sleep(120)
 ''')
@@ -57,7 +63,11 @@ if mode not in {"success", "invalid", "failure"}:
 
     def observe(run_id, kind, data):
         result = event(run_id, kind, data)
-        if kind == "agent.output" and data.get("detail") == "会话已建立":
+        expected = {"error_hang": "调用失败", "stream_error_hang": "provider 报错",
+                    "empty_stream_error_hang": "provider 报错",
+                    "response_hang": "响应已返回，校验结果",
+                    "unconfirmed_response": "模型事件已返回"}.get(mode.read_text(), "等待模型响应")
+        if kind == "agent.output" and data.get("detail") == expected:
             ready.set()
         return result
 
@@ -119,7 +129,7 @@ async def test_second_pause_cannot_create_unbounded_redispatch(tmp_path, monkeyp
     assert len(starts(store, rid)) == 2
 
 
-@pytest.mark.parametrize("mode_name", ["error_hang", "response_hang", "unconfirmed_response"])
+@pytest.mark.parametrize("mode_name", ["error_hang", "stream_error_hang", "empty_stream_error_hang", "response_hang", "unconfirmed_response"])
 async def test_known_failure_or_response_is_not_a_clean_pause(tmp_path, monkeypatch, mode_name):
     router, project, store, rid, mode, ready = fixture(tmp_path, monkeypatch)
     mode.write_text(mode_name)

@@ -72,6 +72,9 @@ class EventDecoder:
         self.usage = Usage(complete=False)
         self.finished = False
         self.error = ""
+        self.stream_error = ""
+        self._turn_started = False
+        self._terminal_seen = False
         self.last_counter = 0
 
     def feed(self, event: dict):
@@ -92,8 +95,25 @@ class EventDecoder:
         event = mapping(event)
         if self.kind == "codex":
             typ = string(event.get("type", ""))
+            # codex exec emits one turn's terminal event, then shuts down.
+            # A later event cannot rehabilitate a failure or certify an old -o file.
+            if self._terminal_seen and typ in {
+                    "thread.started", "turn.started", "turn.completed", "turn.failed", "error",
+                    "item.started", "item.updated", "item.completed"}:
+                self.finished = False
+                self.error = self.error or (
+                    str(event.get("error", event.get("message", ""))) if typ in {"error", "turn.failed"}
+                    else "") or "Provider event after terminal result"
             if typ == "thread.started":
+                if self.session or self._turn_started or self.messages:
+                    self.error = self.error or "Unexpected provider thread start"
                 self.session = string(event.get("thread_id", ""))
+            if typ == "turn.started":
+                if self._turn_started or self.messages:
+                    self.error = self.error or "Unexpected provider turn start"
+                self._turn_started = True
+                self.finished = False
+                self.messages.clear()
             if typ in {"item.started", "item.completed"}:
                 item = mapping(event.get("item", {}))
                 item_type = string(item.get("type", ""))
@@ -110,9 +130,16 @@ class EventDecoder:
                                    cached_tokens=self.usage.cached_tokens + int(u.get("cached_input_tokens", 0)),
                                    reasoning_tokens=self.usage.reasoning_tokens + int(u.get("reasoning_output_tokens", 0)),
                                    total_tokens=self.usage.total_tokens + incoming + outgoing, complete=bool(u))
-                self.finished = True
-            if typ in {"turn.failed", "error"}:
-                self.error = str(event.get("error", event.get("message", "provider error")))
+                self._terminal_seen = True
+                self.finished = not self.error
+            if typ == "turn.failed":
+                self._terminal_seen = True
+                self.finished = False
+                self.error = self.error or str(event.get("error", "provider error")) or "provider error"
+            if typ == "error":
+                # Native Error notifications may be followed by successful completion.
+                # Keep their diagnostic; terminal status and process exit remain decisive.
+                self.stream_error = str(event.get("error", event.get("message", "provider error"))) or "provider error"
         else:
             typ = string(event.get("event", ""))
             self.session = string(event.get("conversation_id", self.session))
@@ -509,7 +536,7 @@ class ProviderRouter:
                         reader.cancel()
                     await asyncio.gather(*readers, return_exceptions=True)
                 if process.returncode != 0 or decoder.error or not decoder.finished:
-                    message = decoder.error or "".join(errors)
+                    message = decoder.error or getattr(decoder, "stream_error", "") or "".join(errors)
                     diagnostic = diagnostic_summary(message)
                     raise ProviderError(diagnostic + f"；未取得完整结果（退出码 {process.returncode}）",
                         retryable=diagnostic not in {INPUT_LIMIT_DIAGNOSTIC, CONTEXT_LIMIT_DIAGNOSTIC, MODEL_UNAVAILABLE_DIAGNOSTIC}
@@ -552,10 +579,11 @@ class ProviderRouter:
                     lambda: self.store.add_usage(run_id, eff["provider"], aid, "invocation", decoder.usage.model_dump()),
                     lambda: self.store.event(run_id, "agent.finished", {"attempt": aid, "complete": decoder.finished,
                         "outcome": outcome, "last_output": last_output,
-                        "diagnostic": diagnostic_summary(decoder.error or "".join(errors)) if outcome == "error" else ""}))
+                        "diagnostic": diagnostic_summary(decoder.error or getattr(decoder, "stream_error", "") or "".join(errors)) if outcome == "error" else ""}))
                 if (cancellation is not None and process.cleanup_confirmed
                         and not getattr(cancellation, "__notes__", ())
-                        and not decoder.finished and not decoder.error and not decoder.messages and not errors
+                        and not decoder.finished and not decoder.error and not getattr(decoder, "stream_error", "")
+                        and not decoder.messages and not errors
                         and not (out / "result.json").exists() and not (out / "result.json").is_symlink()):
                     # Only observed cancellation plus successful cleanup proves
                     # this boundary; a bare pending checkpoint cannot do so.
