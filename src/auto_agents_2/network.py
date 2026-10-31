@@ -11,9 +11,10 @@ from urllib.parse import urlsplit, urlunsplit
 import httpcore
 import httpx
 
-from .errors import AA2Error
+from .errors import ResearchDestinationRejected
 from .network_proxy import ProxySettings, open_proxy_tunnel
 from .process_ownership import PreviewOwnershipError, verify_connection
+from .util import digest
 
 preview_owner = ContextVar("preview_owner", default=None)
 OWNERSHIP_FAILURE = "Preview connection ownership could not be verified"
@@ -63,8 +64,7 @@ class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
             addresses = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
             targets = list(dict.fromkeys(row[4][0] for row in addresses))
             if not targets or not all(public_address(ip) for ip in targets):
-                raise AA2Error("Research destination must resolve exclusively to public addresses; "
-                               f"check DNS/Fake-IP settings for {host}")
+                raise ResearchDestinationRejected(host, empty_resolution=not targets)
             error = None
             for ip in targets:
                 try:
@@ -119,8 +119,14 @@ class PublicHTTPTransport(httpx.AsyncBaseTransport):
             url=httpcore.URL(scheme=request.url.raw_scheme, host=request.url.raw_host,
                              port=request.url.port, target=request.url.raw_path),
             headers=request.headers.raw, content=request.stream, extensions=request.extensions)
-        with http_errors(request):
-            response = await self.pool.handle_async_request(incoming)
+        try:
+            with http_errors(request):
+                response = await self.pool.handle_async_request(incoming)
+        except ResearchDestinationRejected as exc:
+            # Each redirect is a separate request. Bind the rejected hop without
+            # retaining its path, query, credentials or request object in errors.
+            exc.evidence["source_url_hash"] = digest(str(request.url))
+            raise
         return httpx.Response(response.status, headers=response.headers,
                               stream=ResponseStream(response.stream, request), extensions=response.extensions)
 

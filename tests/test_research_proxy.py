@@ -7,9 +7,11 @@ import httpcore
 import httpx
 import pytest
 
-from auto_agents_2.errors import AA2Error
+from auto_agents_2.errors import AA2Error, ResearchDestinationRejected
+from auto_agents_2.faults import known_exception
 from auto_agents_2.network import PublicHTTPTransport, PublicNetworkBackend
 from auto_agents_2.network_proxy import ProxySettings
+from auto_agents_2.util import digest
 
 
 @pytest.fixture(autouse=True)
@@ -81,28 +83,47 @@ async def test_proxy_tunnels_pinned_ip_preserving_origin_and_tls(monkeypatch, sc
     assert stream.closed
 
 
-@pytest.mark.parametrize("ips", [["198.18.0.22"], ["127.0.0.1"], ["93.184.216.34", "10.0.0.1"],
-                                ["::ffff:127.0.0.1"]])
-async def test_proxy_does_not_bypass_public_destination_policy(monkeypatch, ips):
-    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+@pytest.mark.parametrize("proxy", [False, True])
+@pytest.mark.parametrize("ips", [["198.18.0.22"], ["2001:2::22"], ["127.0.0.1"],
+                                ["93.184.216.34", "10.0.0.1"], ["::ffff:127.0.0.1"], []])
+async def test_proxy_does_not_bypass_public_destination_policy(monkeypatch, ips, proxy):
+    if proxy:
+        monkeypatch.setenv("HTTPS_PROXY", "http://EXAMPLE_PROXY_USER:EXAMPLE_PROXY_PASSWORD@127.0.0.1:7890")
     stream = RecordingStream([])
-    _, connections = install_network(monkeypatch, stream, {"docs.example": ips})
+    lookups, connections = install_network(monkeypatch, stream, {"docs.example": ips})
+    url = "https://EXAMPLE_USER:EXAMPLE_PASSWORD@docs.example/EXAMPLE_PRIVATE_PATH?section=EXAMPLE_QUERY"
     async with httpx.AsyncClient(transport=PublicHTTPTransport(), trust_env=False) as client:
-        with pytest.raises(AA2Error, match="DNS/Fake-IP.*docs.example"):
-            await client.get("https://docs.example/")
-    assert connections == []
+        with pytest.raises(ResearchDestinationRejected, match="exclusively") as failure:
+            await client.get(url)
+    assert connections == [] and lookups == ["docs.example"]
+    boundary = known_exception(failure.value, "provider_research")
+    assert boundary.reason_code == "RESEARCH_DESTINATION_REJECTED"
+    assert boundary.requirement.kind == "external_input"
+    assert boundary.requirement.evidence == {
+        "operation": "research_connect", "hostname": "docs.example",
+        "resolution": "non_public" if ips else "empty", "source_url_hash": digest(str(httpx.URL(url)))}
+    diagnostic = str(failure.value) + repr(failure.value.__dict__) + boundary.requirement.model_dump_json()
+    for marker in ("EXAMPLE_PRIVATE_PATH", "EXAMPLE_QUERY", "EXAMPLE_USER", "EXAMPLE_PASSWORD",
+                   "EXAMPLE_PROXY_USER", "EXAMPLE_PROXY_PASSWORD"):
+        assert marker not in diagnostic
+    assert "possible Fake-IP" in str(failure.value)  # A possibility, not an asserted root cause.
 
 
 async def test_proxy_redirect_revalidates_destination(monkeypatch):
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+    destination = "https://internal.example/EXAMPLE_PRIVATE_PATH?section=EXAMPLE_QUERY"
+    original = "https://docs.example/EXAMPLE_ORIGINAL_PATH?section=EXAMPLE_ORIGINAL_QUERY"
     stream = RecordingStream([b"HTTP/1.1 200 Connection established\r\n\r\n",
-                              b"HTTP/1.1 302 Found\r\nLocation: https://internal.example/\r\nContent-Length: 0\r\n\r\n"])
+        ("HTTP/1.1 302 Found\r\nLocation: " + destination + "\r\nContent-Length: 0\r\n\r\n").encode()])
     lookups, connections = install_network(monkeypatch, stream, {"internal.example": ["10.0.0.1"]})
     async with httpx.AsyncClient(transport=PublicHTTPTransport(), trust_env=False, follow_redirects=True) as client:
-        with pytest.raises(AA2Error, match="exclusively"):
-            await client.get("https://docs.example/")
+        with pytest.raises(ResearchDestinationRejected, match="exclusively") as failure:
+            await client.get(original)
     assert lookups == ["docs.example", "internal.example"]
     assert connections == [("127.0.0.1", 7890)]
+    assert failure.value.evidence["hostname"] == "internal.example"
+    assert failure.value.evidence["source_url_hash"] == digest(destination) != digest(original)
+    assert "EXAMPLE_" not in str(failure.value) + repr(failure.value.evidence)
 
 
 @pytest.mark.parametrize("bypass", ["no_proxy", "NO_PROXY", "trust_env"])

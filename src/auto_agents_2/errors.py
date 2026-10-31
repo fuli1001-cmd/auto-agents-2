@@ -63,6 +63,20 @@ class DocumentAcquisitionTimeout(AA2Error, TimeoutError):
                          "HTTP_PROXY/HTTPS_PROXY in the aa2 process environment")
 
 
+class ResearchDestinationRejected(AA2Error):
+    """The public research TCP boundary observed empty or non-public DNS results."""
+
+    code = "RESEARCH_DESTINATION_REJECTED"
+
+    def __init__(self, hostname, *, empty_resolution=False):
+        self.evidence = {"operation": "research_connect", "hostname": hostname,
+                         "resolution": "empty" if empty_resolution else "non_public"}
+        observation = "DNS returned no addresses" if empty_resolution else "DNS included a non-public address"
+        super().__init__(f"Research destination {hostname} must resolve exclusively to public addresses; "
+                         f"{observation}. Check DNS, possible Fake-IP mapping, or whether the destination "
+                         "itself is non-public.")
+
+
 class RetryableInfrastructureError(AA2Error):
     """An explicitly recognized transient transport/timeout failure, not a manifest defect."""
 

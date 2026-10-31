@@ -13,6 +13,7 @@ from .errors import (
     EnvironmentCommandError,
     PolicyViolation,
     ProviderError,
+    ResearchDestinationRejected,
     RetryableInfrastructureError,
     ToolchainUnavailable,
 )
@@ -86,6 +87,11 @@ def known_exception(error, phase):
         return HumanIntervention(HumanRequirement(kind="external_input", reason=str(error),
             action="检查 aa2 控制器进程的网络连通性及 HTTP_PROXY/HTTPS_PROXY；保留已生成的候选和来源。",
             resume_condition="连接恢复后重新抓取并核验同一来源；确认不替代来源核验、独立审查或原有批准。",
+            evidence=error.evidence), reason_code=error.code, phase=phase)
+    if isinstance(error, ResearchDestinationRejected):
+        return HumanIntervention(HumanRequirement(kind="external_input", reason=str(error),
+            action="检查 aa2 控制器中的 DNS 解析、可能的 Fake-IP 映射及目标是否为公网服务；保留已生成的候选和来源。",
+            resume_condition="同一来源重新解析为全部公网地址并完成采集及独立来源审查；确认不能放行非公网地址或替代原有批准。",
             evidence=error.evidence), reason_code=error.code, phase=phase)
     if isinstance(error, ToolchainUnavailable):
         return HumanIntervention(HumanRequirement(kind="external_input", reason=str(error),
