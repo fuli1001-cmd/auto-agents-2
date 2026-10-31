@@ -83,8 +83,14 @@ def refresh_task_baseline(engine, rid, task, saved, work, base, revision):
     updated = {"phase": phase, "workspace": str(work), "revision": revision, "source_hash": tree_hash(work),
                "recovery_permit": saved.get("recovery_permit"),
                "feedback": {**prior_feedback, "baseline_refresh": {
-                   "incoming_base": base, "reason": "Dependencies updated; retained implementation requires fresh verification.",
+                   "incoming_base": base, "reason": "Dependencies merged into the preserved task workspace. This does not establish implementation completeness or acceptance; continue from the recorded task state with fresh verification.",
                    "recovery_ref": record["recovery_ref"]}}}
+    from .task_feedback import retained_author_input
+    original_input = retained_author_input(rid, task, saved)
+    if original_input is not None:
+        # Reverification may have wrapped the original record in previous_evidence.
+        # A later implementation attempt captures its own updated input.
+        updated["author_input"] = original_input
     store.checkpoints(rid, {key: {**record, "phase": "merged", "merged_commit": git(work, "rev-parse", "HEAD")}, task_key: updated})
     store.event(rid, "task.baseline_refreshed", {"task": task.id, "base": base, "action": phase, "journal": key})
     return updated, work

@@ -133,6 +133,8 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
     failure = context.get("failure") or {}
     if isinstance(failure, dict):
         origins["failure.proposal"] = "proposal"
+        # The record proves which input was supplied, not the truth of its advice.
+        origins["failure.evidence.author_input.feedback"] = "proposal"
     history = context.get("history") or {}
     if isinstance(history, dict):
         for index, row in enumerate(history.get("recent", [])):
@@ -178,5 +180,5 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
     return refs
 
 
-def supplied_references(value, *, prefixes=("",)):
-    return reference_catalog(value, prefixes=prefixes).controller
+def supplied_references(value, *, prefixes=("",), provenance=None):
+    return reference_catalog(value, prefixes=prefixes, provenance=provenance).controller

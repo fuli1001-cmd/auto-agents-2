@@ -156,7 +156,8 @@ def observation_identity(checks, review=None, environment_error=None):
 
 def evidence_references(failure, project=None, *, context=None):
     """Index supplied controller data, never endorse a model's requested citations."""
-    refs = set(evidence_aliases(failure, project)) | supplied_references(failure.evidence, prefixes=("", "failure.evidence."))
+    refs = set(evidence_aliases(failure, project)) | supplied_references(failure.evidence,
+        prefixes=("", "failure.evidence."), provenance={"author_input.feedback": "proposal"})
     if context is not None:
         refs.update(supplied_references(context))
     return sorted(refs)

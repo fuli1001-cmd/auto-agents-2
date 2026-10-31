@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import shlex
 import shutil
 from pathlib import Path
@@ -740,6 +739,9 @@ class WorkflowEngine:
     def _preparation_failure(self, rid, commands, work, exc, task=None):
         key = "recovery/preparation/" + digest([task.origin_id or task.id if task else "final", str(work), [c.model_dump() for c in commands], str(exc)])
         evidence = {"commands": [c.model_dump() for c in commands], "error": str(exc), "source_hash": tree_hash(work)}
+        if task:
+            from .task_feedback import failure_input
+            evidence.update(failure_input(self, rid, task, self.store.get(rid, "develop/task/" + task.id, {})))
         self.store.checkpoint(rid, key, evidence)
         return RecoveryNeeded(FailureRecord.create(kind="contract", component="verification_preparation",
             origin_id=task.origin_id or task.id if task else "final", task_id=task.id if task else "", step="checks",
@@ -772,6 +774,9 @@ class WorkflowEngine:
                     "allowed": False, "issues": [{"code": exc.reason_code, "category": "evidence"}]}}
             if phase in {"runtime", "reintegration"}:
                 raise RuntimeVerificationError(evidence) from exc
+            if task:
+                from .task_feedback import failure_input
+                evidence.update(failure_input(self, rid, task, self.store.get(rid, "develop/task/" + task.id, {})))
             raise RecoveryNeeded(FailureRecord.create(kind="evidence", component="verification",
                 origin_id=(task.origin_id or task.id) if task else "final", task_id=task.id if task else "",
                 step=exc.reason_code, phase="task" if task else phase,
@@ -1080,7 +1085,8 @@ class WorkflowEngine:
         identity = invocation_identity(stage, context, schema, workspace, invocation_config, source_before, execution)
         compatible = {identity}
         if context.get("controller_review_reading") and self.authority.consumes(schema):
-            from .review_authority import InvalidAuthorityReview, valid_basis, validate_review as validate_authority_review
+            from .review_authority import InvalidAuthorityReview, valid_basis
+            from .review_authority import validate_review as validate_authority_review
             from .review_reading import reading_contract
             basis = context.get("controller_review_basis")
             if valid_basis(basis) and context["controller_review_reading"] == reading_contract(basis):
@@ -2160,6 +2166,7 @@ class WorkflowEngine:
 
     def _task_failure(self, rid, task, saved, *, kind=None, step="checks", proposal=None, verification_error=None,
                       record_outcome=True):
+        from .task_feedback import failure_input
         feedback = saved.get("feedback", {})
         current = saved if any(k in saved for k in ("checks", "review", "environment_error", "candidate_error")) else feedback
         evidence = {k: current.get(k) for k in
@@ -2170,6 +2177,7 @@ class WorkflowEngine:
             evidence["environment_failure"] = current["environment_failure"]
         evidence["checks"] = evidence["checks"] or []
         evidence["task"] = task.model_dump()
+        evidence.update(failure_input(self, rid, task, saved))
         if verification_error is not None:
             evidence["verification_error"] = verification_error
         if kind is None:
@@ -2198,17 +2206,11 @@ class WorkflowEngine:
         state = self.store.get(rid, state_key, {})
         self.store.checkpoints(rid, {"develop/task/" + task.id: saved,
             state_key: {**state, "evidence": "stale"}})
-        raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="contract" if failure.kind == "contract" else "evidence", step="verification_inputs",
-            verification_error=failure.evidence["verification_error"]).model_copy(update={
-                "reason_code": failure.reason_code,
-                "evidence": {**self._task_failure_evidence(task, saved), **failure.evidence}}))
-
-    @staticmethod
-    def _task_failure_evidence(task, saved):
-        return {"task": task.model_dump(), "review": saved.get("review"),
-                **({"recording_review": saved["recording_review"]} if saved.get("recording_review") else {}),
-                "environment_error": saved.get("environment_error"), "candidate_error": saved.get("candidate_error"),
-                **({"environment_failure": saved["environment_failure"]} if saved.get("environment_failure") else {})}
+        task_failure = self._task_failure(rid, task, saved,
+            kind="contract" if failure.kind == "contract" else "evidence", step="verification_inputs",
+            verification_error=failure.evidence["verification_error"])
+        raise RecoveryNeeded(task_failure.model_copy(update={
+            "reason_code": failure.reason_code, "evidence": {**task_failure.evidence, **failure.evidence}}))
 
     def _verification_problem(self, rid, commands, checks, work, environment, *, phase, task=None, expected_source=None, production_out=None):
         """Shared gate assessment. Stage adapters own the recovery dispatch, never its classification."""
@@ -2356,9 +2358,14 @@ class WorkflowEngine:
                         "checks", "review", "recording_review", "environment_error", "environment_failure", "candidate_error", "controller_recheck", "controller_approval_recheck"}}}}
                 self.store.checkpoints(rid, {key: saved, counter_key: counters,
                     state_key: {**state, "implementation": "in_progress"}})
-            previous_feedback = saved.get("feedback", saved)
-            feedback = {k: previous_feedback[k] for k in ("phase", "checks", "review", "recording_review", "environment_error", "environment_failure", "candidate_error", "controller_recheck", "controller_approval_recheck", "controller_recovery", "upstream_recovery", "failure", "baseline_refresh") if k in previous_feedback}
-            feedback = json.loads(json.dumps(feedback))
+            from .task_feedback import author_input, selected_feedback
+            feedback = selected_feedback(saved)
+            if not saved.get("implementation"):
+                source = tree_hash(work)
+                if saved.get("source_hash") and saved["source_hash"] != source:
+                    raise StateConflict("Author input source changed; preserve the task and user edits before continuing")
+                saved["author_input"] = author_input(self, rid, task, {**saved, "source_hash": source},
+                    feedback, capture="author_invocation")
             task_context = {**approval_context, **design_context, "task": task.model_dump(), "specification": context["specification"],
                             "verification_contract": self._verification_contract(commands),
                             "design": context.get("design"), "feedback": feedback, "unresolved_issues": IssueLedger(self.store, self.artifacts).unresolved(rid),
@@ -2489,7 +2496,10 @@ class WorkflowEngine:
                 self.store.checkpoint(rid, key, saved)
             self._replan_checks(rid, f"task/{task.origin_id or task.id}", commands, checks, work, environment)
             if not passed(checks):
+                from .task_feedback import failure_input
                 failure_record = check_failure(commands, checks, task=task, evidence_ref=key)
+                failure_record = failure_record.model_copy(update={"evidence": {
+                    **failure_record.evidence, **failure_input(self, rid, task, saved)}})
                 self.store.checkpoint(rid, state_key, {**state, "evidence": "failed"})
                 self._task_progress(rid, task, saved, checked=True)
                 saved["phase"] = "rejected"
