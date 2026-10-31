@@ -27,7 +27,7 @@ LINKED_INLINE = 4000
 
 # Known workflow slots must be explicitly admitted for each purpose. Unknown
 # extension fields remain mandatory; a new purpose must always be registered.
-SHARED = {"controller_review_basis", "controller_authority_scope", "task", "mandatory", "constraints", "global_constraints", "prototype_approval", "design_review", "source_history", "feedback",
+SHARED = {"controller_review_reading", "controller_review_basis", "controller_authority_scope", "task", "mandatory", "constraints", "global_constraints", "prototype_approval", "design_review", "source_history", "feedback",
           "ui_design", "controller_feedback", "controller_attachment_capture", "controller_recording_recovery", "controller_evidence_capabilities", "evidence_requirement_source", "evidence_candidate_hash", "unsupported_evidence_obligations", "evidence_reference_contract", "controller_stage_contract", "validation_feedback"}
 CONTRACTS = {
     "clarify": {"raw_requirements", "raw_requirements_truncated", "history", "project", "decisions", "submitted_answers",
@@ -506,6 +506,7 @@ class _Selection:
                     "controller_review_basis", "controller_authority_scope", "submitted_answers"} else
                     self.compact(value, key) if key in KNOWN else copy.deepcopy(value))
             self.mark(key, "inline", "Stage input contract" if key in KNOWN else "Unclassified mandatory extension", value)
+        self.review_reading()
         self.evidence_dependencies()
         self.deduplicate_contracts()
         self.result.payload["input_contract"] = {"version": CONTEXT_VERSION, "purpose": self.purpose,
@@ -513,6 +514,60 @@ class _Selection:
                           "Read required_read materials before deciding. Read optional records only when relevant. "
                           "Missing evidence cannot establish success; source and model proposals remain distinct."}
         return self.result
+
+    def review_reading(self):
+        reading = self.original.get("controller_review_reading")
+        if reading is None:
+            return
+        from .review_authority import valid_basis
+        from .review_reading import reading_contract
+        basis = self.original.get("controller_review_basis")
+        if not valid_basis(basis) or reading != reading_contract(basis):
+            raise ProviderError("Large review reading contract lost its controller binding")
+        def material(value, path, reason, *, required=False):
+            pointer = self.reference(value, path, reason, required=required)
+            # Mount selection is deliberately nonrecursive. Keep every nested
+            # attachment already selected before its containing input is folded.
+            nested = {ref["hash"]: ref for ref in references(value) if {"kind", "bytes"} <= ref.keys()}
+            if nested:
+                pointer["nested_materials"] = list(nested.values())
+            screenshots = []
+            def images(item):
+                if isinstance(item, dict):
+                    for name, child in item.items():
+                        if name == "screenshot" and isinstance(child, str):
+                            screenshots.append(child)
+                        else:
+                            images(child)
+                elif isinstance(item, list):
+                    for child in item:
+                        images(child)
+            images(value)
+            if screenshots:
+                pointer["nested_images"] = [{"screenshot": path} for path in dict.fromkeys(screenshots)]
+            return pointer
+
+        payload = self.result.payload
+        view = copy.deepcopy(basis)
+        # The full source catalogue mostly repeats submitted/adopted/candidate
+        # text and individual plan clauses. Keep exact lookup keys in the response
+        # contract; bodies remain available for grounding, never as new authority.
+        view["sources"] = material(basis["sources"], "controller_review_basis.sources",
+            "Complete exact source lookup catalogue; read relevant full entries for quotations and preservation")
+        for key in ("criteria", "correction"):
+            if len(json.dumps(basis.get(key), ensure_ascii=False)) > TEXT_INLINE:
+                view[key] = material(basis[key], "controller_review_basis." + key,
+                    "Complete review obligations; read all entries before deciding", required=True)
+        payload["controller_review_basis"] = view
+        for key, value in list(payload.items()):
+            if key in {"controller_review_basis", "controller_review_reading", "context_files", "project"}:
+                # The provider remaps project.workspace to its public snapshot
+                # and uses its read_on_demand marker for the native read probe.
+                continue
+            if len(json.dumps(value, ensure_ascii=False)) > TEXT_INLINE:
+                payload[key] = material(value, key,
+                    "Complete selected review input; read before deciding and follow its nested material references",
+                    required=True)
 
     def deduplicate_contracts(self):
         payload = self.result.payload

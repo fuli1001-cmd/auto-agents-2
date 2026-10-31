@@ -117,6 +117,12 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
             prototype_protocols["controller_review_basis"] = authority_basis
         else:
             context.pop("controller_review_basis")
+    if "controller_review_reading" in context:
+        from .review_reading import reading_contract
+        if valid_basis(authority_basis) and context["controller_review_reading"] == reading_contract(authority_basis):
+            prototype_protocols["controller_review_reading"] = context["controller_review_reading"]
+        else:
+            context.pop("controller_review_reading")
     for name, check in (("controller_prototype_contract", current_prototype_contract), ("prototype_review_basis", lambda value: context_basis_current(value, context))):
         value = context.get(name)
         if name in context and not check(value):

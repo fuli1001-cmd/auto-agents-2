@@ -93,7 +93,15 @@ class WorkflowAuthority:
             source_hash=tree_hash(work), source_identity=self.identity(rid),
             submitted_answers=self.store.submitted_answers(rid),
             correction=self.store.get(rid, "authority/correction"))
-        return {**context, "controller_review_basis": basis}, review_schema(schema)
+        from .review_reading import reading_contract
+        context = {**context, "controller_review_basis": basis}
+        # A new disclosed reading contract changes only this review request. Old
+        # exhausted requests, receipts and aggregate counters remain recorded.
+        context.pop("controller_review_reading", None)
+        reading = reading_contract(basis)
+        if reading:
+            context["controller_review_reading"] = reading
+        return context, review_schema(schema)
 
     def validate(self, rid, result, context):
         basis = context.get("controller_review_basis")

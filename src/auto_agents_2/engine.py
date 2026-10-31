@@ -1079,6 +1079,21 @@ class WorkflowEngine:
         invocation_config = self.config.load()
         identity = invocation_identity(stage, context, schema, workspace, invocation_config, source_before, execution)
         compatible = {identity}
+        if context.get("controller_review_reading") and self.authority.consumes(schema):
+            from .review_authority import InvalidAuthorityReview, valid_basis, validate_review as validate_authority_review
+            from .review_reading import reading_contract
+            basis = context.get("controller_review_basis")
+            if valid_basis(basis) and context["controller_review_reading"] == reading_contract(basis):
+                legacy = {k: v for k, v in context.items() if k != "controller_review_reading"}
+                old_identity = invocation_identity(stage, legacy, schema, workspace,
+                                                  invocation_config, source_before, execution)
+                if saved.get("identity") == old_identity and saved.get("result"):
+                    try:
+                        validate_authority_review(saved["result"], basis)
+                    except InvalidAuthorityReview:
+                        pass  # Unread/invalid old responses need the new disclosed request.
+                    else:
+                        compatible.add(old_identity)
         if stage == "recovery_diagnosis":
             old_execution = self.agent.execution_identity("review") if isinstance(self.agent, ProviderRouter) else None
             compatible.add(invocation_identity("review", context, schema, workspace, self.config.load(), source_before, old_execution))
