@@ -78,6 +78,7 @@ from .models import (
     ReviewResult,
 )
 from .patch_repair import PatchRepairService
+from .plan_review_recovery import PlanReviewRecovery
 from .plan_revision import materialize_plan
 from .planning import ready_batch, validate_plan
 from .preview_evidence import PreviewEvidence
@@ -252,6 +253,7 @@ class WorkflowEngine:
                             self.store.checkpoint(rid, "environment/preflight", report)
                             self.store.event(rid, "environment.preflight_passed", report)
                             preflight_complete = True
+                        PlanReviewRecovery(self).reconcile_completion(rid)
                         await self._resume_environment_waits(rid)
                         if self.store.get(rid, "recovery/active"):
                             await self.recovery.resume(rid)
@@ -518,17 +520,24 @@ class WorkflowEngine:
             "checks": updates["recovery/observations/" + scope.removeprefix("task/")]})
 
     async def _grant_replan(self, rid, pending):
+        work = self.store.root / "worktrees" / rid / "integration"
+        if not work.is_dir():
+            work = self.project
+        review_evidence = PlanReviewRecovery(self).evidence(rid, pending, work)
         # A controller-owned correction or an authorized local patch has already
         # been adjudicated. Counts do not introduce an extra approval boundary.
         key = f"replan-stalled/{pending['evaluation']}"
         answered = [q for q in self.store.decision_questions(rid, [key]) if q["answer"] is not None]
-        if answered and not pending.get("granted"):
+        if answered and not pending.get("granted") and not review_evidence:
             question = self.store.question(answered[-1]["id"])
             await self._ask(rid, key, question["prompt"], question["artifact_hash"], question["interaction"])
+            PlanReviewRecovery(self).evidence(rid, pending, work)
             pending = {**pending, "granted": True, "authority_sources": self.authority.identity(rid)}
             self.store.checkpoint(rid, "replanning/pending", pending)
         if pending.get("granted"):
             permit = pending.get("correction_permit") or pending.get("permit")
+            if review_evidence and not permit:
+                raise StateConflict("Upstream plan review requires a new permit for its evidenced owner")
             if (not permit and self.store.get(rid, "authority/protocol")
                     and pending.get("authority_sources") != self.authority.identity(rid)):
                 raise StateConflict("Stage return authorization needs current source reassessment")
@@ -540,6 +549,8 @@ class WorkflowEngine:
             return pending
         active = self.store.get(rid, "recovery/active", {}) or {}
         if active.get("permit") and active.get("decision", {}).get("action") == "plan_patch":
+            if review_evidence:
+                raise StateConflict("Upstream plan review needs its own authorization, not an active plan-patch permit")
             return pending
         from .recovery import RecoveryDecision
         stage = "plan_patch" if pending["stage"] == "plan" else pending["stage"]
@@ -548,7 +559,7 @@ class WorkflowEngine:
         failure = FailureRecord.create(kind="contract", component="controller", origin_id="gates",
             step="upstream", obligations=["accepted_requirements"], evidence_refs=["replanning/pending"],
             evidence={"pending": pending, "checks": pending.get("verification_recheck", {}).get("checks", []),
-                      **authority_evidence})
+                      **authority_evidence, **review_evidence})
         action = RecoveryDecision(failure_id=failure.id, action=stage, budget_owner="gates",
                                   reason=pending["reason"], evidence_refs=failure.evidence_refs)
         work = self.store.root / "worktrees" / rid / "integration"
@@ -558,6 +569,7 @@ class WorkflowEngine:
         _, permit = await self.recovery_policy.authorize(rid, failure, proposed, work, None, action,
             operation="controller-replan", established=pending["decision"].get("improved", False),
             candidates={stage: action}, controller_owned=True, supersede_keys=pending.get("supersede_keys", []))
+        PlanReviewRecovery(self).evidence(rid, pending, work)
         self.recovery_policy.start(rid, permit)
         pending = {**pending, "granted": True, "permit": permit}
         self.store.checkpoint(rid, "replanning/pending", pending)
@@ -572,6 +584,7 @@ class WorkflowEngine:
         # Include already archived refs when recovering an interruption mid-archive.
         archived = self.archive_workers(rid, pending["generation"])
         self.store.supersede_questions(rid, f"replan-stalled/{pending['evaluation']}")
+        PlanReviewRecovery(self).prepare_completion(rid, pending, work, archived)
         self.store.complete_replan(rid, STAGES[STAGES.index(pending["stage"]):], archived)
         self.recovery_policy.complete(rid, pending.get("permit"), {"status": "gate_reset", "stage": pending["stage"]})
 
@@ -1082,7 +1095,8 @@ class WorkflowEngine:
         artifact = self.artifacts.put(result.model_dump(mode="json"), stage)
         self.authority.record(rid, result, context, logical_operation or key)
         if isinstance(result, ReviewResult):
-            IssueLedger(self.store, self.artifacts).record(rid, logical_operation or key, result, context)
+            issue_scope = PlanReviewRecovery(self).issue_scope(rid, logical_operation or key)
+            IssueLedger(self.store, self.artifacts).record(rid, issue_scope, result, context)
         record = {"identity": identity, "result": result.model_dump(mode="json"), "artifact": artifact,
                   **({"logical_input": logical_key} if logical else {})}
         updates = {invocation_key: record}
@@ -1621,13 +1635,14 @@ class WorkflowEngine:
             cached = self.store.get(rid, stage)
             if cached:
                 if (stage == "provider_research"
-                        and self.authority.author_scope(rid, stage)["correction"]):
+                        and (self.authority.author_scope(rid, stage)["correction"]
+                             or PlanReviewRecovery(self).requires_research_review(rid))):
                     # Old versions could cache research without closing its correction.
                     # Review that exact retained document, including controller metadata;
                     # an older acceptance cannot settle a newer active dispute.
                     review = await self._review_research(rid, work, cached, cached.get("verified_sources", []))
                     self.store.checkpoints(rid, {stage: cached,
-                        **self.authority.acceptance(rid, stage, cached, review)})
+                        **PlanReviewRecovery(self).accept_research(rid, cached, review)})
                 if stage == "design":
                     if not self.authority.accepted(rid, stage, cached):
                         await DesignDocuments(self).reaudit(rid, work, cached, context)
@@ -1678,6 +1693,7 @@ class WorkflowEngine:
                     continue
             schema = PlanResult if stage == "plan" else DocumentResult
             if stage == "plan":
+                PlanReviewRecovery(self).recover(rid, work)
                 origin_state = self.store.task_origin_state(rid)
                 if set(origin_state["budgets"]) - set(origin_state["origins"].values()):
                     raise Replan("plan", "Task origin history is missing for consumed task budgets; restore the registry before planning")
@@ -1725,7 +1741,8 @@ class WorkflowEngine:
                 context["design_review"] = DesignDocuments(self).context(rid, work)
             if stage == "provider_research":
                 review = None
-                if document.sources or self.authority.author_scope(rid, stage)["correction"]:
+                if (document.sources or self.authority.author_scope(rid, stage)["correction"]
+                        or PlanReviewRecovery(self).requires_research_review(rid)):
                     retrieved = await ResearchService(self.artifacts).verify(document.sources)
                     review = await self._review_research(rid, work, document.model_dump(), retrieved)
             if stage == "plan":
@@ -1788,6 +1805,8 @@ class WorkflowEngine:
                         "plan": document.model_dump(), "review": review.model_dump(), "context": review_context})
                     raise
                 except AA2Error as exc:
+                    PlanReviewRecovery(self).route(rid, work, document.model_dump(), review,
+                                                   upstream_context=review_context)
                     raise Replan("plan", str(exc) + "\n" + review.summary + details) from exc
                 self.store.checkpoint(rid, "evidence_admission/initial",
                                       admission_record(document, review, review_context))
@@ -1801,8 +1820,10 @@ class WorkflowEngine:
             if stage == "plan":
                 from .check_production import activation_updates
                 updates.update(activation_updates(self.store.get(rid, "evidence_admission/initial")))
-            if stage in {"design", "plan"} or stage == "provider_research" and review is not None:
+            if stage in {"design", "plan"}:
                 updates.update(self.authority.acceptance(rid, stage, stage_data, review))
+            elif stage == "provider_research" and review is not None:
+                updates.update(PlanReviewRecovery(self).accept_research(rid, stage_data, review))
             self.store.checkpoints(rid, updates)
             context[stage] = stage_data
         plan = PlanResult.model_validate(self.store.get(rid, "plan"))
@@ -3036,7 +3057,7 @@ class WorkflowEngine:
     async def _review_research(self, rid, work, document, retrieved):
         review = await self._invoke("review", {"review_kind": "research", "research": document,
                                              "retrieved_sources": retrieved}, ReviewResult,
-                                    work, rid, "research-review", fresh=True)
+                                    work, rid, PlanReviewRecovery(self).research_operation(rid), fresh=True)
         if not review.approved:
             raise Replan("provider_research", review.summary)
         return review
