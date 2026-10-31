@@ -18,6 +18,7 @@ import httpx
 from .cleanup import finalize_async
 from .errors import AA2Error, PrototypeBrowserError
 from .evidence import NODE_RUNTIME_CACHES
+from .models import validate_browser_actions
 from .network import OWNERSHIP_FAILURE, PreviewProxy, preview_owner
 from .process_ownership import PreviewOwnershipError
 from .progress import capture_output, current_activity
@@ -26,7 +27,7 @@ from .safe_files import directory_fd, regular_file
 from .sandbox import SandboxRunner
 from .util import atomic_write, digest, scrub_text
 
-PROTOTYPE_BROWSER_VERSION = 12
+PROTOTYPE_BROWSER_VERSION = 13
 BROWSER_RUNTIME = {}
 APPLICATION_VIEWPORTS = ((1440, 900), (390, 844))
 
@@ -234,6 +235,7 @@ async def _expect_rendered_text(locator, expected):
 
 
 async def exercise(page, actions, route, completed=None):
+    validate_browser_actions(actions)
     if completed is None:
         completed = []
     for step in actions:
@@ -244,6 +246,9 @@ async def exercise(page, actions, route, completed=None):
             await locator.wait_for(state="visible", timeout=10000)
         elif step.action == "expect_text":
             await _expect_rendered_text(locator, step.value)
+        elif step.action == "mouse_down":
+            await locator.hover(timeout=10000)
+            await page.mouse.down(button="left")
         elif step.action in {"fill", "press"}:
             await getattr(locator, step.action)(step.value, timeout=10000)
         else:

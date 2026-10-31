@@ -102,9 +102,22 @@ class SourceEvidence(Record):
 
 class BrowserAction(Record):
     route: str = "/"
-    action: Literal["click", "fill", "press", "check", "expect_visible", "expect_text"]
+    action: Literal["click", "fill", "press", "check", "mouse_down", "expect_visible", "expect_text"] = Field(
+        description="mouse_down hovers the selector then holds the real left mouse button through screenshot capture. "
+        "It must be the last interaction on that route; only expect_visible/expect_text may follow. "
+        "Use an explicit selector:active assertion when active-state evidence is required; down alone is not proof.")
     selector: str = Field(min_length=1)
     value: str = ""
+
+
+def validate_browser_actions(actions):
+    held_routes = set()
+    for step in actions:
+        if step.route in held_routes and step.action not in {"expect_visible", "expect_text"}:
+            raise ValueError(f"Invalid {step.action} after mouse_down on route {step.route}: "
+                             "only expect_visible/expect_text may follow the final interaction")
+        if step.action == "mouse_down":
+            held_routes.add(step.route)
 
 
 class DocumentResult(Record):
@@ -115,6 +128,11 @@ class DocumentResult(Record):
     files: list[Change] = []
     browser_actions: list[BrowserAction] = []
     design_selection: list[DesignSelection] = []
+
+    @model_validator(mode="after")
+    def browser_action_sequence(self):
+        validate_browser_actions(self.browser_actions)
+        return self
 
     @model_serializer(mode="wrap")
     def preserve_legacy_shape(self, handler):
@@ -147,6 +165,7 @@ class PreviewSpec(Record):
             raise ValueError("Preview routes must be nonempty and unique")
         if any(action.route not in self.routes for action in self.actions):
             raise ValueError("Every preview action must name a declared route")
+        validate_browser_actions(self.actions)
         return self
 
 

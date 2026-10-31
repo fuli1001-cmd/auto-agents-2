@@ -42,7 +42,12 @@ def prototype_contract():
         "not_collected": ["dom_json", "local_storage_snapshot", "download_bytes", "file_chooser_upload",
                           "candidate_collector_execution"],
         "execution": "Declared actions run sequentially per route in a fresh context for each route and viewport. "
-                     "Only the declared action schema is executable; candidate helper modules do not add capabilities.",
+                     "mouse_down hovers the selector then holds the real left button until context closure; at most one "
+                     "is allowed per route, followed only by expect_visible/expect_text. For active-state evidence, "
+                     "declare an explicit selector:active assertion: sending down alone does not prove the target is active. "
+                     "Screenshots and scroll tiles never replay down or release the button; terminal assertions are "
+                     "rechecked and state loss fails collection. Only the declared action schema is executable; "
+                     "candidate helper modules do not add capabilities.",
         "authority": "Controller protocol only, not evidence of collection, product acceptance or permission to run code.",
         "ownership": {
             "prototype": "Author static UI and supported interaction checks; submit corrections for independent review.",
