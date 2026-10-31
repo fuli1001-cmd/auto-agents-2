@@ -251,6 +251,8 @@ conda run --no-capture-output -p ./.conda-env python -m pytest -q
 conda run --no-capture-output -p ./.conda-env python -m ruff check src tests
 ```
 
+仓库 pytest 自动回收通过用例的私有副本，保留受控失败/中断现场，并在 WSL 中分别预检 Linux 与宿主卷空间。直接 pytest、显式 `--basetemp`、并发和覆盖选项见 [pytest 临时副本说明](docs/pytest-temp-copies.md)。
+
 `aa2 doctor --live` 会调用真实 provider，产生实际用量；普通 doctor 只检查配置与沙箱。自动测试使用可控 provider 和真实 Git / 子进程，避免依赖模型输出偶然性。
 
 运行真实浏览器测试前，可将 Chromium 安装到本项目目录：
