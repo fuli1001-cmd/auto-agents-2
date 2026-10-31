@@ -1529,14 +1529,23 @@ class WorkflowEngine:
                    "project": self.contexts.build(work), "feedback": self.store.get(rid, "replan_feedback", {})}
         assessment = self.store.get(rid, "clarify")
         if not assessment:
+            from .clarification_reentry import ClarificationReentry
+            reentry = ClarificationReentry(self)
+            context.pop("controller_reentry", None)
+            retained = reentry.context(rid, work)
+            if retained.get("status") == "verified_reentry":
+                context["controller_reentry"] = retained
             for turn in range(20):
                 # Replans may originate after prototype/design answers, outside this
                 # loop. Reload bound external answers rather than trusting summaries
                 # or a persisted snapshot; automatic decisions are not requirements.
                 context["submitted_answers"] = self.store.submitted_answers(rid)
-                result = await self._invoke("clarify", context, IntakeResult, work, rid, "clarify")
+                result = await reentry.refresh(rid, work, context) if turn == 0 else None
+                if result is None:
+                    result = await self._invoke("clarify", context, IntakeResult, work, rid, "clarify")
                 if result.questions:
-                    response = await self._questions(rid, f"clarify/{turn}", result.questions, digest(result.model_dump()))
+                    question_key = reentry.question_prefix if turn == 0 and reentry.question_prefix else f"clarify/{turn}"
+                    response = await self._questions(rid, question_key, result.questions, digest(result.model_dump()))
                     context.setdefault("decisions", []).append(response)
                     self.store.checkpoint(rid, "clarify_context", context)
                     continue

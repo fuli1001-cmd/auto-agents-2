@@ -576,3 +576,8 @@ may appear in real evidence; capture does not normalize product DOM or excuse it
 own asynchronous changes. Existing automatic evidence versioning requires a new
 observation without replacing bound human consent. See [capture diagnosis and
 validation](demo5-capture-observation-fix.md).
+
+
+Clarify 的已授权阶段回退通过有界控制器材料桥接恢复当前 generation 的原输入、候选和操作回执。桥接核对 replan_feedback、精确 gate-history、correction_request 绑定、当前源码及 completed/gate_reset 许可；尚无该完整记录或仅有 gate_requested 的旧恢复保守沿原路径，不声明已核验或自动刷新。原型候选可来自更早的 gate-history，必须独立匹配当前内容/动作及同一 run 的原始人工问答；原件和登记的图像依赖通过既有 ArtifactStore/ContextPlanner 只读提供。历史自动 review 仅为历史证据，新需求来源仍经过正常 coverage 和原型门禁。
+
+旧 clarify 调用若在缺少桥接材料时产生未答问题，正常 resume 先按独立 operation 补材重算。按结果指纹定位唯一待答批次，保留同 key 的旧版本答复；多个待答批次歧义时保留原问题并拒绝刷新。旧 invocation、presentation、原问题批次、来源材料、审批和已提交答复在事务中再次比较；仅随后发布新 invocation 并将精确旧未答问题标为 superseded，同时保留审计记录。真实答复先到则优先按原批次消费，不代填答案，也不把非第 0 轮的问题改挂到第 0 轮。新候选的实质产品问题继续正常提问，人工批准、预算和累计次数不因材料修复而重置。

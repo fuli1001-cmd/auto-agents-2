@@ -31,9 +31,9 @@ SHARED = {"controller_review_basis", "controller_authority_scope", "task", "mand
           "ui_design", "controller_feedback", "controller_attachment_capture", "controller_recording_recovery", "controller_evidence_capabilities", "evidence_requirement_source", "evidence_candidate_hash", "unsupported_evidence_obligations", "evidence_reference_contract", "controller_stage_contract", "validation_feedback"}
 CONTRACTS = {
     "clarify": {"raw_requirements", "raw_requirements_truncated", "history", "project", "decisions", "submitted_answers",
-                "review_feedback", "additional_evidence", "regression_evidence", "coverage_verification"},
+                "review_feedback", "additional_evidence", "regression_evidence", "coverage_verification", "controller_reentry"},
     "coverage_review": {"raw_requirements", "raw_requirements_truncated", "history", "project", "decisions", "submitted_answers",
-                        "assessment", "review_feedback", "coverage_verification"},
+                        "assessment", "review_feedback", "coverage_verification", "controller_reentry"},
     "provider_research": {"specification", "project", "provider_research_answer"},
     "research": {"research", "retrieved_sources"},
     "prototype": {"specification", "project", "design_baseline", "design_candidates", "prototype_answer",

@@ -688,6 +688,46 @@ class Store:
                            (rid, key, fingerprint))
             self._event(db, rid, "design.questions_refreshed", {"history": history_key})
 
+    def refresh_clarify_questions(self, rid, original, refreshed, guards, consent, answers,
+                                  operation, history_key, record):
+        """CAS a retained-evidence refresh; a concurrent real answer keeps its meaning."""
+        from .faults import StateConflict
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            def get(key):
+                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                return json.loads(row[0]) if row else None
+            previous = original["invocation"]
+            fingerprint = digest(previous["result"])
+            questions = [q for q in self._decision_questions(db, rid, original["keys"])
+                         if q["artifact_hash"] == fingerprint]
+            if any(q["answer"] is not None and q["artifact_hash"] == fingerprint for q in questions):
+                return False
+            current_run = json.loads(db.execute("SELECT data FROM runs WHERE id=?", (rid,)).fetchone()[0])
+            if (current_run.get("replans", 0) != record["replans"]
+                    or get("invocation/clarify") != previous
+                    or get(original["presentation_key"]) != original["presentation"]
+                    or not refreshed or get("invocation/" + operation) != refreshed
+                    or questions != original["questions"]
+                    or self._submitted_answers(db, rid) != answers
+                    or any(get(key) != expected for key, expected in guards.items())):
+                raise StateConflict("Clarification refresh inputs changed; preserve the proposal and questions")
+            for qid, expected in consent.items():
+                row = db.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone()
+                if row is None or self._question(row) != expected:
+                    raise StateConflict("Retained prototype consent changed during clarification refresh")
+            existing = get(history_key)
+            if existing is not None and existing != record:
+                raise StateConflict("Clarification refresh receipt changed")
+            self._put(db, rid, history_key, record)
+            self._put(db, rid, "invocation/clarify", {**refreshed, "recovered_from": operation})
+            for key in original["keys"]:
+                db.execute("UPDATE questions SET superseded=1 WHERE run_id=? AND key=? AND artifact_hash=? AND answer IS NULL",
+                           (rid, key, fingerprint))
+            self._event(db, rid, "clarify.questions_refreshed", {"history": history_key,
+                "operation": operation, "questions": [q["id"] for q in questions]})
+        return True
+
     @staticmethod
     def _question(row):
         values = dict(row)
