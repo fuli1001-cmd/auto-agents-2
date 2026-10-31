@@ -923,6 +923,22 @@ class WorkflowEngine:
             raise asyncio.CancelledError()
         return answer
 
+    def _prototype_reentry_context(self, rid, work, context, *, review=False):
+        context = {**context}
+        retained = PrototypeReentry(self).context(rid, work)
+        if retained:
+            if review:
+                retained = {**retained, "instruction": (
+                    "Read the complete historical proposals and their bound reviews/reasons for read-only comparison "
+                    "with the current candidate and requirements. Independently check preserved obligations; do not "
+                    "generate changes, infer coverage from counts, or treat historical proposals/consent as current "
+                    "acceptance. These references grant no gate approval; current browser evidence, independent "
+                    "review and applicable human consent remain required.")}
+            context["controller_prototype_reentry"] = retained
+        else:
+            context.pop("controller_prototype_reentry", None)
+        return context
+
     def _prototype_review_context(self, rid, work, context):
         controlled = prototype_context(self, rid)
         spec = self.store.get(rid, "clarify", {})
@@ -930,7 +946,8 @@ class WorkflowEngine:
         visual = UIDesign(self.store, self.artifacts).context(rid, spec, controlled["prototype_requirement_source"])
         basis = review_basis(controlled["prototype_requirement_source"], spec,
                              prototype_identity(work, actions), context.get("browser_evidence", []), visual.get("ui_design"))
-        return {**context, **controlled, **visual, "specification": spec, "prototype_review_basis": basis}
+        return self._prototype_reentry_context(rid, work, {
+            **context, **controlled, **visual, "specification": spec, "prototype_review_basis": basis}, review=True)
 
     def _validate_stage_response(self, result, stage, context, rid):
         if stage == "provider_research" and isinstance(result, DocumentResult):
@@ -988,11 +1005,7 @@ class WorkflowEngine:
         if stage == "prototype":
             context = {**context, **prototype_context(self, rid),
                        "controller_prototype_output": prototype_output_contract()}
-            retained = PrototypeReentry(self).context(rid, workspace)
-            if retained:
-                context["controller_prototype_reentry"] = retained
-            else:
-                context.pop("controller_prototype_reentry", None)
+            context = self._prototype_reentry_context(rid, workspace, context)
         elif stage == "review" and context.get("review_kind") == "prototype":
             context = self._prototype_review_context(rid, workspace, context)
             schema = PrototypeReview
