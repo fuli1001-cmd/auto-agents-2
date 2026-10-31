@@ -113,6 +113,7 @@ from .requirements import (
     validate_requirements_text,
 )
 from .research import ResearchService
+from .research_contract import research_output_contract, validate_research_output
 from .resources import ResourceManager
 from .review_authority import InvalidAuthorityReview
 from .review_evidence import ReviewEvidence, consumer_key, review_consumer
@@ -931,6 +932,8 @@ class WorkflowEngine:
         return {**context, **controlled, **visual, "specification": spec, "prototype_review_basis": basis}
 
     def _validate_stage_response(self, result, stage, context, rid):
+        if stage == "provider_research" and isinstance(result, DocumentResult):
+            validate_research_output(result.model_dump())
         if stage == "clarify" and isinstance(result, IntakeResult):
             validate_brief(result.model_dump(), context.get("raw_requirements", ""),
                            context.get("submitted_answers", []), required=not result.questions)
@@ -969,6 +972,12 @@ class WorkflowEngine:
             raise Replan(owner, reason)
 
     async def _invoke(self, stage, context, schema, workspace, rid, key, fresh=False, *, interactive_retry=True):
+        if stage == "provider_research":
+            # Refresh only at a new logical call. ProposalRecovery keeps this input frozen.
+            context = {**context, "submitted_answers": self.store.submitted_answers(rid),
+                       "controller_research_output": research_output_contract()}
+        elif stage == "review" and context.get("review_kind") == "research":
+            context = {**context, "controller_research_output": research_output_contract()}
         purpose = context.get("review_kind", "implementation") if stage == "review" else stage
         if purpose in UI_PURPOSES and not (stage == "review" and purpose == "prototype"):
             spec = self.store.get(rid, "clarify", {})
@@ -1643,6 +1652,11 @@ class WorkflowEngine:
                 continue
             cached = self.store.get(rid, stage)
             if cached:
+                if stage == "provider_research":
+                    try:
+                        validate_research_output(cached)
+                    except InvalidStructuredResponse as exc:
+                        raise Replan(stage, str(exc)) from exc
                 if (stage == "provider_research"
                         and (self.authority.author_scope(rid, stage)["correction"]
                              or PlanReviewRecovery(self).requires_research_review(rid))):
@@ -1723,6 +1737,11 @@ class WorkflowEngine:
                         pending["proposal_source_hash"] = tree_hash(work)
                 document = (schema.model_validate(pending["document"]) if pending.get("document") else
                             await self._invoke(stage, context, schema, work, rid, stage))
+                if stage == "provider_research":
+                    try:
+                        validate_research_output(document.model_dump())
+                    except InvalidStructuredResponse as exc:
+                        raise Replan(stage, str(exc)) from exc
                 self.store.checkpoint(rid, pending_key, {**pending, "document": document.model_dump()})
                 if stage == "design" and document.questions:
                     document = await DesignDocuments(self).refresh_questions(rid, work, document, context)

@@ -12,6 +12,7 @@ from pydantic import Field, ValidationError, create_model
 
 from .errors import AA2Error, InvalidStructuredResponse
 from .models import Record, ReviewResult
+from .research_contract import RESEARCH_PUBLICATION_RULE
 from .util import digest
 
 VERSION = 1
@@ -21,7 +22,7 @@ GOAL_KINDS = {"submitted_requirement", "accepted_interpretation"}
 OWNERS = Literal["clarify", "provider_research", "prototype", "design", "plan", "develop", "checks", "controller"]
 KINDS = {
     "coverage_review": ("clarify", "Interpret submitted goals without inventing user statements or consent. Preserve every original obligation; assess actual existing coverage."),
-    "research": ("provider_research", "Verify research claims and citations. Research is advice or evidence, never permission or a new product requirement."),
+    "research": ("provider_research", "Verify research claims and citations. Research is advice or evidence, never permission or a new product requirement. " + RESEARCH_PUBLICATION_RULE),
     "design": ("design", "Review architecture and its selected technical methods against submitted goals. Explicitly adopt bounded technical choices; a method is not a user statement or an execution capability."),
     "plan": ("plan", "Review complete task/check contracts, genuine capability prerequisites and preservation of goals. A declared origin or requirement ID does not prove a method was requested."),
     "plan_patch": ("plan", "Review the exact old/new contract, preserved obligations, affected tasks and evidence. Never escape a rejected amendment by relabeling user requirements."),
