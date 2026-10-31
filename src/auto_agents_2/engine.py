@@ -85,7 +85,8 @@ from .preview_evidence import PreviewEvidence
 from .profiles import ProjectProfile
 from .progress import observe_activity, safe_event
 from .proposal_recovery import ProposalRecovery
-from .prototype_contract import prototype_context
+from .prototype_contract import prototype_context, prototype_output_contract
+from .prototype_reentry import PrototypeReentry
 from .prototype_review import (
     InvalidPrototypeReview,
     PrototypeReview,
@@ -985,7 +986,13 @@ class WorkflowEngine:
             context = {**context, **UIDesign(self.store, self.artifacts).context(
                 rid, spec, controlled["prototype_requirement_source"])}
         if stage == "prototype":
-            context = {**context, **prototype_context(self, rid)}
+            context = {**context, **prototype_context(self, rid),
+                       "controller_prototype_output": prototype_output_contract()}
+            retained = PrototypeReentry(self).context(rid, workspace)
+            if retained:
+                context["controller_prototype_reentry"] = retained
+            else:
+                context.pop("controller_prototype_reentry", None)
         elif stage == "review" and context.get("review_kind") == "prototype":
             context = self._prototype_review_context(rid, workspace, context)
             schema = PrototypeReview
@@ -1355,6 +1362,7 @@ class WorkflowEngine:
                 break
             else:
                 context["controller_feedback"] = "Generate prototype files now. Human approval is requested by the controller after files, checks and preview exist. Do not ask for it in questions."
+            context["previous_prototype"] = document.model_dump()
             document = await self._invoke("prototype", context, DocumentResult, work, rid, "prototype")
             pending["document"] = document.model_dump()
             self.store.checkpoint(rid, key, pending)

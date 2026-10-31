@@ -39,6 +39,7 @@ CONTRACTS = {
     "research": {"research", "retrieved_sources", "controller_research_output"},
     "prototype": {"specification", "project", "design_baseline", "design_candidates", "prototype_answer",
                   "controller_browser_report", "previous_prototype", "prototype", "design_evidence", "browser_evidence",
+                  "controller_prototype_reentry", "controller_prototype_output",
                   "unresolved_issues", "controller_prototype_contract", "prototype_requirement_source", "prototype_review_basis"},
     "design": {"specification", "project", "provider_research", "prototype", "design_answer", "design",
                "design_review_evidence", "design_documents"},

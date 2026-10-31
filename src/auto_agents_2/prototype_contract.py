@@ -13,6 +13,23 @@ from .util import digest
 PROTOTYPE_VIEWPORTS = ((1440, 900), (390, 844))
 
 
+PROTOTYPE_OUTPUT_RULE = (
+    "Return one complete prototype proposal on every correction, not a patch to the previous response. "
+    "Supply the full current document, browser_actions, sources and design_selection, including still-valid "
+    "actions and reference rationales from retained proposals. Empty fields mean an empty current contract, "
+    "not inheritance; use them only when the complete current scope warrants it. Explain intentional changes "
+    "without treating historical action counts or rejected claims as proof of coverage. files has different "
+    "semantics: propose only the changes currently needed in the allowed workspace scope. Historical files "
+    "may already be applied and must never be copied or replayed automatically. Historical proposals and "
+    "reviews are references; they do not grant permission or approve this new proposal."
+)
+
+
+def prototype_output_contract():
+    return {"version": 1, "complete_fields": ["document", "browser_actions", "sources", "design_selection"],
+            "files": "current_changes_only", "history": "reference_only"}
+
+
 def prototype_contract():
     body = {
         "version": 1,
