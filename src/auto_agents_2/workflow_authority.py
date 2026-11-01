@@ -250,11 +250,17 @@ class WorkflowAuthority:
             return False
         return not current or record["basis"]["source_identity"] == self.identity(rid)
 
-    def retain_task(self, rid, task, saved):
+    def retain_task(self, rid, task, saved, *, work=None):
         """Retain implementation/history, invalidate only an unsupported verdict."""
-        if not saved.get("commit") or not self.store.get(rid, "authority/protocol"):
+        if not self.store.get(rid, "authority/protocol"):
             return saved
         if saved.get("review", {}).get("approved") and self.reusable(rid, saved["review"]):
+            return saved
+        from .task_plan_continuity import retain
+        continued = retain(self.engine, rid, task, saved, work)
+        if continued is not None:
+            return continued
+        if not saved.get("commit"):
             return saved
         key = "develop/task/" + task.id
         state = self.store.get(rid, "task_state/" + task.id, {"version": 1, "revision": 1})

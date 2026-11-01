@@ -2071,9 +2071,11 @@ class WorkflowEngine:
 
     async def _develop(self, rid, integration, plan, context):
         cfg = self.config.load()
+        from .task_plan_continuity import retained_record
         for task in plan.tasks:
-            if task.id in self.store.get(rid, "develop/done", []):
-                self.authority.retain_task(rid, task, self.store.get(rid, "develop/task/" + task.id, {}))
+            saved = self.store.get(rid, "develop/task/" + task.id, {})
+            if task.id in self.store.get(rid, "develop/done", []) or retained_record(saved):
+                self.authority.retain_task(rid, task, saved, work=integration)
         done = set(self.store.get(rid, "develop/done", []))
         positions = {task.id: index for index, task in enumerate(plan.tasks, 1)}
         safe_event(self.store, rid, "tasks.planned", {"total": len(plan.tasks), "done": len(done)})
