@@ -600,3 +600,18 @@ its preservation metadata does not establish that an implementation exists or is
 accepted. Feedback claims remain proposals; journal and input bindings are recorded
 facts, never new action authority. Legacy saved inputs are explicitly labelled and
 missing journals remain unavailable. Existing frozen diagnostic calls are unchanged.
+
+
+An unconsumed repair dispatch may outlive a separately reviewed local plan amendment.
+For a single activated amendment that leaves the entire task and global execution
+contracts unchanged, an unimplemented task whose dependency-refresh history has
+no candidate, patch, checks, review or commit may produce a new authority-reassessment
+observation. The original permit, frozen request, transition receipts, task history
+and cumulative counts remain intact. The existing recovery policy selects and
+records a fresh action under current authority; historical permission never becomes
+current permission merely by replacing a hash. Complete original records are supplied
+as an immutable, readable material alongside the controller's narrow observation.
+The source identities and workspace are checked again across authorization waits;
+a formally activated follow-up patch uses its own exact transition. Unknown input
+changes, partial implementations and specialized recovery grants retain their
+existing reconciliation gates.

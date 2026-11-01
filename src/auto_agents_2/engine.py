@@ -2346,6 +2346,10 @@ class WorkflowEngine:
                 if saved.get("phase") == "rejected":
                     if saved.get("source_hash") and saved["source_hash"] != tree_hash(work):
                         raise PolicyViolation("Retained rejected candidate changed; preserve user edits before recovery")
+                    from .task_authority import plan_reassessment
+                    reassessment = plan_reassessment(self, rid, task, saved)
+                    if reassessment is not None:
+                        raise RecoveryNeeded(reassessment)
                     if not self.recovery_policy.task_authorized(rid, saved, task):
                         raise RecoveryNeeded(self._task_failure(rid, task, saved))
                 counters["round"] += 1

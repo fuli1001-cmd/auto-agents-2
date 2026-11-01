@@ -194,6 +194,8 @@ class RecoveryPolicy:
             diagnosis_assessment = True
             candidates = None
         force_decision = force_decision or diagnosis_assessment
+        from .task_authority import authorization_sources
+        reassessment_sources = authorization_sources(self, rid, failure, active, work, operation)
         from .resolution_diagnosis import authorization_proof
         resolution_proof = authorization_proof(self, rid, failure, active, work, plan, operation)
         if resolution_proof == {}:
@@ -504,10 +506,12 @@ class RecoveryPolicy:
         if choice.action == "preview_recheck" and (
                 not preview_binding or PreviewEvidence(self.engine).binding(rid, work, plan) != preview_binding):
             raise StateConflict("Preview contracts or consent changed during recovery authorization")
+        if authorization_sources(self, rid, failure, active, work, operation) != reassessment_sources:
+            raise StateConflict("Task authority changed while authorizing; preserve the original observation")
         permit = ActionPermit(cycle_id=cid, owner=failure.origin_id, action=choice.model_dump(),
                               actor=actor, source_hash=source, plan_hash=plan_hash,
                               authority_failure=failure.model_dump(), resolution_diagnosis=resolution_proof or {}, recording=recording or {},
-                              authority_sources=self.engine.authority.identity(rid), authority_transition=transition,
+                              authority_sources=reassessment_sources or self.engine.authority.identity(rid), authority_transition=transition,
                               reason=result.reason, expected_result=result.expected_result,
                               task_scopes={task.id: task.allowed_paths for task in scoped},
                               prototype_binding=prototype_binding if choice.action == "prototype_recheck" else {},
