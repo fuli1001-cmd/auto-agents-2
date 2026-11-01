@@ -86,6 +86,7 @@ async def test_author_request_and_diagnosis_share_original_feedback_after_checkp
     # no new input field in the task. Its exact request must replay unchanged.
     old_saved = workflow.store.get(rid, "develop/task/" + task.id)
     old_saved.pop("author_input")
+    old_saved.pop("implementation")  # Old crash predates task-candidate publication too.
     workflow.store.checkpoint(rid, "develop/task/" + task.id, old_saved)
     with pytest.raises(RecoveryNeeded) as replay:
         await workflow._task(rid, task, git(work, "rev-parse", "HEAD"), plan, {"specification": {}})

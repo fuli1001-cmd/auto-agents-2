@@ -2397,6 +2397,13 @@ class WorkflowEngine:
             change = (ImplementationResult.model_validate(saved["implementation"]) if saved.get("implementation") else
                       await self._invoke("implement", task_context, ImplementationResult, work, rid, key))
             if request_from(change):
+                if saved.get("source_hash") and saved["source_hash"] != tree_hash(work):
+                    raise StateConflict("Author request source changed; preserve the task and user edits before continuing")
+                # An earlier sibling failure may be adjudicated first. Preserve
+                # this complete proposal before aggregation or cancellation so
+                # resume cannot re-author it merely because shared context changed.
+                saved["implementation"] = change.model_dump()
+                self.store.checkpoint(rid, key, saved)
                 self._task_progress(rid, task, saved)
                 raise RecoveryNeeded(self._task_failure(rid, task, saved, kind="proposal", step="task",
                     proposal=change.model_dump()))
