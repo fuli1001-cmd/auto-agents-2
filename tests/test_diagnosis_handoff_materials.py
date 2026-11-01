@@ -10,16 +10,24 @@ from auto_agents_2.sandbox import SandboxRunner
 from auto_agents_2.util import write_json
 
 
-async def complete_with_material_transport(tmp_path, *, damage=None, logs=None):
+async def complete_with_material_transport(tmp_path, *, damage=None, logs=None, dependency_result=False):
     project = tmp_path / 'project'
     project.mkdir()
     workflow, rid, work, _, record, first, second = await initial_recheck(
         project, **({'logs': logs} if logs is not None else {}))
+    expected = [first['hash'], second['hash']]
+    damaged = first
+    if dependency_result:
+        from test_diagnosis_current_results import seed_result
+        _, log, report = seed_result(workflow, rid, work)
+        expected.extend([log['hash'], report['hash']])
+        damaged = report
+    expected.sort()
     await workflow.recovery.resume(rid)
     native = tmp_path / 'fixture-native-home'
     native.mkdir()
     binary = tmp_path / 'fixture-provider'
-    binary.write_text(f'#!{sys.executable}\nEXPECTED = {sorted([first["hash"], second["hash"]])!r}\n' + r'''
+    binary.write_text(f'#!{sys.executable}\nEXPECTED = {expected!r}\nDEPENDENCY_RESULT = {dependency_result!r}\n' + r'''
 import hashlib, json, pathlib, sys
 args = sys.argv[1:]
 if args == ['--version']:
@@ -39,6 +47,11 @@ elif 'decision_request' in context:
 else:
     assert context['diagnosis_request']['proposal']['reason'] == 'Compare the two retained installation logs.'
     assert context['history']['recent']
+    if DEPENDENCY_RESULT:
+        row = next(row for row in context['current_task_results']['tasks'] if row['task_id'] == 'T2')
+        assert row['done'] is True and row['result']['source_relation'] == 'same'
+        assert row['result']['review']['proposal']['summary'] == 'Latest independent dependency review passed.'
+        assert row['result']['review']['receipt']['status'] == 'matching_record'
     seen = set()
     def inspect(value):
         if isinstance(value, dict):
@@ -73,7 +86,7 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 1, 'output
     workflow.agent = ProviderRouter(workflow.config, workflow.store, SandboxRunner(workflow.store.root))
     operation = f'recovery/diagnose/{record.id}/3'
     if damage:
-        path = workflow.artifacts.root / first['hash'][:2] / first['hash']
+        path = workflow.artifacts.root / damaged['hash'][:2] / damaged['hash']
         if damage == 'missing':
             path.unlink()  # Isolated fixture only; never a delivered project's evidence.
         else:
@@ -89,11 +102,11 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 1, 'output
     else:
         await workflow.recovery.resume(rid)
         invocation = workflow.store.get(rid, 'invocation/' + operation)
-        assert invocation['result']['evidence_refs'] == sorted([first['hash'], second['hash']]) + ['failure.evidence']
+        assert invocation['result']['evidence_refs'] == expected + ['failure.evidence']
         assert workflow.store.get(rid, 'recovery/active') is None
         assert workflow.store.get(rid, 'develop/task/T3')['recovery_permit']
         material = workflow.store.get(rid, 'materials/' + operation)
-        assert {first['hash'], second['hash']} <= {row['hash'] for row in material['materials']}
+        assert set(expected) <= {row['hash'] for row in material['materials']}
         assert not material['omitted_mandatory_content']
     assert not list((workflow.store.root / 'processes').glob('*.json'))
     return workflow, rid, first, second
@@ -106,3 +119,12 @@ async def test_actual_diagnosis_sees_both_logs_through_readonly_provider_and_str
 @pytest.mark.parametrize('damage', ['missing', 'corrupt'])
 async def test_missing_or_corrupt_previous_log_cannot_be_replaced_by_model_claim(tmp_path, damage):
     await complete_with_material_transport(tmp_path, damage=damage)
+
+
+async def test_current_dependency_results_reach_actual_readonly_provider(tmp_path):
+    await complete_with_material_transport(tmp_path, dependency_result=True)
+
+
+@pytest.mark.parametrize('damage', ['missing', 'corrupt'])
+async def test_current_report_damage_blocks_before_diagnosis_without_fabricating_success(tmp_path, damage):
+    await complete_with_material_transport(tmp_path, dependency_result=True, damage=damage)

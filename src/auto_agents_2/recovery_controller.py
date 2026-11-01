@@ -209,7 +209,7 @@ class RecoveryController:
                 "allowed_actions": policy.proposal_actions(
                     self._delivery_candidates(failure, adjudicate(failure), diagnosed=True))}
             progress_operation = f"recovery/diagnose/{failure.id}/{saved['round']}"
-            diagnosis_context.update(diagnosis_handoff(self.engine, rid, failure, permit, progress_operation))
+            diagnosis_context.update(diagnosis_handoff(self.engine, rid, failure, permit, progress_operation, evidence_source))
             progress_basis = (policy.progress.diagnosis_basis(rid, failure, work, None, progress_operation)
                               if not published else None)
             diagnosis = policy.completed_diagnosis(rid, permit, failure, active, work, None,
@@ -460,7 +460,7 @@ class RecoveryController:
                 if plan and plan.preview:
                     diagnosis_context["preview_contracts"] = PreviewEvidence(engine).contracts(rid, plan)
                 progress_operation = f"recovery/diagnose/{failure.id}/{active['diagnosis_round']}"
-                diagnosis_context.update(diagnosis_handoff(engine, rid, failure, permit, progress_operation))
+                diagnosis_context.update(diagnosis_handoff(engine, rid, failure, permit, progress_operation, active["evidence_source_hash"]))
                 progress_basis = policy.progress.diagnosis_basis(rid, failure, work, plan, progress_operation)
                 diagnosis = policy.completed_diagnosis(rid, permit, failure, active, work, plan)
                 completed_diagnosis = diagnosis is not None

@@ -62,7 +62,7 @@ CONTRACTS = {
                "verification_observation"},
     "recovery_diagnosis": {"failure", "plan", "project", "specification", "design", "task_budgets",
                            "diagnosis_feedback", "current_issues", "observations", "delivery_journal", "constraint", "preview_contracts",
-                           "allowed_actions", "diagnosis_request", "history", "previous_failure_observations"},
+                           "allowed_actions", "diagnosis_request", "history", "previous_failure_observations", "current_task_results"},
     "decision": {"decision_request"},
     "patch_repair": {"patch_repair", "project", "execution_contract", "specification"},
     "material_probe": {"context_files", "screenshot"},
