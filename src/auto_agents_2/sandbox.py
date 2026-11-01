@@ -21,11 +21,17 @@ class SandboxRunner:
         self.test_unconfined = _test_unconfined
 
     def command(self, argv: list[str], cwd: Path, writable: list[Path],
-                readable: list[Path] | None = None, overlays: list[tuple[Path, Path]] | None = None, hidden: list[Path] | None = None, cache_writes=None) -> list[str]:
+                readable: list[Path] | None = None, overlays: list[tuple[Path, Path]] | None = None, hidden: list[Path] | None = None, cache_writes=None, readonly_overlays=None) -> list[str]:
         if self.test_unconfined:
             return argv
         if not Path(self.binary).is_file():
             raise PolicyViolation("bubblewrap 不可用；请在 aa2 专用环境安装后运行 aa2 doctor")
+        for source, destination in readonly_overlays or []:
+            if (source.absolute() != source.resolve() or not source.is_dir()
+                    or not source.resolve().is_relative_to(self.root)
+                    or destination.absolute() != destination.resolve()
+                    or destination == self.root or not destination.is_relative_to(self.root)):
+                raise PolicyViolation("Read-only overlays must use owned state subdirectories")
         cmd = [self.binary, "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc",
                "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
         user_home = Path.home()
@@ -82,8 +88,11 @@ class SandboxRunner:
         # Mask state AFTER a parent project mount; restore only explicitly selected children.
         cmd += ["--tmpfs", str(self.root)]
         for path in mounts:
-            if path.is_relative_to(self.root) and path.exists():
+            if (path.is_relative_to(self.root) and path.exists()
+                    and not any(path.is_relative_to(destination) for _, destination in readonly_overlays or [])):
                 cmd += ["--ro-bind", str(path), str(path)]
+        for source, destination in readonly_overlays or []:
+            cmd += ["--ro-bind", str(source), str(destination)]
         for path in writable:
             if path.absolute() != path.resolve() or not any(path.resolve().is_relative_to(root) for root in (self.root, cwd.resolve())):
                 raise PolicyViolation(f"Writable mount must be an owned path without symlinks: {path}")
@@ -132,15 +141,18 @@ class SandboxRunner:
         finally:
             shutil.rmtree(scratch)
 
-    async def spawn(self, argv, cwd, env, writable, readable=None, overlays=None, hidden=None, cache_writes=None):
+    async def spawn(self, argv, cwd, env, writable, readable=None, overlays=None, hidden=None, cache_writes=None, readonly_overlays=None):
         executable = shutil.which(argv[0], path=env.get("PATH", os.defpath))
         if not executable:
             raise PolicyViolation(f"Executable unavailable in selected environment: {argv[0]}")
         argv = [executable, *argv[1:]]
         env = {**env, "GIT_OPTIONAL_LOCKS": "0"}
-        command = await asyncio.to_thread(self.command, argv, cwd, writable, readable, overlays, hidden, cache_writes)
+        command = await asyncio.to_thread(self.command, argv, cwd, writable, readable, overlays, hidden, cache_writes, readonly_overlays)
         from .managed_process import spawn_managed
-        paths = [cwd, *writable, *(readable or []), *(cache_writes or []), *(p for pair in overlays or [] for p in pair)]
+        paths = [cwd, *writable, *(readable or []), *(cache_writes or []), *(p for pair in overlays or [] for p in pair),
+                 *(source for source, _ in readonly_overlays or [])]
+        # Overlay destinations are virtual, not use of the complete host directory.
+        # Keep the original readable leaf paths above for exact artifact GC pins.
         return await spawn_managed(command, cwd, env, self.root, paths)
 
     async def stop(self, process):

@@ -20,7 +20,7 @@ from .materials import bundle, prepare_prompt, present_materials
 from .models import Usage, strict_schema
 from .progress import capture_output
 from .prompts import PROMPT_VERSION, PromptCompiler
-from .readview import VIEW_VERSION, create_view
+from .readview import VIEW_VERSION, create_artifact_view, create_view
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
 from .store import Store
@@ -29,6 +29,7 @@ from .util import atomic_write, digest, identifier, scrub_text, write_json
 from .workspace import file_digest
 
 INPUT_LIMIT_DIAGNOSTIC = "provider 输入超过 CLI 长度上限"
+MOUNT_LIMIT_DIAGNOSTIC = "provider 只读材料挂载超过沙箱参数上限"
 CONTEXT_LIMIT_DIAGNOSTIC = "provider 会话超过模型上下文容量"
 MODEL_UNAVAILABLE_DIAGNOSTIC = "provider 所选模型不可用或不受支持"
 
@@ -45,6 +46,7 @@ def diagnostic_summary(text: str) -> str:
     """Classify diagnostics without logging native configuration or credentials."""
     lower = text.lower()
     for needles, label in (
+        (("bwrap: exceeded maximum number of arguments",), MOUNT_LIMIT_DIAGNOSTIC),
         (("input_too_large", "input exceeds the maximum length"), INPUT_LIMIT_DIAGNOSTIC),
         (("context_window_exceeded", "ran out of room in the model's context window"), CONTEXT_LIMIT_DIAGNOSTIC),
         (("model_not_found", "model is not supported"), MODEL_UNAVAILABLE_DIAGNOSTIC),
@@ -442,6 +444,17 @@ class ProviderRouter:
                 over_target_reason="Mandatory instructions, constraints or unclassified extension" if material["over_target"] else "",
                 usage_scope="Initial prompt/schema characters and available attachment bytes; actual native tokens are recorded separately")
             self.store.checkpoint(run_id, "materials/" + operation, material)
+            # One selective read-only tree avoids one bwrap mount per evidence file.
+            # Preserve every original address, including references inside attachments.
+            reads = [schema_file, root / "prompt.txt", *assets, *context_files]
+            artifact_files = [p for p in reads if p.is_relative_to(artifact_store.root)]
+            readonly_overlays = []
+            if artifact_files:
+                try:
+                    projected = create_artifact_view(artifact_store.root, root / "artifact-view", artifact_files)
+                except (OSError, ValueError) as exc:
+                    raise ProviderError("Required evidence material cannot be projected safely") from exc
+                readonly_overlays = [(projected, artifact_store.root)]
             argv = transport.argv(eff, workspace, schema_file, out / "result.json", delivery.text, previous,
                                   assets, context_files)
             env = dict(eff["environment"])
@@ -497,8 +510,9 @@ class ProviderRouter:
                     del errors[:-100]
 
             try:
-                process = await self.sandbox.spawn(argv, workspace, env, [out], [schema_file, root / "prompt.txt", *assets, *context_files], overlays,
-                                                   hidden=[self.config.project, original_workspace])
+                process = await self.sandbox.spawn(argv, workspace, env, [out], reads, overlays,
+                                                   hidden=[self.config.project, original_workspace],
+                                                   readonly_overlays=readonly_overlays)
                 self.store.event(run_id, "agent.spawned", {"attempt": aid, "pid": process.pid})
 
                 async def stdout():
@@ -539,7 +553,7 @@ class ProviderRouter:
                     message = decoder.error or getattr(decoder, "stream_error", "") or "".join(errors)
                     diagnostic = diagnostic_summary(message)
                     raise ProviderError(diagnostic + f"；未取得完整结果（退出码 {process.returncode}）",
-                        retryable=diagnostic not in {INPUT_LIMIT_DIAGNOSTIC, CONTEXT_LIMIT_DIAGNOSTIC, MODEL_UNAVAILABLE_DIAGNOSTIC}
+                        retryable=diagnostic not in {INPUT_LIMIT_DIAGNOSTIC, CONTEXT_LIMIT_DIAGNOSTIC, MODEL_UNAVAILABLE_DIAGNOSTIC, MOUNT_LIMIT_DIAGNOSTIC}
                         and any(t in message.lower() for t in
                             ("timeout", "timed out", "429", "503", "connection", "rate limit", "capacity", "overloaded")))
                 from .safe_files import read_regular

@@ -70,6 +70,32 @@ def create_view(workspace: Path, destination: Path, extra=()) -> Path:
     return destination
 
 
+
+def create_artifact_view(source: Path, destination: Path, files: list[Path]) -> Path:
+    """Project exactly the admitted immutable objects, preserving their original addresses.
+
+    Hard links avoid duplicating potentially large evidence bodies. The provider
+    only receives a read-only mount; the attempt owns and cleans up these links.
+    """
+    import hashlib
+    from .safe_files import directory_fd, regular_file
+
+    with directory_fd(destination, create=True):
+        pass
+    for path in sorted(set(files)):
+        relative = path.relative_to(source)
+        sha = path.name
+        if (relative.parts != (sha[:2], sha) or len(sha) != 64
+                or any(c not in "0123456789abcdef" for c in sha)):
+            raise ValueError("Invalid admitted artifact address")
+        target = destination / sha[:2]
+        with directory_fd(path.parent) as incoming, directory_fd(target, create=True) as outgoing:
+            os.link(sha, sha, src_dir_fd=incoming, dst_dir_fd=outgoing, follow_symlinks=False)
+            with regular_file(outgoing, sha) as stream:
+                if hashlib.file_digest(stream, "sha256").hexdigest() != sha:
+                    raise ValueError("Admitted artifact changed during projection")
+    return destination
+
 def sensitive_values(workspace: Path, extra=()) -> list[str]:
     values = set()
     def strings(value, protected=False):
