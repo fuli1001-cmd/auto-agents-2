@@ -86,5 +86,5 @@ async def recheck_prototype(engine, rid, work, permit_key, failure):
     ledger = IssueLedger(store, engine.artifacts)
     for scope in ("prototype-review", "prototype-approval-review/" + binding["identity"]):
         ledger.record(rid, scope, PrototypeReview.model_validate(review), context)
-    store.checkpoint(rid, key, {**saved, "approval": approvals.context(record), "phase": "verified"})
+    store.checkpoint(rid, key, {**saved, "approval": approvals.context(record, actions=actions), "phase": "verified"})
     return None

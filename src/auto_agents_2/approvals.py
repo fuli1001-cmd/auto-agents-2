@@ -6,6 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from .errors import AA2Error
+from .faults import StateConflict
 from .models import BrowserAction
 from .prototype_contract import source_context
 from .prototype_review import review_basis, review_current
@@ -199,8 +200,17 @@ class PrototypeApprovals:
         self.store.checkpoints(rid, updates)
         return record
 
-    def context(self, record):
+    def context(self, record, *, actions):
+        # A consent digest is not the action body needed by production authors
+        # and reviewers. Publish only the exact sequence verified at this gate;
+        # neither reconstruct it from prose nor replay historical file patches.
+        if not isinstance(actions, list) or digest(actions) != record.get("actions_hash"):
+            raise StateConflict("Approved prototype action source changed before material delivery")
+        action_input = {"artifact": self.artifacts.put(actions, "approved_prototype_actions"),
+                        "source_ref": "prototype_approval.browser_actions", "required_read": True,
+                        "scope": "Complete ordered actions bound to this approval. Read the full array when "
+                                 "migrating or reviewing behaviour; prototype actions are not production evidence."}
         return {"status": "approved", "context_version": APPROVAL_CONTEXT_VERSION,
                 "hash": record["hash"], "identity": record["identity"], "actions_hash": record["actions_hash"],
                 "human": record["human"], "browser_version": record["browser_version"],
-                "independent_review": record["review"]}
+                "independent_review": record["review"], "browser_actions": action_input}

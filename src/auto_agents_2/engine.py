@@ -1046,6 +1046,15 @@ class WorkflowEngine:
                           else capture_contract(self.store.root))
             if budget is not None:
                 context = {**context, "controller_attachment_capture": budget}
+            if frozen:
+                old_approval = frozen["context"].get("prototype_approval")
+                approval = context.get("prototype_approval")
+                if (isinstance(old_approval, dict) and isinstance(approval, dict)
+                        and "browser_actions" not in old_approval):
+                    # Preserve an old logical call's exact input; new operations
+                    # receive the body. All original consent fields still bind.
+                    context = {**context, "prototype_approval": {
+                        name: value for name, value in approval.items() if name != "browser_actions"}}
         context, schema = self.authority.prepare(rid, stage, context, schema, workspace, key)
         if not interactive_retry or stage in {"decision", "recovery_diagnosis", "material_probe"} or context.get("patch_repair"):
             result = await self._invoke_once(stage, context, schema, workspace, rid, key, fresh,
@@ -1250,7 +1259,7 @@ class WorkflowEngine:
                 raise Replan("prototype", feedback)
             human = self.approvals.human(rid, work, actions)
         record = self.approvals.publish(rid, work, actions, human, review, visuals, self.browser_check_version())
-        return self.approvals.context(record)
+        return self.approvals.context(record, actions=actions)
 
     async def _ensure_prototype_approval(self, rid, work, prototype=None):
         """Restore the real gate for cached stages as well as freshly generated ones."""
@@ -1302,7 +1311,7 @@ class WorkflowEngine:
                   if prototype else None)
         if not record:
             raise ApprovalBoundary("当前任务缺少与原型内容及交互动作匹配的人工审批证据，已暂停派发")
-        return {"prototype_approval": self.approvals.context(record)}
+        return {"prototype_approval": self.approvals.context(record, actions=prototype.get("browser_actions", []))}
 
     def _task_design_context(self, rid, work):
         receipt = DesignDocuments(self).context(rid, work)
@@ -3053,7 +3062,7 @@ class WorkflowEngine:
             approval = (self.approvals.current(rid, work, prototype.get("browser_actions", []), self.browser_check_version())
                         if prototype else None)
             if approval:
-                context["prototype_approval"] = self.approvals.context(approval)
+                context["prototype_approval"] = self.approvals.context(approval, actions=prototype.get("browser_actions", []))
             context["execution_contract"] = ExecutionContract(
                 plan_revision=self.store.get(rid, "plan_revision/current", {}).get("revision", 1),
                 task_id="delivery", origin_id="delivery", allowed_paths=scopes,

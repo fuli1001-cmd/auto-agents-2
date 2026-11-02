@@ -324,7 +324,7 @@ class RecoveryController:
     def _approval(self, rid, work):
         prototype = self.store.get(rid, "prototype", {})
         approval = self.engine.approvals.current(rid, work, prototype.get("browser_actions", []), self.engine.browser_check_version()) if prototype else None
-        return {"prototype_approval": self.engine.approvals.context(approval)} if approval else {}
+        return {"prototype_approval": self.engine.approvals.context(approval, actions=prototype.get("browser_actions", []))} if approval else {}
 
     async def resume(self, rid):
         engine = self.engine
