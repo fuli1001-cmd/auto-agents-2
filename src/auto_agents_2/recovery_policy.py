@@ -225,8 +225,17 @@ class RecoveryPolicy:
         cid = self.cycle_id(failure, active)
         bounded_progress = (candidates is None or 'diagnose' in candidates) and not (
             self.store.get(rid, 'delivery/journal') or {}).get('publication_started')
+        original_identity = digest([cid, operation])
+        original_snapshot = self.store.get(rid, "recovery/request-snapshots/" + original_identity)
+        if original_snapshot and not self.store.get(rid, "recovery/permits/" + original_identity):
+            self.progress.verify_author_materials(rid, failure, work, plan,
+                original_snapshot["request"]["evidence"].get("author_materials", {}))
+        available_source = None
         if bounded_progress:
-            operation = self.progress.resume_operation(rid, failure, work, plan, cid, operation)
+            if self.store.get(rid, self.progress._stop_key(cid, operation)):
+                available_source = self.progress.author_source(rid, failure, work, plan)
+            operation = self.progress.resume_operation(rid, failure, work, plan, cid, operation,
+                author_materials={"prototype_approval": available_source} if available_source else {})
         cycle_key = "recovery/cycles/" + cid
         permit_key = "recovery/permits/" + digest([cid, operation])
         source, plan_hash = tree_hash(work), digest(plan.model_dump() if plan else None)
@@ -241,6 +250,23 @@ class RecoveryPolicy:
         question_key = "recovery-cycle/" + digest([cid, operation])
         binding_key = "recovery/authorization-inputs/" + digest([cid, operation])
         bound = self.store.get(rid, binding_key)
+        snapshot_key = "recovery/request-snapshots/" + digest([cid, operation])
+        snapshot = self.store.get(rid, snapshot_key)
+        # Preserve old requests/questions. A stopped selection with new verified
+        # material gets a distinct normal request, not a rewritten old one.
+        author_materials = {}
+        if not prior:
+            if snapshot:
+                author_materials = snapshot["request"]["evidence"].get("author_materials", {})
+            elif bound is None:
+                if available_source is None:
+                    available_source = self.progress.author_source(rid, failure, work, plan)
+                author_materials = self.progress.author_materials(rid, failure, work, plan)
+                actual_source = ({name: author_materials["prototype_approval"][name]
+                                  for name in ("identity", "actions_hash")} if author_materials else {})
+                if actual_source != available_source:
+                    raise StateConflict("Approved action source changed before recovery decision")
+            self.progress.verify_author_materials(rid, failure, work, plan, author_materials)
         legacy_blocked = suggested.model_copy(update={"action": "blocked"})
         remapped_diagnosis = (suggested.action == "diagnose" and force_decision and bound is not None
             and bound["candidates"] == digest({"blocked": legacy_blocked.model_dump()}))
@@ -271,10 +297,10 @@ class RecoveryPolicy:
         if not prior and suggested.action in exclusions:
             if bound is not None:
                 self.progress.stop(rid, failure, work, plan, cid, operation, exclusions,
-                    "已保留的恢复请求指向同证据下已耗尽的动作；保留请求，先核对新的有效证据。")
+                    "已保留的恢复请求指向同证据下已耗尽的动作；保留请求，先核对新的有效证据。", author_materials=author_materials)
             if not choices:
                 self.progress.stop(rid, failure, work, plan, cid, operation, exclusions,
-                    "相同证据下没有可执行的新恢复动作；现场保留，须补充有效证据或修复方案。")
+                    "相同证据下没有可执行的新恢复动作；现场保留，须补充有效证据或修复方案。", author_materials=author_materials)
             suggested = choices.get("repair") or choices.get("plan_patch") or next(iter(choices.values()))
             force_decision = True
         transition = suggested.action in STAGE_REENTRY_ACTIONS
@@ -288,6 +314,9 @@ class RecoveryPolicy:
         answered = [q for q in questions if q["answer"] is not None]
         guards = self.engine.decisions.guards(rid, failure.origin_id,
             [cycle_key, permit_key, rule_key, "plan_revision/current", "automation/engineering/" + failure.origin_id])
+        if author_materials:
+            for key in ("prototype", "prototype_approval"):
+                guards[key] = self.store.get(rid, key)
         if recording:
             for key in (recording['receipt'], recording.get('observation')):
                 if key:
@@ -367,8 +396,6 @@ class RecoveryPolicy:
             raise HumanIntervention(routing.human_requirement, reason_code=routing.reason_code, phase=failure.phase)
         rule = routing.route == "rule"
         from .plan_proposals import decision_protocol
-        snapshot_key = "recovery/request-snapshots/" + digest([cid, operation])
-        snapshot = self.store.get(rid, snapshot_key)
         evidence = {**decision_protocol(snapshot, already_bound=bound is not None), "controller_stage_contract": stage_contract(), "failure": failure.model_dump(), "progress": self.engine.convergence.state(rid, failure.origin_id),
             "engineering": self.store.get(rid, "automation/engineering/" + failure.origin_id, {}),
             "diagnosis_feedback": active.get("diagnosis_feedback"),
@@ -376,6 +403,8 @@ class RecoveryPolicy:
             "consumption": {"implementation": self.store.get(rid, "rounds/" + failure.origin_id, {}),
                 "diagnosis": self.store.get(rid, "recovery/budgets/diagnosis/" + failure.origin_id, {}),
                 "tokens": self.store.usage_summary(rid)}}
+        if author_materials:
+            evidence["author_materials"] = author_materials
         if recording:
             from .recording_recovery import context as recording_context
             evidence['controller_recording_recovery'] = recording_context(record)
@@ -455,9 +484,10 @@ class RecoveryPolicy:
                 actor, selected = "agent", result.selected_action
             else:
                 manual = True
+        self.progress.verify_author_materials(rid, failure, work, plan, author_materials)
         if manual and exclusions and result_key is not None and not answered and not human_cycle:
             self.progress.stop(rid, failure, work, plan, cid, operation, exclusions,
-                "同证据的无效恢复路径已停止；决策未找到有效替代动作：" + result.reason)
+                "同证据的无效恢复路径已停止；决策未找到有效替代动作：" + result.reason, author_materials=author_materials)
         if manual:
             if not legacy_answer:
                 requirement = routing.human_requirement or HumanRequirement(
@@ -497,6 +527,7 @@ class RecoveryPolicy:
                 selected_action=selected, expected_result="执行后验证实际结果")
         if tree_hash(work) != source or self.engine.config.load().automation != cfg:
             raise StateConflict("Recovery evidence or policy changed while authorizing; preserved candidate requires reassessment")
+        self.progress.verify_author_materials(rid, failure, work, plan, author_materials)
         choice = choices[selected]
         transition = (self.engine.authority.patch_transition(rid, active, failure)
                       if operation == "patch-followup" and self.store.get(rid, "authority/protocol") else {})

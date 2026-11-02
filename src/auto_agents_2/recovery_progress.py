@@ -105,18 +105,56 @@ class RecoveryProgress:
     def _stop_key(cycle_id, operation):
         return 'recovery/stopped-selection/' + digest([cycle_id, operation])
 
-    def _facts(self, rid, failure, work, plan):
+    def _author_task(self, rid, failure, plan):
+        return (plan is not None and failure.task_id in {task.id for task in plan.tasks}
+                and (self.store.get(rid, 'clarify') or {}).get('frontend'))
+
+    def author_source(self, rid, failure, work, plan):
+        if not self._author_task(rid, failure, plan):
+            return {}
+        prototype = self.store.get(rid, 'prototype', {})
+        approval = self.engine.approvals.current(rid, work, prototype.get('browser_actions', []),
+            self.engine.browser_check_version()) if prototype else None
+        return {name: approval[name] for name in ('identity', 'actions_hash')} if approval else {}
+
+    def author_materials(self, rid, failure, work, plan):
+        return self.engine.recovery._approval(rid, work) if self._author_task(rid, failure, plan) else {}
+
+    def verify_author_materials(self, rid, failure, work, plan, materials):
+        if not materials:
+            return
+        try:
+            ref = materials['prototype_approval']['browser_actions']['artifact']
+            if len(self.engine.artifacts.bytes(ref)) != ref['bytes']:
+                raise ValueError('Action artifact size changed')
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise StateConflict('Approved action material changed during recovery decision') from exc
+        # Read the original ref before _approval can republish a missing body.
+        if self.author_materials(rid, failure, work, plan) != materials:
+            raise StateConflict('Approved action binding changed during recovery decision')
+
+    def _facts(self, rid, failure, work, plan, *, author_materials=None):
         context = self.inputs(rid, failure, work, plan)
         source = tree_hash(work)
-        return {action: self.basis(context, source, action) for action in ('diagnose', 'plan_patch')}
+        facts = {action: self.basis(context, source, action) for action in ('diagnose', 'plan_patch')}
+        source = (self.author_source(rid, failure, work, plan) if author_materials is None else
+                  {name: author_materials['prototype_approval'][name] for name in ('identity', 'actions_hash')}
+                  if author_materials else {})
+        if source:
+            # Exact logical content, not prose, locations or a transport version.
+            # This read-only lookup must not republish a deleted frozen artifact.
+            facts['author_materials'] = digest(source)
+        return facts
 
-    def resume_operation(self, rid, failure, work, plan, cycle_id, operation):
+    def resume_operation(self, rid, failure, work, plan, cycle_id, operation, *, author_materials=None):
         stopped = self.store.get(rid, self._stop_key(cycle_id, operation))
         if not stopped:
             return operation
         if self.store.decision_questions(rid, [stopped['question_key']]):
             raise StateConflict('A recorded user question cannot be replaced by recovery progress handling')
-        facts = self._facts(rid, failure, work, plan)
+        facts = self._facts(rid, failure, work, plan, author_materials=author_materials)
+        if 'author_materials' in stopped['facts'] and 'author_materials' not in facts:
+            raise StateConflict('Approved action material is no longer current; preserve the stopped selection')
         if stopped['facts'] == facts:
             raise RecoveryPathExhausted(stopped['excluded_actions'], stopped['reason'])
         # This prior selection stopped WITHOUT asking/receiving human permission.
@@ -129,13 +167,13 @@ class RecoveryProgress:
             raise RecoveryPathExhausted(stopped['excluded_actions'], stopped['reason'])
         return operation
 
-    def stop(self, rid, failure, work, plan, cycle_id, operation, exclusions, reason):
+    def stop(self, rid, failure, work, plan, cycle_id, operation, exclusions, reason, *, author_materials=None):
         question_key = 'recovery-cycle/' + digest([cycle_id, operation])
         if self.store.decision_questions(rid, [question_key]):
             raise StateConflict('Preserve the existing recovery question; progress handling cannot supersede consent')
         key = self._stop_key(cycle_id, operation)
         if self.store.get(rid, key) is None:
-            self.store.checkpoint(rid, key, {'facts': self._facts(rid, failure, work, plan),
+            self.store.checkpoint(rid, key, {'facts': self._facts(rid, failure, work, plan, author_materials=author_materials),
                 'question_key': question_key, 'excluded_actions': exclusions, 'reason': reason})
         raise RecoveryPathExhausted(exclusions, reason)
 
