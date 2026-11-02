@@ -250,10 +250,25 @@ def adjudicate(failure: FailureRecord, *, attempts=0, diagnosis=None, plan=None,
         known_refs = catalog.controller | catalog.proposals
         resolved = [catalog.resolve(ref) for ref in diagnosis.evidence_refs]
         missing = [i for i, ref in enumerate(resolved) if ref is None]
+        missing_targets = [
+            f"repair_targets[{target_index}].evidence_refs[{ref_index}]"
+            for target_index, target in enumerate(diagnosis.repair_targets)
+            for ref_index, ref in enumerate(target.evidence_refs)
+            if catalog.resolve(ref) is None
+        ]
+        problems = []
         if missing:
-            raise AA2Error("Diagnosis cites evidence not supplied by the controller; invalid evidence_refs indexes: "
-                + ", ".join(map(str, missing)) + ". Cite an existing controller-context path, supplied artifact hash "
-                "or failure.evidence_refs entry. Existing proposal paths describe unverified suggestions only.")
+            problems.append("Diagnosis cites evidence not supplied by the controller; invalid evidence_refs indexes: "
+                + ", ".join(map(str, missing)))
+        if missing_targets:
+            problems.append("Repair target is outside the evidenced existing task scope; unresolved references: "
+                + ", ".join(missing_targets))
+        if problems:
+            # Report every invalid citation before checking factual support or scope.
+            # Do not echo model-owned literals or turn rendered wrapper names into facts.
+            raise AA2Error(". ".join(problems) + ". Cite the supplied source_ref or material_id, "
+                "a supplied artifact hash or failure.evidence_refs entry. Rendered wrapper names are not "
+                "original controller paths. Existing proposal paths describe unverified suggestions only.")
         if not supplied.intersection(resolved):
             raise AA2Error("Diagnosis requires controller evidence; unverified proposals cannot establish results")
         known = {t.id: t for t in plan.tasks} if plan else {}
