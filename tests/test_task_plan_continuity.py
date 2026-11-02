@@ -1,4 +1,5 @@
 """Accepted task evidence survives only a proven unrelated, reviewed amendment."""
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response
 import copy
 import json
 import sqlite3
@@ -21,13 +22,13 @@ class LocalPatchAgent(ApprovingAgent):
         if schema is Diagnosis:
             return Diagnosis(action="plan_patch", task_ids=["T3"], reason="Local task correction",
                              evidence_refs=["failure", "plan"])
-        if schema is PlanPatch:
+        if schema in (PlanPatch, EvidencePlanPatch):
             previous = PlanResult.model_validate(context["plan"])
             task = previous.tasks[2].model_copy(deep=True)
             task.checks[0].expected_tests += 1
-            return PlanPatch(base_revision=context["base_revision"], failure_ids=[context["failure"]["id"]],
+            return proposal_response(PlanPatch(base_revision=context["base_revision"], failure_ids=[context["failure"]["id"]],
                 reason="Increase one task's existing check minimum", document="Reviewed local revision",
-                upsert_tasks=[task], evidence_contract=empty_contract(context))
+                upsert_tasks=[task], evidence_contract=empty_contract(context)), context, schema)
         if context.get("review_kind") == "plan_patch":
             return evidence_review(context)
         return await super().invoke(stage, context, schema, *args, **kwargs)

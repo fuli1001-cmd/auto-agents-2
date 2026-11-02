@@ -1,4 +1,5 @@
 """Real supplied workflow sources, with factual grounding and immutable review bindings."""
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response
 import asyncio
 import copy
 
@@ -151,7 +152,7 @@ class ReferenceTimingAgent(TimingAgent):
 
     async def invoke(self, stage, context, schema, workspace, rid, operation, fresh=False):
         from auto_agents_2.plan_revision import EvidencePatchReview
-        if schema in {Diagnosis, PlanPatch} or issubclass(schema, EvidencePatchReview) or stage == 'decision':
+        if schema in {Diagnosis, PlanPatch, EvidencePlanPatch} or issubclass(schema, EvidencePatchReview) or stage == 'decision':
             evidence = context['decision_request']['evidence'] if stage == 'decision' else context
             assert evidence['controller_stage_contract'] == stage_contract()
             assert 'controller_stage_contract' in context['evidence_reference_contract']['roots']
@@ -159,7 +160,7 @@ class ReferenceTimingAgent(TimingAgent):
         response = await super().invoke(stage, context, schema, workspace, rid, operation, fresh)
         if schema is Diagnosis or stage == 'decision':
             response.evidence_refs.append('controller_stage_contract')
-        elif schema is PlanPatch:
+        elif schema in (PlanPatch, EvidencePlanPatch):
             response.timing_corrections[0].evidence_refs.append('controller_stage_contract')
         elif issubclass(schema, EvidencePatchReview):
             response.timing_reviews[0].evidence_refs.append(stage_contract()['hash'])

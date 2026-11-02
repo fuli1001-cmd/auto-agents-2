@@ -1,4 +1,5 @@
 """Bounded correction through real recovery/activation and ownership entrypoints."""
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response
 import asyncio
 import copy
 
@@ -133,7 +134,7 @@ class CorrectionAgent(ApprovingAgent):
         if schema is Diagnosis:
             return Diagnosis(action='plan_patch', task_ids=['T3'], reason='Correct the owning plan expression',
                              evidence_refs=['failure'])
-        if schema is PlanPatch:
+        if schema in (PlanPatch, EvidencePlanPatch):
             self.views.append((stage, copy.deepcopy(context)))
             old = PlanResult.model_validate(context['plan'])
             _, patch = fixture_patch(old)
@@ -145,7 +146,7 @@ class CorrectionAgent(ApprovingAgent):
                 new = patch.upsert_tasks[0].checks[0].model_copy(update={'argv': ['python', '-c', 'print(1)']})
                 patch.upsert_tasks[0].checks[0] = new
                 patch.contract_corrections[0].replacement = new
-            return patch
+            return proposal_response(patch, context, schema)
         if issubclass(schema, EvidencePatchReview):
             self.views.append((stage, copy.deepcopy(context)))
             assert context['original_requirements'] == 'Keep the business assertions; choose a compatible tool version.'
@@ -372,7 +373,7 @@ async def test_changed_original_text_and_protocol_only_citations_cannot_activate
     original_invoke = workflow.agent.invoke
     async def invalid_reference(stage, context, schema, *args, **kwargs):
         result = await original_invoke(stage, context, schema, *args, **kwargs)
-        if schema is PlanPatch:
+        if schema in (PlanPatch, EvidencePlanPatch):
             result.contract_corrections[0].evidence_refs = ['controller_correction_contract']
         return result
     workflow.agent.invoke = invalid_reference
@@ -416,13 +417,13 @@ async def test_verification_only_correction_requires_fresh_bound_coverage(tmp_pa
         async def invoke(self, stage, context, schema, *args, **kwargs):
             if schema is Diagnosis:
                 return Diagnosis(action='plan_patch', task_ids=[], evidence_refs=['failure'], reason='Fix final expression')
-            if schema is PlanPatch:
+            if schema in (PlanPatch, EvidencePlanPatch):
                 row = ContractCorrection(target='final_checks', index=0, previous=command, replacement=replacement,
                     reason='Equivalent expression fixture', derived_decision='Plan expression',
                     preserved_obligations=['Addition assertion'], evidence_refs=['failure'])
-                return PlanPatch(evidence_contract=empty_contract(context), base_revision=1, failure_ids=[context['failure']['id']], reason='Correct expression',
+                return proposal_response(PlanPatch(evidence_contract=empty_contract(context), base_revision=1, failure_ids=[context['failure']['id']], reason='Correct expression',
                     document='reviewed expression', final_checks=[replacement] if kind == 'contract' else [command, replacement],
-                    contract_corrections=[row] if kind == 'contract' else [])
+                    contract_corrections=[row] if kind == 'contract' else []), context, schema)
             if issubclass(schema, EvidencePatchReview):
                 return evidence_review(context, review_for(PlanPatch.model_validate(context['patch'])) if kind == 'contract' else None)
             return await super().invoke(stage, context, schema, *args, **kwargs)

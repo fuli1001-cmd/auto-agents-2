@@ -1,4 +1,5 @@
 """An authorized downstream repair must precede stale upstream re-verification."""
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response
 import asyncio
 import copy
 import json
@@ -34,16 +35,16 @@ class RepairOrderAgent(CodingAgent):
         self.diagnoses = []
 
     async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
-        if schema is PlanPatch:
+        if schema in (PlanPatch, EvidencePlanPatch):
             self.patch_calls += 1
             plan = PlanResult.model_validate(context['plan'])
             child = plan.tasks[1].model_copy(update={
                 'description': 'Preserve child and run its complete compile check',
                 'checks': [CHILD_CHECK, COMPILE]})
-            return PlanPatch(base_revision=context['base_revision'], failure_ids=[context['failure']['id']],
+            return proposal_response(PlanPatch(base_revision=context['base_revision'], failure_ids=[context['failure']['id']],
                 reason='Add the existing final compile command at its repair acceptance gate',
                 document='Append the final compile check; keep both tasks and every obligation.',
-                upsert_tasks=[child], evidence_contract=empty_contract(context))
+                upsert_tasks=[child], evidence_contract=empty_contract(context)), context, schema)
         if stage == 'plan':
             return PlanResult(summary='Parent and child', document='Compile all source at final acceptance.',
                 evidence_contract=empty_contract(context), tasks=[

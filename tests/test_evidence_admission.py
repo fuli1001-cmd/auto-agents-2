@@ -1,4 +1,5 @@
 """Finite admission counterexamples and actual engine/recovery lifecycle boundaries."""
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response, full_response, freeze_legacy_author
 import asyncio
 import copy
 
@@ -322,11 +323,13 @@ async def test_actual_patch_new_obligation_invalidates_old_evidence_without_rese
     invoke = agent.invoke
     async def with_obligation(stage, ctx, schema, *args, **kwargs):
         result = await invoke(stage, ctx, schema, *args, **kwargs)
-        if schema is PlanPatch:
+        if schema in (PlanPatch, EvidencePlanPatch):
+            result = full_response(result, ctx)
             result.evidence_contract.obligations.append(EvidenceObligation(id='snapshot', target='checks',
                 task_id='T3', index=0, value=result.upsert_tasks[0].checks[0], origin='model_derived',
                 requirement_ids=['R3'], capability='installed_dependency_snapshot', capability_version=1,
                 producer='EnvironmentManager', production_stage='environment', required_stage='verification'))
+            result = proposal_response(result, ctx, schema)
         return result
     agent.invoke = with_obligation
     await workflow.recovery.resume(rid)
@@ -341,10 +344,13 @@ async def test_actual_patch_new_obligation_invalidates_old_evidence_without_rese
 async def test_actual_patch_cannot_activate_missing_or_unsupported_contract(tmp_path, bad):
     from test_stage_contract_corrections import setup_correction
     workflow, rid, _, old, record, agent = setup_correction(tmp_path)
+    if bad == "missing_contract":
+        await freeze_legacy_author(workflow, rid, record)
     invoke = agent.invoke
     async def malformed(stage, ctx, schema, *args, **kwargs):
         result = await invoke(stage, ctx, schema, *args, **kwargs)
-        if schema is PlanPatch:
+        if schema in (PlanPatch, EvidencePlanPatch):
+            result = full_response(result, ctx)
             if bad == 'missing_contract':
                 result.evidence_contract = None
             else:
@@ -352,6 +358,7 @@ async def test_actual_patch_cannot_activate_missing_or_unsupported_contract(tmp_
                     task_id='T3', index=0, value=result.upsert_tasks[0].checks[0], origin='model_derived',
                     requirement_ids=['R3'], capability='effective_solver_configuration', capability_version=1,
                     producer='EnvironmentManager', production_stage='environment', required_stage='verification'))
+            result = proposal_response(result, ctx, schema)
         return result
     agent.invoke = malformed
     await workflow.recovery.resume(rid)
@@ -378,8 +385,8 @@ async def test_plain_patch_cannot_strip_new_admission_to_claim_legacy(tmp_path, 
     workflow, rid, _, old, record, agent = setup_correction(tmp_path)
     invoke = agent.invoke
     async def ordinary(stage, ctx, schema, *args, **kwargs):
-        if schema is PlanPatch:
-            return patch_for(PlanResult.model_validate(ctx['plan']), evidence_contract=empty_contract(ctx))
+        if schema in (PlanPatch, EvidencePlanPatch):
+            return proposal_response(patch_for(PlanResult.model_validate(ctx['plan']), evidence_contract=empty_contract(ctx)), ctx, schema)
         if ctx.get('review_kind') == 'plan_patch':
             return evidence_review(ctx)
         return await invoke(stage, ctx, schema, *args, **kwargs)
@@ -390,6 +397,6 @@ async def test_plain_patch_cannot_strip_new_admission_to_claim_legacy(tmp_path, 
     journal['plan'].pop('evidence_contract')
     journal['patch'].pop('evidence_contract')
     workflow.store.checkpoint(rid, key, journal)
-    with pytest.raises(AA2Error, match='missing its admission'):
+    with pytest.raises(AA2Error, match='differs from the reviewed complete patch'):
         workflow.store.activate_plan_patch(rid, identity)
     assert workflow.store.get(rid, 'plan') == old.model_dump()

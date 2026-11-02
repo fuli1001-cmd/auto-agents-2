@@ -5,6 +5,7 @@ from .faults import StateConflict
 from .recovery import check_rows
 from .source_history import SourceHistory
 from .stage_responsibilities import correction_contract
+from .plan_proposals import PROTOCOL_KEY as PLAN_PROPOSAL_KEY, current_protocol as current_plan_proposal, protocol as plan_proposal_protocol
 from .util import digest
 from .workspace import tree_hash
 
@@ -20,7 +21,7 @@ class RecoveryProgress:
         source_history = (history.collect_plan(rid, work, plan,
             task_ids=[failure.task_id] if failure.task_id else None) if plan is not None
             else history.collect_protected(rid, work))
-        return {'controller_stage_contract': stage_contract(),
+        return {PLAN_PROPOSAL_KEY: plan_proposal_protocol(), 'controller_stage_contract': stage_contract(),
                 'failure': failure.model_dump(), 'plan': plan.model_dump() if plan else None,
                 'specification': self.store.get(rid, 'clarify'), 'design': self.store.get(rid, 'design'),
                 'prototype_approval': self.store.get(rid, 'prototype_approval'),
@@ -51,6 +52,8 @@ class RecoveryProgress:
         protocol = context.get('controller_stage_contract')
         if action == 'plan_patch' and current_stage_contract(protocol):
             materials['controller_stage_contract'] = protocol
+        if action == 'plan_patch' and current_plan_proposal(context.get(PLAN_PROPOSAL_KEY)):
+            materials[PLAN_PROPOSAL_KEY] = context[PLAN_PROPOSAL_KEY]
         if action == 'plan_patch':
             materials['controller_correction_contract'] = correction_contract()
             facts['observations'] = {name: evidence.get(name) for name in ('environment_error', 'candidate_error')}

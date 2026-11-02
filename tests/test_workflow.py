@@ -1,3 +1,4 @@
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response
 import asyncio
 import sys
 from pathlib import Path
@@ -367,8 +368,8 @@ async def test_replan_renaming_preserves_budget_and_reclaims_previous_worker(tmp
                 task.id = "T1_REVISED"
                 task.origin_id = "T1"
                 assert context["task_origins"]["budgets"]["T1"]["round"] == 1
-                return PlanPatch(evidence_contract=empty_contract(context), base_revision=context["base_revision"], failure_ids=[context["failure"]["id"]],
-                                 reason="Explicit import contract", document="# Revised plan", upsert_tasks=[task], remove_tasks=["T1"])
+                return proposal_response(PlanPatch(evidence_contract=empty_contract(context), base_revision=context["base_revision"], failure_ids=[context["failure"]["id"]],
+                                 reason="Explicit import contract", document="# Revised plan", upsert_tasks=[task], remove_tasks=["T1"]), context, schema)
             result = await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
             return result
 

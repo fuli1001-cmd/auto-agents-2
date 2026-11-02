@@ -1,0 +1,441 @@
+{
+  "source_head": "f4aee78985f076107510d36a56aa1745de2df6d6",
+  "accepted_evidence_contract": {
+    "version": 1,
+    "catalog_hash": "fced2ac15d337d2b184afbce4d8aaaafe88a0cb3300061cbc4e9cceff30d9e3f",
+    "source_binding": "4d8b05c36017c28f064bf06bf53a7020d55b57384f670cdfb98f648cdb00b26f",
+    "obligations": [
+      {
+        "id": "EV-MU01-INSTALLED",
+        "target": "acceptance",
+        "task_id": "MU-01",
+        "index": 2,
+        "value": "EnvironmentManager 提供选定运行时及已安装 Python/Conda 依赖身份、依赖关系和安装来源 recorded/not_recorded 状态；结合 pip check 审阅兼容性，不从缺字段推断来源或求解配置。",
+        "origin": "model_derived",
+        "requirement_ids": [
+          "FR-18",
+          "DELIVERY-01"
+        ],
+        "capability": "installed_dependency_snapshot",
+        "capability_version": 1,
+        "producer": "EnvironmentManager",
+        "production_stage": "environment",
+        "required_stage": "verification"
+      },
+      {
+        "id": "EV-MU01-LOCKS",
+        "target": "acceptance",
+        "task_id": "MU-01",
+        "index": 3,
+        "value": "EnvironmentManager 提供本次准备环境的完整已记录 pip/Conda 锁及身份哈希，供逐项审阅；不要求其提供有效求解器配置或共享浏览器身份。",
+        "origin": "model_derived",
+        "requirement_ids": [
+          "FR-18",
+          "DELIVERY-01"
+        ],
+        "capability": "dependency_locks",
+        "capability_version": 1,
+        "producer": "EnvironmentManager",
+        "production_stage": "environment",
+        "required_stage": "verification"
+      },
+      {
+        "id": "EV-MU10-BROWSER-FILES",
+        "target": "acceptance",
+        "task_id": "MU-10",
+        "index": 4,
+        "value": "四组浏览器检查归档真实PNG、完整实际状态JSON及必要下载字节，保留默认、hover、键盘焦点、持续:active和重复打开证据；实际动作后同时断言反馈可见和文字正确。独立审查观察生产图像四个视觉维度，附件计数或测试通过不能代替内容审阅。",
+        "origin": "user",
+        "requirement_ids": [
+          "FR-01",
+          "FR-02",
+          "FR-10",
+          "FR-14",
+          "FR-18",
+          "DELIVERY-01"
+        ],
+        "capability": "test_file_attachments",
+        "capability_version": 1,
+        "producer": "VerificationService",
+        "production_stage": "verification",
+        "required_stage": "verification"
+      },
+      {
+        "id": "EV-MU11-PERSISTENCE-FILES",
+        "target": "acceptance",
+        "task_id": "MU-11",
+        "index": 3,
+        "value": "归档跨进程场景的真实PNG、完整前后状态JSON和实际MP4/SRT下载字节；验证实际播放时间推进、文件摘要及完整字幕条目，标注合成媒体，不将其作为真实短剧质量证据。",
+        "origin": "user",
+        "requirement_ids": [
+          "FR-01",
+          "FR-10",
+          "FR-14",
+          "FR-18",
+          "DELIVERY-01"
+        ],
+        "capability": "test_file_attachments",
+        "capability_version": 1,
+        "producer": "VerificationService",
+        "production_stage": "verification",
+        "required_stage": "verification"
+      },
+      {
+        "id": "EV-FINAL-HISTORY-A",
+        "target": "final_checks",
+        "task_id": "",
+        "index": 5,
+        "value": {
+          "argv": [
+            "npm",
+            "exec",
+            "--no",
+            "--",
+            "playwright",
+            "test",
+            "e2e/history-a.spec.ts",
+            "--config",
+            "playwright.config.ts"
+          ],
+          "cwd": "frontend",
+          "timeout": 600,
+          "expected_tests": 24,
+          "inputs": [
+            "frontend/package.json",
+            "frontend/package-lock.json",
+            "frontend/playwright.config.ts",
+            "frontend/e2e",
+            "frontend/dist",
+            "backend/muya",
+            "tests/support",
+            "config"
+          ],
+          "outputs": []
+        },
+        "origin": "model_derived",
+        "requirement_ids": [
+          "FR-01",
+          "FR-02",
+          "FR-10",
+          "FR-14",
+          "DELIVERY-01"
+        ],
+        "capability": "test_file_attachments",
+        "capability_version": 1,
+        "producer": "VerificationService",
+        "production_stage": "verification",
+        "required_stage": "final_review"
+      },
+      {
+        "id": "EV-FINAL-HISTORY-B",
+        "target": "final_checks",
+        "task_id": "",
+        "index": 6,
+        "value": {
+          "argv": [
+            "npm",
+            "exec",
+            "--no",
+            "--",
+            "playwright",
+            "test",
+            "e2e/history-b.spec.ts",
+            "--config",
+            "playwright.config.ts"
+          ],
+          "cwd": "frontend",
+          "timeout": 600,
+          "expected_tests": 26,
+          "inputs": [
+            "frontend/package.json",
+            "frontend/package-lock.json",
+            "frontend/playwright.config.ts",
+            "frontend/e2e",
+            "frontend/dist",
+            "backend/muya",
+            "tests/support",
+            "config"
+          ],
+          "outputs": []
+        },
+        "origin": "model_derived",
+        "requirement_ids": [
+          "FR-01",
+          "FR-02",
+          "FR-10",
+          "FR-12",
+          "FR-14",
+          "FR-18",
+          "DELIVERY-01"
+        ],
+        "capability": "test_file_attachments",
+        "capability_version": 1,
+        "producer": "VerificationService",
+        "production_stage": "verification",
+        "required_stage": "final_review"
+      },
+      {
+        "id": "EV-FINAL-HISTORY-C",
+        "target": "final_checks",
+        "task_id": "",
+        "index": 7,
+        "value": {
+          "argv": [
+            "npm",
+            "exec",
+            "--no",
+            "--",
+            "playwright",
+            "test",
+            "e2e/history-c.spec.ts",
+            "--config",
+            "playwright.config.ts"
+          ],
+          "cwd": "frontend",
+          "timeout": 600,
+          "expected_tests": 20,
+          "inputs": [
+            "frontend/package.json",
+            "frontend/package-lock.json",
+            "frontend/playwright.config.ts",
+            "frontend/e2e",
+            "frontend/dist",
+            "backend/muya",
+            "tests/support",
+            "config"
+          ],
+          "outputs": []
+        },
+        "origin": "model_derived",
+        "requirement_ids": [
+          "FR-01",
+          "FR-02",
+          "FR-14",
+          "FR-18",
+          "DELIVERY-01"
+        ],
+        "capability": "test_file_attachments",
+        "capability_version": 1,
+        "producer": "VerificationService",
+        "production_stage": "verification",
+        "required_stage": "final_review"
+      },
+      {
+        "id": "EV-FINAL-HISTORY-D",
+        "target": "final_checks",
+        "task_id": "",
+        "index": 8,
+        "value": {
+          "argv": [
+            "npm",
+            "exec",
+            "--no",
+            "--",
+            "playwright",
+            "test",
+            "e2e/history-d.spec.ts",
+            "--config",
+            "playwright.config.ts"
+          ],
+          "cwd": "frontend",
+          "timeout": 600,
+          "expected_tests": 32,
+          "inputs": [
+            "frontend/package.json",
+            "frontend/package-lock.json",
+            "frontend/playwright.config.ts",
+            "frontend/e2e",
+            "frontend/dist",
+            "backend/muya",
+            "tests/support",
+            "config"
+          ],
+          "outputs": []
+        },
+        "origin": "model_derived",
+        "requirement_ids": [
+          "FR-01",
+          "FR-02",
+          "FR-13",
+          "FR-14",
+          "FR-18",
+          "DELIVERY-01"
+        ],
+        "capability": "test_file_attachments",
+        "capability_version": 1,
+        "producer": "VerificationService",
+        "production_stage": "verification",
+        "required_stage": "final_review"
+      },
+      {
+        "id": "EV-FINAL-PERSISTENCE",
+        "target": "final_checks",
+        "task_id": "",
+        "index": 9,
+        "value": {
+          "argv": [
+            "npm",
+            "exec",
+            "--no",
+            "--",
+            "playwright",
+            "test",
+            "e2e/persistence.spec.ts",
+            "--config",
+            "playwright.config.ts"
+          ],
+          "cwd": "frontend",
+          "timeout": 600,
+          "expected_tests": 12,
+          "inputs": [
+            "frontend/package.json",
+            "frontend/package-lock.json",
+            "frontend/playwright.config.ts",
+            "frontend/e2e",
+            "frontend/dist",
+            "backend/muya",
+            "tests/support",
+            "config"
+          ],
+          "outputs": []
+        },
+        "origin": "model_derived",
+        "requirement_ids": [
+          "FR-01",
+          "FR-10",
+          "FR-12",
+          "FR-14",
+          "FR-18",
+          "DELIVERY-01"
+        ],
+        "capability": "test_file_attachments",
+        "capability_version": 1,
+        "producer": "VerificationService",
+        "production_stage": "verification",
+        "required_stage": "final_review"
+      },
+      {
+        "id": "EV-FINAL-REAL-MEDIA",
+        "target": "final_checks",
+        "task_id": "",
+        "index": 11,
+        "value": {
+          "argv": [
+            "npm",
+            "exec",
+            "--no",
+            "--",
+            "playwright",
+            "test",
+            "e2e/real-media.spec.ts",
+            "--config",
+            "playwright.config.ts"
+          ],
+          "cwd": "frontend",
+          "timeout": 900,
+          "expected_tests": 4,
+          "inputs": [
+            "frontend/package.json",
+            "frontend/package-lock.json",
+            "frontend/playwright.config.ts",
+            "frontend/e2e",
+            "frontend/dist",
+            "backend/muya",
+            "tests/support",
+            "config",
+            "acceptance/schema.json",
+            "acceptance/real"
+          ],
+          "outputs": []
+        },
+        "origin": "model_derived",
+        "requirement_ids": [
+          "SCOPE-01",
+          "FR-04",
+          "FR-05",
+          "FR-06",
+          "FR-07",
+          "FR-08",
+          "FR-09",
+          "FR-10",
+          "FR-15",
+          "FR-16",
+          "DELIVERY-01"
+        ],
+        "capability": "test_file_attachments",
+        "capability_version": 1,
+        "producer": "VerificationService",
+        "production_stage": "verification",
+        "required_stage": "final_review"
+      }
+    ]
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "artifact": {
+        "hash": "1a031860803210053c3e3f3a0c12c179bfa9ba6588dccb609d82af9cf4ea1287",
+        "kind": "plan",
+        "bytes": 75734
+      },
+      "diffs": [
+        {
+          "obligation_id": "EV-FINAL-PERSISTENCE",
+          "changed_fields": {
+            "requirement_ids": {
+              "before": [
+                "FR-01",
+                "FR-10",
+                "FR-12",
+                "FR-14",
+                "FR-18",
+                "DELIVERY-01"
+              ],
+              "after": [
+                "FR-01",
+                "FR-02",
+                "FR-10",
+                "FR-14",
+                "FR-18",
+                "DELIVERY-01"
+              ]
+            }
+          }
+        }
+      ],
+      "validation_error": "Evidence obligation change requires a formal mapped contract/timing correction"
+    },
+    {
+      "round": 2,
+      "artifact": {
+        "hash": "baa45ebd1407c716b9cbd154e5a1eb0bf8f85d0a97743ed8b4b72e04fab0ae77",
+        "kind": "plan",
+        "bytes": 76594
+      },
+      "diffs": [
+        {
+          "obligation_id": "EV-FINAL-HISTORY-D",
+          "changed_fields": {
+            "requirement_ids": {
+              "before": [
+                "FR-01",
+                "FR-02",
+                "FR-13",
+                "FR-14",
+                "FR-18",
+                "DELIVERY-01"
+              ],
+              "after": [
+                "FR-02",
+                "FR-14",
+                "FR-18",
+                "DELIVERY-01"
+              ]
+            }
+          }
+        }
+      ],
+      "validation_error": "Evidence obligation change requires a formal mapped contract/timing correction"
+    }
+  ]
+}

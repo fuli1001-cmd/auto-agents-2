@@ -1,4 +1,5 @@
 """Real reaudit and recovery consumers must not silently replace adopted closure."""
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response
 import asyncio
 import sys
 from pathlib import Path
@@ -26,11 +27,11 @@ class ReauditAgent(CodingAgent):
         if schema is Diagnosis:
             return Diagnosis(action='plan_patch', task_ids=[], reason='Revise adopted closure through its owner',
                              evidence_refs=['failure'])
-        if schema is PlanPatch:
+        if schema in (PlanPatch, EvidencePlanPatch):
             old = PlanResult.model_validate(context['plan'])
-            return PlanPatch(base_revision=context['base_revision'], failure_ids=[context['failure']['id']],
+            return proposal_response(PlanPatch(base_revision=context['base_revision'], failure_ids=[context['failure']['id']],
                              reason='Keep the plan and formally adopt the corrected evidence binding',
-                             document=old.document, evidence_contract=old.evidence_contract)
+                             document=old.document, evidence_contract=old.evidence_contract), context, schema)
         result = await super().invoke(stage, context, schema, *args, **kwargs)
         if getattr(result, 'evidence_assessment', None):
             tasks = {t['id']: t for t in context['plan']['tasks']}

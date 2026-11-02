@@ -168,7 +168,7 @@ def validate_timing_journal(journal):
         raise AA2Error('Timing correction journal no longer matches its reviewed candidate')
 
 
-class PlanPatch(Record):
+class PlanAmendment(Record):
     base_revision: int = Field(ge=1)
     failure_ids: list[str] = Field(min_length=1)
     reason: str
@@ -183,6 +183,9 @@ class PlanPatch(Record):
     preview: PreviewSpec | None = None
     environment_file: str | None = None
     requirements_file: str | None = None
+
+
+class PlanPatch(PlanAmendment):
     evidence_contract: EvidenceContract | None = Field(default=None, description=(
         "Complete evidence contract for the candidate after this patch; required on new proposals."))
 

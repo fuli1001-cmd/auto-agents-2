@@ -366,7 +366,10 @@ class RecoveryPolicy:
         if routing.human_requirement:
             raise HumanIntervention(routing.human_requirement, reason_code=routing.reason_code, phase=failure.phase)
         rule = routing.route == "rule"
-        evidence = {"controller_stage_contract": stage_contract(), "failure": failure.model_dump(), "progress": self.engine.convergence.state(rid, failure.origin_id),
+        from .plan_proposals import decision_protocol
+        snapshot_key = "recovery/request-snapshots/" + digest([cid, operation])
+        snapshot = self.store.get(rid, snapshot_key)
+        evidence = {**decision_protocol(snapshot, already_bound=bound is not None), "controller_stage_contract": stage_contract(), "failure": failure.model_dump(), "progress": self.engine.convergence.state(rid, failure.origin_id),
             "engineering": self.store.get(rid, "automation/engineering/" + failure.origin_id, {}),
             "diagnosis_feedback": active.get("diagnosis_feedback"),
             "history": self.store.recovery_history(rid, failure.origin_id),
@@ -401,8 +404,6 @@ class RecoveryPolicy:
         effects = {key: transition_effects(key, effects_plan) for key in choices if key in STAGE_REENTRY_ACTIONS}
         if effects:
             request.scope["stage_transitions"] = effects
-        snapshot_key = "recovery/request-snapshots/" + digest([cid, operation])
-        snapshot = self.store.get(rid, snapshot_key)
         basis = decision_request_identity(request.model_copy(update={"state_identity": ""}))
         if snapshot and snapshot["basis"] == basis and snapshot["automation"] == cfg.model_dump():
             request = DecisionRequest.model_validate(snapshot["request"])

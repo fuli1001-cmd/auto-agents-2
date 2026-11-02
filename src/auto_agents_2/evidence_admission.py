@@ -276,10 +276,14 @@ def validate_admission_journal(journal, get, *, shared_browsers=False):
         raise AA2Error("Prepared evidence admission does not match its reviewed candidate and invalidation")
 
 
-def evidence_instructions(purpose):
+def evidence_instructions(purpose, context=None):
     if purpose not in {"design", "plan", "plan_patch", "implement", "implementation", "test_changes", "verify", "recovery_diagnosis", "decision"}:
         return ""
-    return ("\nCheck production closure: independent plan/PlanPatch review must include evidence_assessment.check_production "
+    from .plan_proposals import instructions
+    proposal_instructions = instructions(context or {}) if purpose == "plan_patch" else ""
+    declaration = ("New PlanResult/PlanPatch must include a complete evidence_contract" if not proposal_instructions else
+                   "The materialized complete candidate must include an evidence_contract")
+    return (proposal_instructions + "\nCheck production closure: independent plan/PlanPatch review must include evidence_assessment.check_production "
             "using controller_check_production. Map EVERY existing task acceptance and final_checks entry exactly once. "
             "Use zero-based indexes and complete command snapshots. A task producer must be one of that task's checks; "
             "do not confuse available runtime_prepare with a scheduled task check, or demand every final command at every task. "
@@ -288,8 +292,8 @@ def evidence_instructions(purpose):
             "coverage remains for independent judgment; controller validates identities and actual production. "
             "Preserve prior command/file obligations unless the existing formal clause correction authorizes their revision. "
             "Attachment formats png/json refer to actual archived bytes, not names or counts.\n"
-            "\nFinite evidence admission: use controller_evidence_capabilities when supplied. New PlanResult/PlanPatch must "
-            "include a complete evidence_contract with the supplied catalog/source hashes, mapping every controller evidence "
+            "\nFinite evidence admission: use controller_evidence_capabilities when supplied. " + declaration +
+            " with the supplied catalog/source hashes, mapping every controller evidence "
             "obligation to its exact clause or full command. An explicit empty list requires independent completeness review; "
             "it cannot hide a user requirement. Unknown capability must be declared, never invented or silently dropped. "
             "Do not mislabel a requirement as model-derived. Review must bind candidate_hash to the supplied candidate digest, "

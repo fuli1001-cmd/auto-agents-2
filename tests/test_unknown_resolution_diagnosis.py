@@ -1,4 +1,5 @@
 """Unknown solver observations admit diagnosis, never implicit repair or retry."""
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response
 
 import asyncio
 import json
@@ -646,17 +647,17 @@ async def test_unknown_diagnosis_can_activate_plan_patch_and_authorized_followup
                 evidence_refs=["failure.evidence"],
                 reason="Clarify the owned dependency preparation without deleting the original checks",
             )
-        if schema is PlanPatch:
+        if schema in (PlanPatch, EvidencePlanPatch):
             revised = PlanResult.model_validate(context["plan"]).tasks[0].model_copy(deep=True)
             revised.description += "; retain all checks and clarify existing dependency setup"
-            return PlanPatch(
+            return proposal_response(PlanPatch(
                 base_revision=context["base_revision"],
                 failure_ids=[context["failure"]["id"]],
                 reason="Clarify existing dependency setup",
                 document="The same task and obligations; dependency preparation clarified.",
                 upsert_tasks=[revised],
                 evidence_contract=empty_contract(context),
-            )
+            ), context, schema)
         return await original(stage, context, schema, *args, **kwargs)
 
     workflow.agent.invoke = invoke
@@ -830,16 +831,16 @@ async def test_invalid_patch_retains_admission_and_can_be_corrected(tmp_path):
             return Diagnosis(
                 action="plan_patch", task_ids=["T1"], evidence_refs=["failure.evidence"], reason="try patch"
             )
-        if schema is PlanPatch:
+        if schema in (PlanPatch, EvidencePlanPatch):
             bad_patch = False
-            return PlanPatch(
+            return proposal_response(PlanPatch(
                 base_revision=context["base_revision"],
                 failure_ids=[context["failure"]["id"]],
                 reason="invalid fixture proposal",
                 document="invalid origin",
                 upsert_tasks=[proposal.tasks[0].model_copy(update={"origin_id": "invented"})],
                 evidence_contract=empty_contract(context),
-            )
+            ), context, schema)
         return await original(stage, context, schema, *args, **kwargs)
 
     workflow.agent.invoke = invoke

@@ -289,6 +289,8 @@ class Store:
             rows["authority/submitted-answers"] = self._submitted_answers(db, rid)
             key = "plan_revision/journal/" + journal_id
             journal = rows[key]
+            from .plan_proposals import validate_materialization
+            validate_materialization(journal, rows.get, self.root, journal_id)
             if journal["phase"] == "activated":
                 from .recording_recovery import validate_journal
                 validate_journal(journal, rows.get, self.root)

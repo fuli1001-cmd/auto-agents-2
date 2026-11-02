@@ -1,4 +1,5 @@
 """A plan amendment and its reviewer share the selected recovery objective and history."""
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response
 import asyncio
 import copy
 
@@ -29,7 +30,7 @@ class HandoffAgent(ApprovingAgent):
         if schema is Diagnosis:
             return Diagnosis(action="plan_patch", task_ids=["T3"] if context["failure"]["task_id"] else [],
                              reason=REASON, evidence_refs=["source_history", "plan.tasks[2]"])
-        if schema is PlanPatch or context.get("review_kind") == "plan_patch":
+        if schema in (PlanPatch, EvidencePlanPatch) or context.get("review_kind") == "plan_patch":
             view = ContextPlanner(self.workflow.artifacts).prepare(stage, context, workspace).payload
             self.views.append((stage, copy.deepcopy(view)))
             if stage == self.assert_stage or self.assert_stage == "both":
@@ -46,12 +47,12 @@ class HandoffAgent(ApprovingAgent):
                     assert not [p for p in manifest["proposals"] if p["task_id"] == "T1"]
                 else:
                     assert any(p["task_id"] == "T1" for p in manifest["proposals"])
-            if schema is PlanPatch:
+            if schema in (PlanPatch, EvidencePlanPatch):
                 plan = PlanResult.model_validate(context["plan"])
                 task = plan.tasks[2].model_copy(deep=True)
                 task.checks[0].expected_tests = 40
-                return PlanPatch(evidence_contract=empty_contract(context), base_revision=context["base_revision"], failure_ids=[context["failure"]["id"]],
-                                 reason=REASON, document="structurally restored checks", upsert_tasks=[task])
+                return proposal_response(PlanPatch(evidence_contract=empty_contract(context), base_revision=context["base_revision"], failure_ids=[context["failure"]["id"]],
+                                 reason=REASON, document="structurally restored checks", upsert_tasks=[task]), context, schema)
             assert context["plan"]["tasks"][2]["checks"][0]["expected_tests"] == 40
             if self.interrupt:
                 self.interrupt = False

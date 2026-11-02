@@ -1,4 +1,5 @@
 """A timing correction preserves acceptance substance and uses the existing review gate."""
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response
 import asyncio
 import copy
 
@@ -164,10 +165,10 @@ class TimingAgent(ApprovingAgent):
         if schema is Diagnosis:
             return Diagnosis(action='plan_patch', task_ids=['T3'], evidence_refs=['plan.tasks[2].acceptance'],
                              reason='Correct the candidate review timing without changing obligations.')
-        if schema is PlanPatch:
+        if schema in (PlanPatch, EvidencePlanPatch):
             _, patch = fixture_patch()
             patch.evidence_contract = empty_contract(context)
-            return patch
+            return proposal_response(patch, context, schema)
         if context.get('review_kind') == 'plan_patch':
             from auto_agents_2.plan_revision import EvidencePatchReview
             assert issubclass(schema, EvidencePatchReview)

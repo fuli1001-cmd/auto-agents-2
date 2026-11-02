@@ -1,4 +1,5 @@
 """Production collection/recovery contract regressions; no real project is changed."""
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response
 import asyncio
 import sys
 from pathlib import Path
@@ -337,8 +338,8 @@ class RecordingPlanAgent(RepairRecordingAgent):
         if schema is Diagnosis:
             return Diagnosis(action='plan_patch', task_ids=['T1'], reason='Correct the formally adopted recording expression',
                              evidence_refs=['failure'])
-        if schema is PlanPatch:
-            return recording_patch(PlanResult.model_validate(context['plan']), context['failure']['id'])
+        if schema in (PlanPatch, EvidencePlanPatch):
+            return proposal_response(recording_patch(PlanResult.model_validate(context['plan']), context['failure']['id']), context, schema)
         if issubclass(schema, recording.RecordingPatchReview):
             inner = evidence_review(context, review_for(PlanPatch.model_validate(context['patch'])))
             return recording.RecordingPatchReview(review=inner, recording=recording.RecordingAssessment(

@@ -104,6 +104,12 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
     if "controller_evidence_capabilities" in context and not current_catalog(capabilities):
         context.pop("controller_evidence_capabilities")
     prototype_protocols = {}
+    from .plan_proposals import PROTOCOL_KEY as PLAN_PROPOSAL_KEY, current_protocol as current_plan_proposal
+    if PLAN_PROPOSAL_KEY in context:
+        if current_plan_proposal(context[PLAN_PROPOSAL_KEY]):
+            prototype_protocols[PLAN_PROPOSAL_KEY] = context[PLAN_PROPOSAL_KEY]
+        else:
+            context.pop(PLAN_PROPOSAL_KEY)
     from .check_production import PROTOCOL_KEY, current_protocol
     if PROTOCOL_KEY in context:
         if current_protocol(context[PROTOCOL_KEY]):
@@ -148,7 +154,7 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
             origins[f"excluded_actions.{action}.operations.{operation}.diagnosis"] = "proposal"
     origins["diagnosis_request.proposal"] = "proposal"
     origins["diagnosis_feedback.diagnosis"] = "proposal"
-    for name in ("diagnosis", "original_proposal", "raw_response"):
+    for name in ("diagnosis", "original_proposal", "raw_response", "plan_patch_proposal", "plan_patch_materialization", "plan_materialized_candidate"):
         if name in context:
             origins[name] = "proposal"
     origins.update(provenance or {})

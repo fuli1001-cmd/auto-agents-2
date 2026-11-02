@@ -1,3 +1,4 @@
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response
 import copy
 import sqlite3
 import sys
@@ -481,8 +482,8 @@ async def test_local_patch_recovers_each_side_effect_boundary(tmp_path, monkeypa
         interrupted = False
 
         async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
-            if schema is PlanPatch:
-                return patch_for(PlanResult.model_validate(context["plan"]), evidence_contract=empty_contract(context))
+            if schema in (PlanPatch, EvidencePlanPatch):
+                return proposal_response(patch_for(PlanResult.model_validate(context["plan"]), evidence_contract=empty_contract(context)), context, schema)
             if boundary == "review" and context.get("review_kind") == "plan_patch" and not self.interrupted:
                 self.interrupted = True
                 raise asyncio.CancelledError()

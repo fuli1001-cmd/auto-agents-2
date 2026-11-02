@@ -747,6 +747,8 @@ class RecoveryController:
             "replanning/pending": None}, pending, replan=replan, successor=successor)
 
     async def _patch(self, rid, active, failure, plan, work):
+        from .plan_proposals import (PROTOCOL_KEY, EvidencePlanPatch, current_protocol as current_proposal_protocol,
+            protocol as proposal_protocol, materialize, record_materialization)
         engine = self.engine
         identity = f"{failure.id}/{active['attempt']}"
         journal_key = "plan_revision/journal/" + identity
@@ -859,7 +861,7 @@ class RecoveryController:
             capture = self.store.get(rid, "capture")
             from .collection import capture_contract
             from .evidence_admission import admission_context
-            recovery_context = {"controller_attachment_capture": capture_contract(self.store.root),
+            recovery_context = {PROTOCOL_KEY: proposal_protocol(), "controller_attachment_capture": capture_contract(self.store.root),
                                 **admission_context(lambda key: self.store.get(rid, key),
                                                   shared_browsers=engine.config.load().shared_cache.enabled),
                                 "controller_correction_contract": correction_contract(),
@@ -894,6 +896,13 @@ class RecoveryController:
                 'Keep checks, inputs/outputs, test minima, paths, dependencies, other tasks and preview identical. '
                 'Synchronize only the same evidence obligation value; keep identity, user origin, requirement IDs, '
                 'capability and stages. Adopted design methods remain binding; PlanPatch cannot override them.')
+        if PROTOCOL_KEY in recovery_context:
+            if not current_proposal_protocol(recovery_context[PROTOCOL_KEY]):
+                raise StateConflict("Unsupported frozen plan proposal protocol; retain the original request")
+            patch_context["plan_proposal_base"] = {"plan_hash": digest(plan.model_dump()),
+                "evidence_hash": digest(plan.evidence_contract.model_dump() if plan.evidence_contract else None),
+                "obligation_hashes": [{"id": row.id, "hash": digest(row.model_dump())}
+                                     for row in plan.evidence_contract.obligations] if plan.evidence_contract else []}
         patch_context["evidence_reference_contract"] = controller_context_catalog(
             patch_context, provenance={"patch": "proposal"}).contract(patch_context)
         progress_key = "recovery/patch-progress-basis/" + identity
@@ -901,9 +910,22 @@ class RecoveryController:
             progress_context = {**patch_context, "prototype_approval": self.store.get(rid, "prototype_approval")}
             self.store.checkpoint(rid, progress_key, engine.recovery_policy.progress.basis(
                 progress_context, tree_hash(work), "plan_patch"))
-        patch = await engine._invoke("plan", patch_context, PlanPatch, work, rid, "recovery/patch/" + identity, fresh=True)
-        unchanged({"patch": patch.model_dump()})
+        schema = EvidencePlanPatch if PROTOCOL_KEY in recovery_context else PlanPatch
+        proposal = await engine._invoke("plan", patch_context, schema, work, rid, "recovery/patch/" + identity, fresh=True)
+        proposal = schema.model_validate(proposal.model_dump())
+        unchanged({"proposal": proposal.model_dump()})
+        materialization = None
+        patch = proposal
         try:
+            if schema is EvidencePlanPatch:
+                patch = materialize(proposal, plan, patch_context)
+                materialization = record_materialization(engine.artifacts, "recovery/patch/" + identity,
+                    baseline["source_hash"], plan, proposal, patch, patch_context)
+                materialization_key = "recovery/patch-materialization/" + identity
+                saved = self.store.get(rid, materialization_key)
+                if saved is not None and saved != materialization:
+                    raise StateConflict("Frozen plan materialization changed")
+                self.store.checkpoint(rid, materialization_key, materialization)
             if patch.evidence_contract is None:
                 raise AA2Error("New plan patch requires a complete evidence_contract; preserve and formally regenerate the proposal")
             validate_timing_references(patch, patch_context)
@@ -964,6 +986,11 @@ class RecoveryController:
             "retained_candidates": candidates,
             "affected": sorted(affected), "reopen": sorted(reopen), "specification": self.store.get(rid, "clarify"),
             "project": engine.contexts.build(work)}
+        if materialization:
+            candidate_artifact = engine.artifacts.put(candidate.model_dump(), "materialized_plan_candidate")
+            review_context.update(plan_patch_proposal=proposal.model_dump(),
+                                  plan_patch_materialization=materialization,
+                                  plan_materialized_candidate=candidate_artifact)
         review_context["evidence_reference_contract"] = controller_context_catalog(
             review_context, provenance={"patch": "proposal", "plan": "proposal"}).contract(review_context)
         if recording:
@@ -1032,6 +1059,9 @@ class RecoveryController:
             "snapshots": snapshots, **baseline,
             "document_preimage": {"path": "docs/aa2/plan.md", "before": digest(document.read_bytes()) if document.is_file() else None,
                                   "mode": document.stat().st_mode & 0o7777 if document.is_file() else 0o644}}
+        if materialization:
+            journal["proposal_materialization"] = materialization
+            journal["materialized_candidate"] = candidate_artifact
         coverage_receipt = ({"verified": coverage_verified, "checks_hash": digest(self.store.get(rid, "coverage_checks"))}
                             if plan.mode == "verification_only" else None)
         journal["evidence_admission"] = admission_record(candidate, review, review_context,

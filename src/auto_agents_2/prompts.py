@@ -218,7 +218,7 @@ class PromptCompiler:
         from .environment_contract import environment_evidence_instructions
         task += environment_evidence_instructions(purpose)
         from .evidence_admission import evidence_instructions
-        task += evidence_instructions(purpose)
+        task += evidence_instructions(purpose, context)
         if context.get("controller_review_basis"):
             from .review_authority import instructions as authority_instructions
             task += authority_instructions()

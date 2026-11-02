@@ -1,4 +1,5 @@
 """A stale dispatch is reassessed, never silently rebound to a newer plan."""
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response
 import copy
 
 import pytest
@@ -30,15 +31,15 @@ class ReassessmentAgent(ApprovingAgent):
             return Diagnosis(action="plan_patch" if self.patches < (3 if self.extra_patch else 2) else "repair",
                 task_ids=[context["failure"]["task_id"]], evidence_refs=["failure", "plan"],
                 reason="Assess the retained task against the current formally accepted contract")
-        if schema is PlanPatch:
+        if schema in (PlanPatch, EvidencePlanPatch):
             self.patches += 1
             plan = PlanResult.model_validate(context["plan"])
             task = plan.tasks[2 if self.patches == 2 else 0].model_copy(deep=True)
             task.checks[0].expected_tests += 1
-            return PlanPatch(base_revision=context["base_revision"], failure_ids=[context["failure"]["id"]],
+            return proposal_response(PlanPatch(base_revision=context["base_revision"], failure_ids=[context["failure"]["id"]],
                 reason="Retain the existing target and increase its check minimum",
                 document="Reviewed plan revision " + str(self.patches + 1), upsert_tasks=[task],
-                evidence_contract=empty_contract(context))
+                evidence_contract=empty_contract(context)), context, schema)
         if stage == "implement":
             return ImplementationResult(summary="Implement the unchanged task", changes=[
                 Change(path="part1.py", content="def add(a, b):\n    return a + b\n"),

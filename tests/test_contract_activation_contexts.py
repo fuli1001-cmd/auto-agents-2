@@ -1,4 +1,5 @@
 """Role-specific citations survive real PlanPatch preparation and transaction reentry."""
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response, freeze_legacy_author
 import asyncio
 import copy
 
@@ -18,7 +19,7 @@ def cite_roles(agent, *, author=(), reviewer=()):
     invoke = agent.invoke
     async def cited(stage, context, schema, *args, **kwargs):
         result = await invoke(stage, context, schema, *args, **kwargs)
-        if schema is PlanPatch:
+        if schema in (PlanPatch, EvidencePlanPatch):
             for row in result.contract_corrections:
                 row.evidence_refs += list(author)
         if issubclass(schema, EvidencePatchReview):
@@ -354,6 +355,7 @@ def archive_legacy_inputs(workflow, rid, work, identity, journal):
                                 'presentation_missing', 'artifact_changed', 'unretained_source', 'stale_capture'])
 async def test_legacy_prepared_replay_requires_original_frozen_evidence(tmp_path, monkeypatch, bad):
     workflow, rid, work, old, record, agent = setup_correction(tmp_path)
+    await freeze_legacy_author(workflow, rid, record)
     cite_roles(agent, author=['plan.tasks[2].checks[0]', 'recovery_decision'],
                reviewer=['patch.contract_corrections[0]', 'recovery_decision', 'controller_stage_contract'])
     identity, key, journal = await prepare(workflow, rid, record, monkeypatch)

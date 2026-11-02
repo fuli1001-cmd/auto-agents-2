@@ -1,4 +1,5 @@
 """Interrupted handoff, recovery and ownership regressions from OCR round two."""
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response
 
 import asyncio
 import json
@@ -212,8 +213,8 @@ async def test_plan_patch_rejects_whole_operation_baseline_drift(tmp_path, monke
                 else:
                     git(workspace, "-c", "user.name=fixture", "-c", "user.email=fixture@localhost",
                         "commit", "--allow-empty", "-qm", "concurrent commit")
-            if schema is PlanPatch:
-                return contracts.patch_for(PlanResult.model_validate(context["plan"]), evidence_contract=empty_contract(context))
+            if schema in (PlanPatch, EvidencePlanPatch):
+                return proposal_response(contracts.patch_for(PlanResult.model_validate(context["plan"]), evidence_contract=empty_contract(context)), context, schema)
             return await super().invoke(actual, context, schema, workspace, *args, **kw)
     workflow = engine(tmp_path, Agent())
     rid = workflow.store.admit("fixture", {})["id"]
