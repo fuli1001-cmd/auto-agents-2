@@ -104,7 +104,8 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
     if "controller_evidence_capabilities" in context and not current_catalog(capabilities):
         context.pop("controller_evidence_capabilities")
     prototype_protocols = {}
-    from .plan_proposals import PROTOCOL_KEY as PLAN_PROPOSAL_KEY, current_protocol as current_plan_proposal
+    from .plan_proposals import PROTOCOL_KEY as PLAN_PROPOSAL_KEY
+    from .plan_proposals import current_protocol as current_plan_proposal
     if PLAN_PROPOSAL_KEY in context:
         if current_plan_proposal(context[PLAN_PROPOSAL_KEY]):
             prototype_protocols[PLAN_PROPOSAL_KEY] = context[PLAN_PROPOSAL_KEY]
@@ -177,6 +178,13 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
             for alias, entry in list(refs.entries.items()):
                 if entry.path == name or entry.path.startswith(name + "."):
                     refs.add(alias, entry.path, "controller_protocol", status="protocol")
+    from .contract_reentry import CONTEXT
+    if isinstance(context.get(CONTEXT), dict):
+        # This instruction describes the controller protocol, while its separately
+        # indexed accepted source values remain identity evidence, not execution.
+        for alias, entry in list(refs.entries.items()):
+            if entry.path == CONTEXT + ".instruction":
+                refs.add(alias, entry.path, "controller_protocol", status="protocol")
     registered = list(aliases)
     if isinstance(failure, dict):
         registered.extend(failure.get("evidence_refs", []))

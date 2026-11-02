@@ -87,12 +87,17 @@ class WorkflowAuthority:
                 raise StateConflict("Accepted technical choices have lost their review identity")
             assessment = validate_review(record["review"], record["basis"])
             choices = [c.model_dump() for c in assessment.technical_choices]
+        from .contract_reentry import make_revision
+        owner = {"coverage_review": "clarify", "plan": "plan"}.get(kind)
+        revision = make_revision(lambda key: self.store.get(rid, key), owner,
+            review_candidate(kind, context), self.store.submitted_answers(rid),
+            self.store.get(rid, "authority/correction")) if owner else None
         basis = make_basis(kind, context, original=original, specification=specification,
             accepted_design=design if kind != "design" else None,
             accepted_plan=self.store.get(rid, "plan"), design_adoptions=choices,
             source_hash=tree_hash(work), source_identity=self.identity(rid),
             submitted_answers=self.store.submitted_answers(rid),
-            correction=self.store.get(rid, "authority/correction"))
+            correction=self.store.get(rid, "authority/correction"), revision=revision)
         from .review_reading import reading_contract
         context = {**context, "controller_review_basis": basis}
         # A new disclosed reading contract changes only this review request. Old
@@ -101,13 +106,17 @@ class WorkflowAuthority:
         reading = reading_contract(basis)
         if reading:
             context["controller_review_reading"] = reading
-        return context, review_schema(schema)
+        return context, review_schema(schema, revision is not None)
 
     def validate(self, rid, result, context):
         basis = context.get("controller_review_basis")
         assessment = validate_review(result, basis)
         if basis["source_identity"] != self.identity(rid):
             raise InvalidAuthorityReview("authority_sources_changed_during_review", result.model_dump())
+        from .contract_reentry import current_revision
+        if basis["scope"] in {"coverage_review", "plan"}:
+            current_revision(lambda key: self.store.get(rid, key), basis,
+                review_candidate(basis["scope"], context), self.store.submitted_answers(rid))
         return assessment
 
     def record(self, rid, result, context, operation):
@@ -175,6 +184,15 @@ class WorkflowAuthority:
             updates["authority/correction"] = {**correction, "completed": {
                 "review_key": key, "artifact_hash": digest(document)}}
         return updates
+
+    def commit(self, rid, owner, document, review, updates, work):
+        """Accept rebuilt sources and their preservation receipt in one CAS."""
+        from .contract_reentry import ACTIVE
+        from .workspace import tree_hash
+        proof = self.receipt(rid, review.model_dump())
+        if self.store.get(rid, ACTIVE) and proof["basis"]["source_hash"] != tree_hash(work):
+            raise StateConflict("Contract rebuild source changed after independent review")
+        self.store.accept_contract(rid, owner, document, review.model_dump(), updates)
 
     def accepted(self, rid, owner, document):
         accepted = self.store.get(rid, "authority/accepted/" + owner, {})
@@ -444,6 +462,12 @@ class WorkflowAuthority:
         previous = (proof.get("owned_candidate") if method_source == "candidate"
                     else (proof["basis"].get("correction") or {}).get("previous")
                     if method_source == "previous_contract" else self.store.get(rid, owner))
+        historical = proof["basis"]["sources"][method_source]
+        if historical.get("revision_binding"):
+            from .contract_reentry import ACTIVE
+            if historical["revision_binding"] != self.store.get(rid, ACTIVE):
+                raise StateConflict("Historical source dispute changed its accepted baseline")
+            previous = historical["value"]
         if previous is None:
             raise StateConflict("Source correction lost its responsible candidate")
         basis = proof["basis"]
@@ -460,6 +484,11 @@ class WorkflowAuthority:
             request["retained_choices"] = [c for c in basis["criteria"]
                 if c["kind"] == "accepted_technical_contract" and c["owner"] == "design"
                 and c["statement"] not in clauses]
+        revision_targets = sorted({proof["basis"]["sources"][f["method_source"]]["revision_item_id"]
+            for f in findings if proof["basis"]["sources"][f["method_source"]].get("revision_item_id")})
+        if revision_targets:
+            request["revision_targets"] = revision_targets
+            request["revision_binding"] = proof["basis"]["revision"]["binding"]
         request["id"] = digest(request)
         # Rewording or renewed acceptance cannot create a fresh budget. New
         # submitted inputs or actually executed checks can justify reassessment;

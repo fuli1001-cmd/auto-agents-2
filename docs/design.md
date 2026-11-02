@@ -624,3 +624,77 @@ The source identities and workspace are checked again across authorization waits
 a formally activated follow-up patch uses its own exact transition. Unknown input
 changes, partial implementations and specialized recovery grants retain their
 existing reconciliation gates.
+
+### Accepted contracts across upstream rebuilding
+
+A complete owner-stage re-entry is not a new blank specification. The reset
+transaction records an immutable `recovery/contract-reentry/.../base` containing
+the accepted specification, plan, original check-production receipt, revision
+and exact gate-history identity before removing live stage checkpoints. An
+independent active/head record survives repeated candidate rejection, further
+owner re-entry and interruption. Accepted clarification successors append
+immutable review-bound receipts; a rejected candidate never advances the head.
+The replacement plan's acceptance atomically publishes its existing admission
+and closes this chain. Counts, old failure ledgers and prototype consent retain
+their original ownership.
+
+Authors still return complete IntakeResult and PlanResult values. The controller
+supplies the full fixed baseline and accepted successors, and computes a finite
+old/new catalogue for requirements, acceptance leaves, verification commands,
+task requirement/origin links, task/final/preparation/probe commands, evidence
+obligations and preview. Exact unchanged slots need no model-authored preservation
+mapping. A newly dispatched joint review uses the closed revision-dispositions
+schema: each changed old item has exactly one replace, split, merge or retire
+disposition, exact successor identities and a quotation from an eligible source.
+Missing mappings, duplicate IDs, stale preimages and missing schema fields never
+mean preserve. The complete review basis, including a large revision catalogue,
+is retained as mandatory readable material rather than a lossy summary.
+
+Identity checks do not decide arbitrary prose. An owner re-entry permits
+goal-preserving restructuring; it does not itself waive an obligation. Clarify
+may interpret exact submitted changes against the old and new leaves. A plan
+can only consume an actual accepted clarification disposition, or a separately
+grounded exact source dispute, for retirement; it cannot retire a requirement
+merely because a raw answer exists. A withdrawal inside one requirement does
+not waive that requirement's other acceptance or unrelated/global checks.
+Requirement IDs delimit candidates for semantic assessment, not proof that a
+withdrawal applies.
+Mixed-requirement rows distinguish a precise link removal from retirement of
+the entire row. Only the exact accepted withdrawals cited in a disposition may
+jointly cover all its old requirement IDs; an unaffected requirement cannot
+disappear. Clarification answer consumption is anchored to the actual accepted
+review's answer records, including answers submitted before the rollback that
+they trigger. Each accepted successor advances this boundary. Legacy missing
+answer identities and the historical frontend-only normalization use a
+conservative answer boundary; arbitrary document drift fails closed. New
+frontend detection is incorporated before the independent coverage review.
+ Technical disputes must identify the exact accepted source
+and original independent rejection; a dispute about a proposal cannot waive an
+accepted contract. User/unknown evidence origin reassignment requires that
+formal source route. Explicit mappings continue to preserve command minima,
+inputs/outputs and origin budgets. Existing producer-backed unchanged clauses
+cannot become review-only metadata.
+
+Accepted successor/head, current sources and submitted answers, exact review,
+candidate and admission identities are rechecked in the accepting transaction.
+A second candidate cannot overwrite a closed chain; only exact already-committed
+replay is a no-op. Prior check-production mappings remain bound to the historical
+accepted plan for planning comparison, never execution approval for a missing
+live plan. Normal source/capability validation and check-production activation
+remain mandatory. No-changes shortcuts and final delivery cannot bypass an open
+chain.
+
+Legacy records keep their serialized shape. An open legacy rebuild migrates only
+when plan-revision history, chronological gate history and specification source
+bindings uniquely agree. Intermediate accepted specifications are preserved;
+when they differ, normal clarify re-entry must first perform a joint preservation
+review before a new plan can close the chain. Ambiguous, missing or contradictory
+history is retained and reported as a state conflict, not relabelled as first-time
+planning or guessed from the latest feedback. Migration does not complete a
+permit, authorize retirement, reset a budget or import an old rejected candidate.
+
+This boundary protects known accepted structured obligations. It does not prove
+that initial natural-language extraction was complete, infer semantic equivalence
+from hashes, add a universal JSON patch language, or extend research/prototype
+author protocols. Independent semantic review, applicable user approval and
+actual execution evidence keep their distinct roles.

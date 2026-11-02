@@ -27,7 +27,7 @@ LINKED_INLINE = 4000
 
 # Known workflow slots must be explicitly admitted for each purpose. Unknown
 # extension fields remain mandatory; a new purpose must always be registered.
-SHARED = {"controller_review_reading", "controller_review_basis", "controller_authority_scope", "task", "mandatory", "constraints", "global_constraints", "prototype_approval", "design_review", "source_history", "feedback",
+SHARED = {"controller_contract_reentry", "controller_review_reading", "controller_review_basis", "controller_authority_scope", "task", "mandatory", "constraints", "global_constraints", "prototype_approval", "design_review", "source_history", "feedback",
           "controller_plan_proposal", "plan_proposal_base", "plan_patch_proposal", "plan_patch_materialization", "plan_materialized_candidate", "ui_design", "controller_feedback", "controller_attachment_capture", "controller_recording_recovery", "controller_evidence_capabilities", "evidence_requirement_source", "evidence_candidate_hash", "unsupported_evidence_obligations", "evidence_reference_contract", "controller_stage_contract", "validation_feedback"}
 CONTRACTS = {
     "clarify": {"raw_requirements", "raw_requirements_truncated", "history", "project", "decisions", "submitted_answers",
@@ -554,7 +554,7 @@ class _Selection:
         # contract; bodies remain available for grounding, never as new authority.
         view["sources"] = material(basis["sources"], "controller_review_basis.sources",
             "Complete exact source lookup catalogue; read relevant full entries for quotations and preservation")
-        for key in ("criteria", "correction"):
+        for key in ("criteria", "correction", "revision"):
             if len(json.dumps(basis.get(key), ensure_ascii=False)) > TEXT_INLINE:
                 view[key] = material(basis[key], "controller_review_basis." + key,
                     "Complete review obligations; read all entries before deciding", required=True)

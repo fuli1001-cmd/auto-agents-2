@@ -234,6 +234,11 @@ class Store:
             self._event(db, rid, "recovery.dispatched", {"pending_issues_retained": True})
 
     def _put(self, db, rid, key, value):
+        if key.startswith("recovery/contract-reentry/") and key.endswith(("/base", "/accepted", "/closed")):
+            from .faults import StateConflict
+            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+            if row is not None and json.loads(row[0]) != value:
+                raise StateConflict("Accepted rebuild source records are immutable")
         if key.startswith("verification/batches/"):
             from .faults import StateConflict
             row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
@@ -584,8 +589,13 @@ class Store:
             removed = {key: value for key, value in records.items() if any(
                 key == prefix + stage or key.startswith(prefix + stage + "/")
                 for stage in stages for prefix in ("", "candidate/", "invocation/", "provider-result/"))}
-            self._put(db, rid, f"recovery/gate-history/{pending['generation']}", {
-                "version": 1, "pending": pending, "checkpoints": removed, "recovery_refs": recovery_refs})
+            history_key = f"recovery/gate-history/{pending['generation']}"
+            history = {"version": 1, "pending": pending, "checkpoints": removed, "recovery_refs": recovery_refs}
+            self._put(db, rid, history_key, history)
+            from .contract_reentry import begin
+            records["authority/submitted-answers"] = self._submitted_answers(db, rid)
+            for name, value in begin(records, rid, pending, history_key, history).items():
+                self._put(db, rid, name, value)
             if "plan" in removed:
                 revision = records.get("plan_revision/current", {}).get("revision", 1)
                 self._put(db, rid, f"plan_revision/history/{revision}", {
@@ -610,6 +620,81 @@ class Store:
             db.execute("DELETE FROM checkpoints WHERE run_id=? AND key='replanning/pending'", (rid,))
             self._event(db, rid, "replan.completed", {"stage": pending["stage"], "replans": body["replans"],
                                                     "recovery_refs": recovery_refs, "granted": pending["granted"]})
+
+    def ensure_contract_reentry(self, rid):
+        """Conservative migration of an open pre-protocol rebuild, under one snapshot."""
+        from .contract_reentry import ACTIVE, legacy_baseline, state
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = {row[0]: json.loads(row[1]) for row in db.execute(
+                "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
+            if rows.get(ACTIVE):
+                state(rows.get)
+                return
+            if rows.get("plan") is not None or not rows.get("replan_feedback"):
+                return
+            data = json.loads(db.execute("SELECT data FROM runs WHERE id=?", (rid,)).fetchone()[0])
+            rows["authority/submitted-answers"] = self._submitted_answers(db, rid)
+            updates = legacy_baseline(rows, rid, data.get("replans", 0))
+            for key, value in updates.items():
+                self._put(db, rid, key, value)
+            if updates:
+                self._event(db, rid, "contract.baseline_migrated", {"binding": updates[ACTIVE]})
+
+    def accept_contract(self, rid, owner, document, review, updates):
+        """Keep acceptance, effective source head and plan admission atomic."""
+        from .contract_reentry import ACTIVE, acceptance_updates
+        from .faults import StateConflict
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = {row[0]: json.loads(row[1]) for row in db.execute(
+                "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
+            rows["authority/submitted-answers"] = self._submitted_answers(db, rid)
+            review_key = "authority/reviews/" + digest(review)
+            active = rows.get(ACTIVE)
+            receipt_key = "authority/accepted/" + owner
+            expected_receipt = {"version": 1, "artifact_hash": digest(document),
+                "review_hash": digest(review), "review_key": review_key}
+            if updates.get(receipt_key) != expected_receipt:
+                raise StateConflict("Contract acceptance receipt does not bind this document and review")
+            same = (rows.get(receipt_key) == expected_receipt and rows.get(owner) == document
+                and (rows.get(review_key) or {}).get("review") == review)
+            head = rows.get(active.get("head", ""), {}) if active else {}
+            if same and (not active or head.get("review_key") == review_key and head.get("document") == document):
+                return  # Exact committed no-op; never append twice or reopen a closed chain.
+            if not active:
+                raise StateConflict("Contract rebuild was already closed by a different acceptance")
+            new, action = acceptance_updates(rows.get, owner, document, review_key,
+                rows["authority/submitted-answers"])
+            if updates.get(owner) != document or not updates.get(receipt_key):
+                raise StateConflict("Contract acceptance must publish its exact reviewed document")
+            if owner == "plan" and active:
+                from .config import ConfigStore
+                from .evidence_admission import admission_context, validate_admission_review
+                from .models import EvidencePlanReview, PlanResult
+                proof = rows[review_key]
+                record = rows.get("evidence_admission/initial", {})
+                context = record.get("context")
+                if (not context or record.get("candidate_hash") != digest(document)
+                        or record.get("review_hash") != digest(review) or record.get("authority") != proof["basis"]
+                        or record.get("binding") != digest({k: v for k, v in record.items() if k != "binding"})):
+                    raise StateConflict("Rebuilt plan lost its exact independent admission receipt")
+                from .check_production import activation_updates
+                if any(updates.get(key) != value for key, value in activation_updates(record).items()):
+                    raise StateConflict("Rebuilt plan cannot activate another candidate's admission")
+                current = admission_context(rows.get,
+                    shared_browsers=ConfigStore(self.root.parent).load().shared_cache.enabled)
+                if any(context.get(key) != value for key, value in current.items()):
+                    raise StateConflict("Rebuilt plan admission inputs changed before acceptance")
+                context = {**context, "controller_review_basis": proof["basis"]}
+                validate_admission_review(PlanResult.model_validate(document),
+                    EvidencePlanReview.model_validate(review), context)
+            for key, value in {**updates, **new}.items():
+                self._put(db, rid, key, value)
+            if action == "close":
+                db.execute("DELETE FROM checkpoints WHERE run_id=? AND key=?", (rid, ACTIVE))
+            self._event(db, rid, "contract.accepted", {"owner": owner, "document_hash": digest(document),
+                "rebuild": bool(active), "rebuild_closed": action == "close"})
 
     def recover_verification_replan(self, rid, pending, task_key, previous, updated, recovery_key, record):
         """Replace obsolete checker feedback atomically, retaining budgets and history."""

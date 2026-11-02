@@ -1559,6 +1559,14 @@ class WorkflowEngine:
         source_hash = tree_hash(work)
         original = self.artifacts.read(raw["artifact"])
         raw_hash = raw["artifact"]["hash"]
+        from .contract_reentry import ACTIVE as CONTRACT_REENTRY
+        from .contract_reentry import author_context as contract_reentry_context
+        self.store.ensure_contract_reentry(rid)
+        rebuilding = bool(self.store.get(rid, CONTRACT_REENTRY))
+        from .contract_reentry import needs_clarification
+        if self.store.get(rid, "clarify") and needs_clarification(lambda key: self.store.get(rid, key)):
+            raise Replan("clarify", "Reconcile the retained accepted specification versions through joint "
+                "source-bound preservation review before rebuilding the plan; do not infer historical withdrawals.")
         history = []
         for previous in self.store.successful():
             if previous["id"] == rid:
@@ -1570,7 +1578,7 @@ class WorkflowEngine:
                                 "research": self.store.get(previous["id"], "provider_research", {}),
                                 "delivery": previous["data"].get("delivery_commit", "")})
             # Only a byte-identical input AND verified current source/lockfiles can take the fast path.
-            if (not self.store.get(rid, "recovery/implementation_pending") and previous_raw and previous_raw["hash"] == raw["hash"]
+            if (not rebuilding and not self.store.get(rid, "recovery/implementation_pending") and previous_raw and previous_raw["hash"] == raw["hash"]
                     and previous["data"].get("verified_source_hash") == source_hash and not previous["data"].get("external_dependencies")):
                 self.store.checkpoint(rid, "clarify", assessment)
                 return await self._finish_no_changes(rid, work, previous["id"])
@@ -1578,6 +1586,7 @@ class WorkflowEngine:
                    "context_files": [str(self.artifacts.root / raw_hash[:2] / raw_hash)],
                    "raw_requirements_truncated": False, "history": history,
                    "project": self.contexts.build(work), "feedback": self.store.get(rid, "replan_feedback", {})}
+        context.update(contract_reentry_context(lambda key: self.store.get(rid, key)))
         assessment = self.store.get(rid, "clarify")
         if not assessment:
             from .clarification_reentry import ClarificationReentry
@@ -1604,6 +1613,8 @@ class WorkflowEngine:
                     self.store.checkpoint(rid, "clarify_context", {**context,
                         "controller_feedback": "Requirements assessment returned no acceptance criteria"})
                     raise Replan("clarify", "Restore the original request's acceptance criteria before assessing coverage")
+                if ProjectProfile.detect(work, self.config.load().project_profile).has_frontend:
+                    result.frontend = True
                 review = await self._invoke("coverage_review", {**context, "assessment": result.model_dump()},
                                             ReviewResult, work, rid, f"coverage-review/{turn}", fresh=True)
                 if not review.approved:
@@ -1613,14 +1624,19 @@ class WorkflowEngine:
                 assessment = result.model_dump()
                 brief_updates = UIDesign(self.store, self.artifacts).brief_updates(
                     rid, assessment, prototype_context(self, rid)["prototype_requirement_source"])
-                self.store.checkpoints(rid, {"clarify": assessment, **brief_updates,
-                    **self.authority.acceptance(rid, "clarify", assessment, review)})
+                accepted_updates = {"clarify": assessment, **brief_updates,
+                    **self.authority.acceptance(rid, "clarify", assessment, review)}
+                if rebuilding:
+                    self.authority.commit(rid, "clarify", assessment, review, accepted_updates, work)
+                else:
+                    self.store.checkpoints(rid, accepted_updates)
+                context.update(contract_reentry_context(lambda key: self.store.get(rid, key)))
                 break
             else:
                 raise Replan("clarify", "Clarification batch ended without accepted coverage. "
                              "Assess the persisted answers and review findings before another attempt.")
         result = IntakeResult.model_validate(assessment)
-        if ProjectProfile.detect(work, self.config.load().project_profile).has_frontend:
+        if not rebuilding and ProjectProfile.detect(work, self.config.load().project_profile).has_frontend:
             result.frontend = True
             assessment = result.model_dump()
             self.store.checkpoint(rid, "clarify", assessment)
@@ -1676,7 +1692,7 @@ class WorkflowEngine:
                 previous_contract = next((r["id"] for r in self.store.successful()
                     if r["data"].get("verified_source_hash") == source_hash and self.store.get(r["id"], "prototype")
                     and self.store.get(r["id"], "plan", {}).get("preview")), None)
-                if not retained_verification and (not result.frontend or previous_contract):
+                if not rebuilding and not retained_verification and (not result.frontend or previous_contract):
                     return await self._finish_no_changes(rid, work, previous_contract or "current-baseline")
                 verification_only = True
                 context["planning_mode"] = "verification_only"
@@ -1880,7 +1896,7 @@ class WorkflowEngine:
                     raise Replan("plan", str(exc) + "\n" + review.summary + details) from exc
                 self.store.checkpoint(rid, "evidence_admission/initial",
                                       admission_record(document, review, review_context))
-            if stage != "design":
+            if stage != "design" and not (stage == "plan" and rebuilding):
                 atomic_write(work / "docs/aa2" / f"{stage}.md", document.document)
             stage_data = document.model_dump()
             if retrieved:
@@ -1894,8 +1910,14 @@ class WorkflowEngine:
                 updates.update(self.authority.acceptance(rid, stage, stage_data, review))
             elif stage == "provider_research" and review is not None:
                 updates.update(PlanReviewRecovery(self).accept_research(rid, stage_data, review))
-            self.store.checkpoints(rid, updates)
+            if stage == "plan" and rebuilding:
+                self.authority.commit(rid, stage, stage_data, review, updates, work)
+                atomic_write(work / "docs/aa2" / f"{stage}.md", document.document)
+            else:
+                self.store.checkpoints(rid, updates)
             context[stage] = stage_data
+        if self.store.get(rid, CONTRACT_REENTRY):
+            raise StateConflict("Contract rebuild must finish independent preservation review before execution")
         plan = PlanResult.model_validate(self.store.get(rid, "plan"))
         if not self.store.get(rid, "plan_revision/current"):
             self.store.checkpoint(rid, "plan_revision/current", {"version": 1, "revision": 1})
@@ -2661,6 +2683,9 @@ class WorkflowEngine:
         return archived
 
     async def _finish_no_changes(self, rid, work, evidence_run):
+        from .contract_reentry import ACTIVE
+        if self.store.get(rid, ACTIVE):
+            raise StateConflict("No-changes shortcut cannot replace an unfinished contract rebuild")
         source_hash = tree_hash(work)
         source_run = evidence_run
         if source_run == "current-baseline":
@@ -3087,6 +3112,9 @@ class WorkflowEngine:
             return
 
     def _delivery_final_evidence(self, rid, journal, *, fresh):
+        from .contract_reentry import ACTIVE
+        if self.store.get(rid, ACTIVE):
+            raise StateConflict("Delivery cannot bypass an unfinished accepted contract rebuild")
         """Assess the current final observation without changing recovery state or authority."""
         snapshot = {key: self.store.get(rid, key) for key in
                     ("plan", "verify/identity", "verify/checks", "verify/visuals")}

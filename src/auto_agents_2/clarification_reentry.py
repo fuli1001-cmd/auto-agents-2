@@ -75,6 +75,8 @@ class ClarificationReentry:
                 "presentation": presentation, "questions": questions, "keys": keys, "question_prefix": prefix}
 
     def context(self, rid, work):
+        from .contract_reentry import ACTIVE
+        self._get(rid, ACTIVE)
         feedback = self._get(rid, "replan_feedback") or {}
         request = feedback.get("correction_request", {})
         if feedback.get("stage") != "clarify" or request.get("action") != "clarify":

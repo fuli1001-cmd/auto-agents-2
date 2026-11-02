@@ -145,11 +145,12 @@ def mapping_changed(plan, old_record, assessment):
         _mapping_rows(prior_assessment(old_record, plan)) != _mapping_rows(assessment))
 
 
-def preserve_mapping(previous, candidate, old_record, assessment, patch):
+def preserve_mapping(previous, candidate, old_record, assessment, patch, *, mapped_targets=()):
     if not old_record:
         return
     before = prior_assessment(old_record, previous)
-    corrections = {(r["target"], r.get("task_id", ""), r["index"]) for r in patch.get("contract_corrections", [])}
+    corrections = set(mapped_targets) | {(r["target"], r.get("task_id", ""), r["index"])
+        for r in patch.get("contract_corrections", [])}
     corrections |= {("acceptance", r["task_id"], r["acceptance_index"]) for r in patch.get("timing_corrections", [])}
     old_tasks = {t.id: t for t in previous.tasks}
     new_tasks = {t.id: t for t in candidate.tasks}

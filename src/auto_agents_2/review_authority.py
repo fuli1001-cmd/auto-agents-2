@@ -10,6 +10,7 @@ from typing import Literal
 
 from pydantic import Field, ValidationError, create_model
 
+from .contract_reentry import RevisionDisposition
 from .errors import AA2Error, InvalidStructuredResponse
 from .models import Record, ReviewResult
 from .research_contract import RESEARCH_PUBLICATION_RULE
@@ -122,16 +123,22 @@ def scope(stage, context, operation=""):
     return context.get("review_kind") if stage == "review" else None
 
 
-@lru_cache(maxsize=16)
-def review_schema(schema):
+class RevisionAuthorityAssessment(AuthorityAssessment):
+    revision_dispositions: list[RevisionDisposition] = Field(
+        description="Exactly map each changed old revision item once on approval; [] only when none changed. "
+        "Use exact old/new item IDs and exact eligible authority quotations. Unchanged items require no copying.")
+
+
+@lru_cache(maxsize=32)
+def review_schema(schema, revision=False):
     """New invocations require the record; old persisted models remain readable."""
     if issubclass(schema, ReviewResult):
         return create_model("Authority" + schema.__name__, __base__=schema,
-                            authority=(AuthorityAssessment, ...))
+                            authority=(RevisionAuthorityAssessment if revision else AuthorityAssessment, ...))
     if ("review" in schema.model_fields and isinstance(schema.model_fields["review"].annotation, type)
             and issubclass(schema.model_fields["review"].annotation, ReviewResult)):
         return create_model("Authority" + schema.__name__, __base__=schema,
-                            review=(review_schema(schema.model_fields["review"].annotation), ...))
+                            review=(review_schema(schema.model_fields["review"].annotation, revision), ...))
     return schema
 
 
@@ -235,7 +242,7 @@ def response_contract(criteria, sources, observations, unsupported):
 
 def make_basis(kind, context, *, original, specification, accepted_design=None,
                accepted_plan=None, design_adoptions=None, source_hash="", source_identity=None,
-               correction=None, submitted_answers=()):
+               correction=None, submitted_answers=(), revision=None):
     """All arguments labelled accepted come from controller state, not proposals."""
     if kind not in KINDS:
         raise ValueError("Unregistered authority consumer: " + str(kind))
@@ -321,7 +328,18 @@ def make_basis(kind, context, *, original, specification, accepted_design=None,
             "capability_hash": (context.get("controller_evidence_capabilities") or {}).get("hash"),
             "correction": correction if correction and correction.get("owner") == owner else None,
             "meaning": "References establish identity, not entailment, successful execution or permission."}
+    from .contract_reentry import extend_basis
+    extend_basis(body, revision)
     body["response_contract"] = response_contract(criteria, sources, observations, body["unsupported"])
+    if revision:
+        body["response_contract"]["revision_rules"] = (
+            "Review every old/new finite item jointly. Kept items are deterministic exact matches, not preapproved meaning. "
+            "Every changed old item needs exactly one replace/split/merge/retire disposition on approval. "
+            "New IDs come from revision.added. Keep same-text slots distinct. Cite exact revision.sources text. "
+            "A stage permit only allows preserving transformations; retirement needs precise submitted clarify changes "
+            "or a targeted source dispute, and downstream plan changes need an accepted clarification receipt. "
+            "Preserve command test/input/output minima, genuine goals and cumulative origin budgets. "
+            "A rejected candidate may leave disputed mappings incomplete; never invent a waiver to approve.")
     return {**body, "hash": digest(body)}
 
 
@@ -343,7 +361,7 @@ def validate_review(value, basis):
         fail("invalid_controller_basis")
     try:
         review = ReviewResult.model_validate({k: v for k, v in raw.items() if k in {"approved", "summary", "findings", "authority"}})
-        assessment = AuthorityAssessment.model_validate(raw.get("authority"))
+        assessment = (RevisionAuthorityAssessment if basis.get("revision") else AuthorityAssessment).model_validate(raw.get("authority"))
     except (ValidationError, TypeError, AttributeError):
         fail("required_authority_fields")
     if assessment.basis_hash != basis["hash"] or assessment.candidate_hash != basis["candidate_hash"]:
@@ -458,6 +476,8 @@ def validate_review(value, basis):
                     or not set(correction["preserve_ids"]) <= set(row.preserve_ids)
                     or not set(row.preserve_ids) <= set(criteria)):
                 fail("invalid_amendment_source_or_preservation")
+    from .contract_reentry import validate_revision
+    validate_revision(assessment, basis, review.approved, fail)
     return assessment
 
 

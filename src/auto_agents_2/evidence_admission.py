@@ -61,9 +61,11 @@ def current_requirement_source(value):
 
 def admission_context(get, *, shared_browsers=False):
     from .check_production import PROTOCOL_KEY, accepted_projection, active_receipt, protocol
+    from .contract_reentry import admission_previous
+    previous = admission_previous(get)
     return {"controller_evidence_capabilities": capability_catalog(shared_browsers=shared_browsers),
             "evidence_requirement_source": requirement_source(get), PROTOCOL_KEY: protocol(),
-            "accepted_check_production": accepted_projection(active_receipt(get))}
+            "accepted_check_production": accepted_projection(active_receipt(get, previous))}
 
 
 def empty_contract(context):
@@ -180,6 +182,9 @@ def validate_admission_review(plan, review, context, *, allow_user_blocker=True)
         authority = validate_review(verdict, context.get("controller_review_basis"))
         if set(context["controller_review_basis"]["unsupported"]) != set(unsupported):
             raise AA2Error("Authority review does not cover the actual unsupported obligations")
+        if verdict.approved:
+            from .contract_reentry import preserve_production
+            preserve_production(plan, verdict, context, authority)
     if (assessment.candidate_hash != digest(plan.model_dump())
             or assessment.catalog_hash != context["controller_evidence_capabilities"]["hash"]
             or assessment.source_binding != context["evidence_requirement_source"]["hash"]):

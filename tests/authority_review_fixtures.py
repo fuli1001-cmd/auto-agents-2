@@ -32,6 +32,8 @@ def authority_review(context, review=None, **changes):
         "coverage": coverage, "findings": findings, "choices_complete": True,
         "requirements_preserved": True, "explanation": "Explicit fixture response, not an inferred production approval"}
     base["authority"] = AuthorityAssessment.model_validate(base["authority"]).model_dump()
+    if basis.get("revision") and not basis["revision"]["changed"]:
+        base["authority"]["revision_dispositions"] = []
     return ReviewResult(**base)
 
 
