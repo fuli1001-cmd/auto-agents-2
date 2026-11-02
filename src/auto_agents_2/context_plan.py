@@ -19,7 +19,7 @@ from .research_sections import extract_sections, select_section
 from .util import digest
 from .workspace import git_environment, path_allowed
 
-CONTEXT_VERSION = "context-v7"
+CONTEXT_VERSION = "context-v8"
 TEXT_INLINE = 12000
 REFERENCE_INLINE = 2000
 RESEARCH_INLINE = 16000
@@ -175,6 +175,11 @@ class _Selection:
         # but do not expand the same complete check once per failed test case.
         identity = digest(value)
         observation = self.reference(value, path, "Complete immutable check observation")
+        # The displayed wrapper is a controller-created citation, not a new fact.
+        # Keep exact origin paths (including proposal provenance) and never
+        # shadow an observation field already present in the original record.
+        if "observation" not in value:
+            self.result.reference_map[path + ".observation"] = path
         if identity in self.check_observations:
             return {"source_ref": path, "same_observation_as": self.check_observations[identity],
                     "observation": observation}

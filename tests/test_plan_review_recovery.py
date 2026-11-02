@@ -7,7 +7,7 @@ from evidence_test_fixtures import evidence_plan, evidence_review
 from test_decisions import setup
 from test_recovery_contracts import plan as source_plan
 
-from auto_agents_2.context_plan import ContextPlanner
+from auto_agents_2.context_plan import CONTEXT_VERSION, ContextPlanner
 from auto_agents_2.engine import Replan
 from auto_agents_2.errors import AA2Error
 from auto_agents_2.evidence_admission import admission_context, validate_admission_review
@@ -19,7 +19,7 @@ from auto_agents_2.plan_review_recovery import PREFIX, PlanReviewRecovery
 from auto_agents_2.util import digest
 
 
-def fixture(tmp_path, owners=("provider_research",)):
+def fixture(tmp_path, owners=("provider_research",), *, presentation_version=CONTEXT_VERSION):
     workflow, rid = setup(tmp_path)
     work = workflow.project
     workflow.store.update(rid, replans=17)
@@ -48,6 +48,7 @@ def fixture(tmp_path, owners=("provider_research",)):
     workflow.test_plan_context = copy.deepcopy(context)
     presentation_identity = digest(context)
     prepared = ContextPlanner(workflow.artifacts).prepare("review", context, work, "plan-review", run_id=rid)
+    prepared.version = presentation_version
     workflow.store.checkpoint(rid, "presentation/plan-review/" + presentation_identity, {
         "identity": presentation_identity, "artifact": workflow.artifacts.put(prepared.record(), "prepared_context")})
     workflow.authority.record(rid, review, context, "plan-review")
@@ -65,8 +66,8 @@ def fixture(tmp_path, owners=("provider_research",)):
     return workflow, rid, work, candidate, review, context, question["id"]
 
 
-async def legacy(tmp_path, owners=("provider_research",)):
-    values = fixture(tmp_path, owners)
+async def legacy(tmp_path, owners=("provider_research",), *, presentation_version=CONTEXT_VERSION):
+    values = fixture(tmp_path, owners, presentation_version=presentation_version)
     workflow, rid = values[:2]
     workflow._controller_replan(rid, Replan("plan", "Legacy admission rejection incorrectly selected plan"))
     await workflow._resume_replan(rid)
@@ -99,8 +100,9 @@ async def test_bound_upstream_review_creates_separate_permit_without_accepting_p
     assert workflow.store.question(qid) == approval
 
 
-async def test_latest_legacy_reentry_recovers_once_without_provider_or_budget_reset(tmp_path):
-    workflow, rid, work, candidate, review, _, qid = await legacy(tmp_path)
+@pytest.mark.parametrize("presentation_version", ["context-v7", CONTEXT_VERSION])
+async def test_latest_legacy_reentry_recovers_once_without_provider_or_budget_reset(tmp_path, presentation_version):
+    workflow, rid, work, candidate, review, _, qid = await legacy(tmp_path, presentation_version=presentation_version)
     recovery = PlanReviewRecovery(workflow)
     old_history = copy.deepcopy(workflow.store.get(rid, "recovery/gate-history/17"))
     old_permit_key = old_history["pending"]["permit"]
@@ -133,8 +135,9 @@ async def test_latest_legacy_reentry_recovers_once_without_provider_or_budget_re
 
 
 @pytest.mark.parametrize("change", ["source", "research", "candidate", "permit", "issue", "latest", "feedback", "presentation"])
-async def test_legacy_recovery_rejects_drift_and_incomplete_bindings(tmp_path, monkeypatch, change):
-    workflow, rid, work, _, _, _, _ = await legacy(tmp_path)
+@pytest.mark.parametrize("presentation_version", ["context-v7", CONTEXT_VERSION])
+async def test_legacy_recovery_rejects_drift_and_incomplete_bindings(tmp_path, monkeypatch, change, presentation_version):
+    workflow, rid, work, _, _, _, _ = await legacy(tmp_path, presentation_version=presentation_version)
     if change == "source":
         (work / "user-edit.txt").write_text("preserve user change")
     elif change == "research":
@@ -543,3 +546,16 @@ async def test_precommit_interruption_preserves_started_permit_until_real_reset(
     monkeypatch.setattr(workflow, "_execute", stopped_after_resume)
     with pytest.raises(asyncio.CancelledError):
         await workflow.start(run_id=rid)
+
+
+
+@pytest.mark.parametrize("presentation_version", [None, "context-v6", "context-v999"])
+async def test_unknown_completed_plan_view_is_not_granted_v7_compatibility(tmp_path, presentation_version):
+    workflow, rid, work, _, _, _, _ = await legacy(tmp_path, presentation_version=presentation_version)
+    before = workflow.store.run(rid)["data"]["replans"]
+    calls = list(workflow.agent.calls)
+    with pytest.raises(StateConflict, match="upstream inputs changed or cannot be proven"):
+        PlanReviewRecovery(workflow).recover(rid, work)
+    assert workflow.store.run(rid)["data"]["replans"] == before
+    assert workflow.agent.calls == calls
+    assert workflow.store.get(rid, "replanning/pending") is None

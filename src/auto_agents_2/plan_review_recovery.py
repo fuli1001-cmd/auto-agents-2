@@ -132,7 +132,9 @@ class PlanReviewRecovery:
             raise StateConflict("Legacy plan review lost its frozen upstream input presentation")
         frozen = self.engine.artifacts.json(presentation["artifact"])
         selections = frozen.get("selections", [])
-        if (frozen.get("version") != CONTEXT_VERSION or frozen.get("purpose") != "plan"
+        # v8 adds citation aliases only. A completed v7 review still proves
+        # its original upstream bindings; never regenerate historical evidence.
+        if (frozen.get("version") not in {"context-v7", CONTEXT_VERSION} or frozen.get("purpose") != "plan"
                 or any(not any(row.get("source_ref") == name and row.get("identity") == value
                                and row.get("presentation") != "not_selected" for row in selections)
                        for name, value in self.bindings(rid).items())):
