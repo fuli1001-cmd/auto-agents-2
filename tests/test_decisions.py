@@ -463,13 +463,15 @@ async def test_invalid_diagnosis_schema_gets_one_correction_then_a_continuation_
     workflow.recovery.submit(rid, failure())
     await workflow.recovery.resume(rid)
     await workflow.recovery.resume(rid)
-    async def pause(question):
-        assert "Repeated invalid diagnosis" in question["prompt"]
-        return "n"
-    workflow.question_handler = pause
-    with pytest.raises(asyncio.CancelledError):
+    from auto_agents_2.errors import RecoveryPathExhausted
+    async def no_unbounded_permission(question):
+        pytest.fail("Identical rejected diagnoses must not create another retry permission")
+    workflow.question_handler = no_unbounded_permission
+    with pytest.raises(RecoveryPathExhausted):
         await workflow.recovery.resume(rid)
     assert calls == ["recovery_diagnosis", "recovery_diagnosis", "decision"]
+    assert not workflow.store.pending(rid)
+    assert workflow.store.get(rid, "recovery/budgets/diagnosis/T3") == {"round": 2}
 
 
 @pytest.mark.asyncio

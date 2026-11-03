@@ -91,6 +91,31 @@ class RecoveryProgress:
             {'status': 'completed_without_execution', 'evidence_ref': 'invocation/' + operation,
              'diagnosis': outcome['diagnosis']})
 
+    def rejection_updates(self, rid, owner, basis, operation, outcome, evidence_ref, *, completed):
+        """Join an invalid completion to its consumer's atomic rejection handoff."""
+        key = 'recovery/diagnosis-progress-enrollment/' + operation
+        expected = {'owner': owner, 'basis': basis, 'outcome_hash': digest(outcome)}
+        saved = self.store.get(rid, key)
+        if saved is None and completed:
+            # Preserve legacy completion semantics: never retrofit a missing
+            # enrollment or invalidate a previously bound human request.
+            return {}, None
+        if saved is not None and saved != expected:
+            raise StateConflict('Rejected diagnosis progress enrollment changed')
+        ledger_key = f'recovery/no-progress/diagnose/{basis}'
+        ledger = self.store.get(rid, ledger_key, {'action': 'diagnose', 'basis': basis, 'operations': {}})
+        observation = {'status': 'rejected', 'evidence_ref': evidence_ref}
+        if operation in ledger['operations']:
+            if ledger['operations'][operation] != observation:
+                raise StateConflict('Rejected diagnosis observation changed')
+            return {}, None
+        ledger['operations'][operation] = observation
+        updates = {key: expected, ledger_key: ledger, 'recovery/no-progress/owner/' + owner: True}
+        event = {'owner': owner, 'action': 'diagnose', 'evidence': ledger_key,
+                 'attempts_with_same_evidence': len(ledger['operations']),
+                 'excluded': len(ledger['operations']) >= NO_PROGRESS_LIMIT}
+        return updates, event
+
     def record(self, rid, owner, action, basis, operation, outcome):
         key = f'recovery/no-progress/{action}/{basis}'
         saved = self.store.get(rid, key, {'action': action, 'basis': basis, 'operations': {}})

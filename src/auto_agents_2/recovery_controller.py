@@ -213,10 +213,11 @@ class RecoveryController:
             progress_basis = (policy.progress.diagnosis_basis(rid, failure, work, None, progress_operation)
                               if not published else None)
             diagnosis = policy.completed_diagnosis(rid, permit, failure, active, work, None,
-                authorization_failure=authorization_failure)
+                authorization_failure=authorization_failure, allow_invalid=True)
             completed_diagnosis = diagnosis is not None
-            schema_error = None
-            if diagnosis is None:
+            completed_rejection = self._completed_rejection(rid, permit, progress_operation, f"recovery/diagnosis-rejections/{failure.id}/{saved['round']}")
+            schema_error = completed_rejection["validation_error"] if completed_rejection else None
+            if diagnosis is None and completed_rejection is None:
                 diagnosis, schema_error = await self._diagnose(diagnosis_context,
                     work, rid, f"recovery/diagnose/{failure.id}/{saved['round']}")
             if tree_hash(work) != evidence_source:
@@ -226,11 +227,13 @@ class RecoveryController:
                     raise AA2Error(schema_error)
                 decision = adjudicate(failure, diagnosis=diagnosis, evidence_context=diagnosis_context)
             except AA2Error as exc:
-                rejection = {"diagnosis": diagnosis.model_dump() if diagnosis else None, "validation_error": str(exc)}
-                self.store.checkpoints(rid, {key: {"failure": failure.model_dump(), "evidence_source_hash": evidence_source,
-                    "diagnosis_feedback": rejection, "diagnosis_errors": saved.get("diagnosis_errors", 0) + 1},
-                    f"recovery/diagnosis-rejections/{failure.id}/{saved['round']}": rejection})
-                self._reject_diagnosis(rid, permit, rejection)
+                rejection = completed_rejection or {"diagnosis": diagnosis.model_dump() if diagnosis else None, "validation_error": str(exc)}
+                rejection_ref = f"recovery/diagnosis-rejections/{failure.id}/{saved['round']}"
+                self._reject_diagnosis(rid, permit, rejection, updates={
+                    key: {"failure": failure.model_dump(), "evidence_source_hash": evidence_source,
+                          "diagnosis_feedback": rejection, "diagnosis_errors": saved.get("diagnosis_errors", 0) + 1},
+                    rejection_ref: rejection}, owner=failure.origin_id, basis=progress_basis,
+                    operation=progress_operation, evidence_ref=rejection_ref)
                 return None
             outcome = {"status": "validated", "diagnosis": diagnosis.model_dump()}
             if not published:
@@ -462,10 +465,11 @@ class RecoveryController:
                 progress_operation = f"recovery/diagnose/{failure.id}/{active['diagnosis_round']}"
                 diagnosis_context.update(diagnosis_handoff(engine, rid, failure, permit, progress_operation, active["evidence_source_hash"]))
                 progress_basis = policy.progress.diagnosis_basis(rid, failure, work, plan, progress_operation)
-                diagnosis = policy.completed_diagnosis(rid, permit, failure, active, work, plan)
+                diagnosis = policy.completed_diagnosis(rid, permit, failure, active, work, plan, allow_invalid=True)
                 completed_diagnosis = diagnosis is not None
-                schema_error = None
-                if diagnosis is None:
+                completed_rejection = self._completed_rejection(rid, permit, progress_operation, f"recovery/diagnosis-rejections/{failure.id}/{active['diagnosis_round']}")
+                schema_error = completed_rejection["validation_error"] if completed_rejection else None
+                if diagnosis is None and completed_rejection is None:
                     diagnosis, schema_error = await self._diagnose(diagnosis_context,
                         work, rid, f"recovery/diagnose/{failure.id}/{active['diagnosis_round']}")
                 if tree_hash(work) != active["evidence_source_hash"]:
@@ -482,13 +486,15 @@ class RecoveryController:
                     suggested = adjudicate(failure, attempts=active["attempt"] - 1, diagnosis=diagnosis,
                         plan=plan, evidence_context=assessment_context, workspace=work, recording=bool(recording))
                 except AA2Error as exc:
-                    rejection = {"diagnosis": diagnosis.model_dump() if diagnosis else None, "validation_error": str(exc)}
+                    rejection = completed_rejection or {"diagnosis": diagnosis.model_dump() if diagnosis else None, "validation_error": str(exc)}
                     rejected_round = active.pop("diagnosis_round")
                     active["diagnosis_feedback"] = rejection
                     active["diagnosis_errors"] = active.get("diagnosis_errors", 0) + 1
-                    self.store.checkpoints(rid, {"recovery/active": active,
-                        f"recovery/diagnosis-rejections/{failure.id}/{rejected_round}": rejection})
-                    self._reject_diagnosis(rid, permit, rejection)
+                    rejection_ref = f"recovery/diagnosis-rejections/{failure.id}/{rejected_round}"
+                    self._reject_diagnosis(rid, permit, rejection,
+                        updates={"recovery/active": active, rejection_ref: rejection},
+                        owner=failure.origin_id, basis=progress_basis, operation=progress_operation,
+                        evidence_ref=rejection_ref)
                     return
                 outcome = {"status": "validated", "diagnosis": diagnosis.model_dump()}
                 policy.progress.enroll_diagnosis(rid, failure.origin_id, progress_basis, progress_operation,
@@ -676,25 +682,75 @@ class RecoveryController:
         updates.update(policy.dispatch_updates(rid, active, targets))
         self._finish(rid, active, updates)
 
-    def _reject_diagnosis(self, rid, permit, rejection):
+    def _completed_rejection(self, rid, permit, operation, evidence_ref):
+        previous = self.engine.recovery_policy.completed_outcome(rid, permit, action="diagnose")
+        if not previous or previous.get("status") != "invalid":
+            return None
+        from .recovery_identity import binding_matches_failure
+        receipt = self.store.get(rid, permit)
+        frozen = self.store.get(rid, "recovery/invocation-inputs/" + digest(["recovery_diagnosis", operation]), {})
+        context = frozen.get("context", {})
+        request = context.get("diagnosis_request", {})
+        binding = self.store.get(rid, permit.replace("/permits/", "/authorization-inputs/", 1), {})
+        if (frozen.get("source_hash") != receipt["source_hash"] or request.get("permit") != permit
+                or request.get("action") != "diagnose"
+                or any(request.get(name) != receipt[name] for name in ("owner", "cycle_id", "source_hash", "plan_hash"))
+                or digest(context.get("plan")) != receipt["plan_hash"]
+                or not binding_matches_failure(binding, context.get("failure", {}))):
+            raise StateConflict("Completed diagnosis rejection lost its frozen input binding")
+        rejection = previous.get("feedback")
+        if (not isinstance(rejection, dict) or not isinstance(rejection.get("validation_error"), str)
+                or not rejection["validation_error"] or self.store.get(rid, evidence_ref) != rejection):
+            raise StateConflict("Completed diagnosis rejection proof is missing or changed")
+        return rejection
+
+    def _reject_diagnosis(self, rid, permit, rejection, *, updates, owner, basis, operation, evidence_ref):
         policy = self.engine.recovery_policy
-        if policy.completed_outcome(rid, permit, action="diagnose") is None:
-            policy.complete(rid, permit, {"status": "invalid", "feedback": rejection})
-        else:
-            # Old versions validated schema/citations without checking action eligibility.
-            # Keep that completed receipt immutable; the rejection is a new observation.
+        previous = policy.completed_outcome(rid, permit, action="diagnose")
+        outcome = {"status": "invalid", "feedback": rejection}
+        event = None
+        if previous is None:
+            if permit:
+                saved = self.store.get(rid, permit)
+                updates[permit] = {**saved, "phase": "completed", "outcome": outcome, "outcome_hash": digest(outcome)}
+        elif previous.get("status") == "invalid" and previous != outcome:
+            raise StateConflict("Completed diagnosis rejection cannot be overwritten")
+        # Previously validated receipts/enrollments are immutable even when a
+        # later eligibility check rejects them; never double-count that operation.
+        if basis is not None and (previous is None or previous.get("status") == "invalid"):
+            progress, event = policy.progress.rejection_updates(rid, owner, basis, operation, outcome,
+                evidence_ref, completed=previous is not None)
+            updates.update(progress)
+        # Phase, original rejection, permit and progress are one transaction:
+        # no cleared round can escape its completion or no-progress accounting.
+        self.store.checkpoints(rid, updates)
+        if event:
+            self.store.event(rid, "recovery.no_progress", event)
+        if previous is not None:
             self.store.event(rid, "recovery.diagnosis_rejected", {"permit": permit,
                 "reason": rejection["validation_error"], "previous_outcome_preserved": True})
 
     async def _diagnose(self, context, work, rid, key):
+        rejection_key = "recovery/diagnosis-transport-rejection/" + key
+        inputs_key = "recovery/invocation-inputs/" + digest(["recovery_diagnosis", key])
+        saved = self.store.get(rid, rejection_key)
+        if saved is not None:
+            if saved["input_hash"] != digest(self.store.get(rid, inputs_key, context)):
+                raise StateConflict("Completed diagnosis rejection inputs changed")
+            return None, saved["validation_error"]
         try:
             catalog = controller_context_catalog(context)
             return await self.engine._invoke("recovery_diagnosis", {**context,
                 "evidence_reference_contract": catalog.contract(context)}, Diagnosis, work, rid, key, fresh=True), None
         except InvalidEvidenceReference as exc:
-            return None, str(exc)
+            message = str(exc)
         except InvalidStructuredResponse:
-            return None, "诊断返回格式不符合 Diagnosis schema；请按请求的完整结构修正。"
+            message = "诊断返回格式不符合 Diagnosis schema；请按请求的完整结构修正。"
+        # An invalid completed output is not a successful invocation. Persist
+        # only safe controller feedback so an interrupted handoff cannot rerun it.
+        self.store.checkpoint(rid, rejection_key, {"version": 1, "validation_error": message,
+            "input_hash": digest(self.store.get(rid, inputs_key, context))})
+        return None, message
 
     @staticmethod
     def _diagnosis_assessment(failure, suggested):
