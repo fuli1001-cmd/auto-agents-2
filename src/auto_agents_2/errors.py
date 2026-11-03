@@ -136,6 +136,17 @@ class InvalidStructuredResponse(ProviderError):
     code = "INVALID_STRUCTURED_RESPONSE"
 
 
+class InvalidEvidenceReference(InvalidStructuredResponse):
+    """Safe, controller-generated reference diagnostics, never arbitrary model text."""
+
+    def __init__(self, issues, *, omitted=0):
+        import json
+        self.issues = issues
+        super().__init__("Ambiguous material hash; cite an explicit supplied source_ref or material_id "
+                         "after checking its source; candidates do not establish factual authority. "
+                         + json.dumps({"issues": issues, "omitted": omitted}, ensure_ascii=False))
+
+
 class PrototypeBrowserError(AA2Error):
     """Controller browser failure with the actual completed steps attached."""
 

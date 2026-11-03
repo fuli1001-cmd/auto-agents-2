@@ -565,7 +565,7 @@ class ProviderRouter:
                     raise ProviderError("Unsafe or invalid structured response file") from exc
                 try:
                     validate(json.loads(response), strict_schema(schema))
-                    result = schema.model_validate(remap_references(json.loads(response), prepared.reference_map))
+                    result = schema.model_validate(remap_references(json.loads(response), prepared.reference_map, materials=prepared.payload))
                 except (ValueError, ValidationError) as exc:
                     raise InvalidStructuredResponse("Invalid structured response: schema validation failed") from exc
                 artifact = ArtifactStore(self.store.root).put(result.model_dump(mode="json"), stage)

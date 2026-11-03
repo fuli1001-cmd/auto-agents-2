@@ -11,7 +11,7 @@ from .contract_corrections import (
     validate_contract_references,
     validate_contract_review,
 )
-from .errors import AA2Error, InvalidStructuredResponse
+from .errors import AA2Error, InvalidEvidenceReference, InvalidStructuredResponse
 from .evidence import assess_observation
 from .evidence_refs import controller_context_catalog
 from .execution_stages import current_stage_contract, stage_contract
@@ -691,6 +691,8 @@ class RecoveryController:
             catalog = controller_context_catalog(context)
             return await self.engine._invoke("recovery_diagnosis", {**context,
                 "evidence_reference_contract": catalog.contract(context)}, Diagnosis, work, rid, key, fresh=True), None
+        except InvalidEvidenceReference as exc:
+            return None, str(exc)
         except InvalidStructuredResponse:
             return None, "诊断返回格式不符合 Diagnosis schema；请按请求的完整结构修正。"
 

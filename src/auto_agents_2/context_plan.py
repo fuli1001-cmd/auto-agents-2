@@ -13,7 +13,7 @@ from urllib.parse import urldefrag
 
 from .context import ContextBuilder
 from .diagnostics import references
-from .errors import InvalidStructuredResponse, ProviderError
+from .errors import InvalidEvidenceReference, ProviderError
 from .evidence_refs import controller_context_catalog
 from .research_sections import extract_sections, select_section
 from .util import digest
@@ -669,17 +669,54 @@ class _Selection:
             self.result.payload["evidence_materials"] = list(dependencies.values())
 
 
-def remap_references(result, mapping):
-    """Map presentation aliases to original controller paths before adjudication."""
-    def resolve(value):
+def remap_references(result, mapping, *, materials=None):
+    """Map exact presentation aliases, rejecting ambiguity with bounded diagnostics."""
+    candidates = {}
+    def pointers(value):
+        if isinstance(value, dict):
+            alias, source, artifact = value.get("material_id"), value.get("source_ref"), value.get("artifact")
+            if (isinstance(alias, str) and isinstance(source, str) and len(source) <= 1024
+                    and isinstance(artifact, dict) and isinstance(artifact.get("hash"), str)
+                    and mapping.get(alias) == source and source
+                    and alias == "material-" + digest([source, artifact["hash"]])[:20]):
+                row = {"source_ref": source, "material_id": alias}
+                rows = candidates.setdefault(artifact["hash"], [])
+                if row not in rows and len(rows) < 8:
+                    rows.append(row)
+            for child in value.values():
+                pointers(child)
+        elif isinstance(value, list):
+            for child in value:
+                pointers(child)
+    pointers(materials)
+    issues, count, size = [], 0, 0
+    def resolve(value, path):
+        nonlocal count, size
         target = mapping.get(value, value)
         if value in mapping and not target:
-            raise InvalidStructuredResponse("Ambiguous material hash; cite the supplied source_ref or material_id")
+            count += 1
+            issue = {"field": path[:256], "reason": "ambiguous_material_hash",
+                     "candidates": candidates.get(value, [])}
+            length = len(json.dumps(issue, ensure_ascii=False))
+            if len(issues) < 20 and size + length <= 16000:
+                issues.append(issue)
+                size += length
+            return value  # No partial result is returned on any ambiguity.
         return target
-    if isinstance(result, dict):
-        return {k: ([resolve(v) for v in value] if k == "evidence_refs" and isinstance(value, list) else
-                    resolve(value) if k == "fact_ref" and isinstance(value, str) else remap_references(value, mapping))
-                for k, value in result.items()}
-    if isinstance(result, list):
-        return [remap_references(v, mapping) for v in result]
-    return result
+    def visit(value, path=""):
+        if isinstance(value, dict):
+            result = {}
+            for name, child in value.items():
+                field = f"{path}.{name}" if path else name
+                result[name] = ([resolve(v, f"{field}[{i}]") for i, v in enumerate(child)]
+                    if name == "evidence_refs" and isinstance(child, list) else
+                    resolve(child, field) if name == "fact_ref" and isinstance(child, str) else
+                    visit(child, field))
+            return result
+        if isinstance(value, list):
+            return [visit(v, f"{path}[{i}]") for i, v in enumerate(value)]
+        return value
+    mapped = visit(result)
+    if count:
+        raise InvalidEvidenceReference(issues, omitted=count - len(issues))
+    return mapped
