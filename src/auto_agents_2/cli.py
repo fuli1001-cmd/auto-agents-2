@@ -260,6 +260,22 @@ def resume(project: Project = Path("."), run_id: Annotated[str | None, typer.Opt
         console.print("已保存检查点。")
 
 
+@app.command("reconcile-process-reboot")
+def reconcile_process_reboot(
+    request: Annotated[Path, typer.Option("--request", help="已独立核对的单进程重启恢复请求")],
+    sha256: Annotated[str, typer.Option("--sha256", help="请求原件的 SHA256")],
+    project: Project = Path("."),
+    confirm_local_host_reboot: Annotated[bool, typer.Option("--confirm-local-host-reboot")] = False,
+):
+    """在已确认的本机 WSL 宿主重启后，归档证据并解除一个残留进程记录。"""
+    from .process_reboot import reconcile
+    try:
+        console.print_json(data=reconcile(project, request, sha256,
+                                         confirm_local_host_reboot=confirm_local_host_reboot))
+    except AA2Error as exc:
+        fail(exc)
+
+
 @app.command()
 def status(project: Project = Path("."), run_id: Annotated[str | None, typer.Option("--run")] = None):
     try:

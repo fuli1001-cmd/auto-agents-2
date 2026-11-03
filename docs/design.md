@@ -698,3 +698,53 @@ that initial natural-language extraction was complete, infer semantic equivalenc
 from hashes, add a universal JSON patch language, or extend research/prototype
 author protocols. Independent semantic review, applicable user approval and
 actual execution evidence keep their distinct roles.
+
+
+### Explicit WSL host reboot reconciliation
+
+Legacy v3 process records have no boot identity. A missing PID, filesystem UTC
+or an old start tick greater than current uptime cannot independently establish
+that all descendants ended; time namespace offsets make the latter ambiguous.
+Normal resume therefore retains its existing cleanup gate.
+
+`aa2 reconcile-process-reboot --project PROJECT --request REQUEST --sha256 HASH
+--confirm-local-host-reboot` is a narrowly scoped operator recovery action for a
+confirmed reboot of the same local Windows host. It accepts a reviewed version-1
+request binding one exact process record, its original provider started/spawned
+events, the original controller launcher record, the current Linux boot ID and
+the expected Windows computer/event record ID. It directly queries the fixed
+local Windows PowerShell executable with its own built-in module directory
+(selected only inside that child process), validates the latest Kernel-General
+event 12 XML against the current operating system startup and installed WSL distro,
+and rejects missing, changed, same-startup or ambiguous evidence. Host lineage
+is explicitly confirmed by the operator; copied state from another host is not
+eligible. UTC metadata and old process identities are corroborating checks,
+not independent reboot authorization. No user-supplied event XML is accepted.
+
+Under the controller lock, the command uses directory descriptors and no-link
+file reads. It durably archives the original bytes, exact database event rows,
+Windows XML/hash, reviewed request and Linux identity in
+`.aa2/process-reboot-recovery/`, rechecks the bindings and then consumes only the
+selected process record. This receipt means termination by host reboot, never a
+supervisor `cleaned` acknowledgement. Archive conflicts and failures retain the
+active record; a failure syncing the process directory after unlink explicitly
+reports consumption with uncertain durability and preserves the archived bytes.
+Repeating the exact request can reconcile an already absent record only against
+the same complete proof. Other records and all referenced resources remain under
+their existing owners. The command does not initialize/migrate Store, update the
+run, release provider reservations, reset counts or authorize redispatch; ordinary
+resume must still pass the independent provider and workflow recovery gates.
+
+The request has exactly these fields: `version=1`, absolute `project`, basename
+`record`, `record_sha256`, `run_id`, `attempt_id`, `started_event_seq`,
+`spawned_event_seq`, `events_sha256`, absolute `controller_record`,
+`controller_sha256`, `boot_id`, `windows_computer`, `windows_event_record_id`.
+`events_sha256` is the existing canonical `util.digest` of the two original event
+objects in started/spawned order, each with keys `seq`, `run_id`, `time`, `kind`
+and decoded JSON `data`. File hashes bind the exact bytes. The launcher must be
+an original local `running.json`-style record containing `started_utc`,
+`runner_pid`, `runner_start_ticks`, `controller_pid`, `controller_start_ticks`
+and the exact aa2 resume argv. Unavailable original evidence is not repaired by
+inventing a launcher or rewriting an event. This exceptional entrypoint currently
+requires the standard Windows PowerShell location on `/mnt/c`; other layouts
+remain blocked instead of executing a caller-supplied verifier.
