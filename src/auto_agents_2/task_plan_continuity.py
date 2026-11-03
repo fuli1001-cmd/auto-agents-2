@@ -1,4 +1,4 @@
-"""Preserve scoped task acceptance across ordinary reviewed local plan patches.
+"""Preserve scoped task acceptance across proven reviewed local plan patches.
 
 This is not a verification-cache hit or an execution permit. Original reviews,
 check source/environment identities and cumulative budgets remain immutable.
@@ -64,9 +64,9 @@ def _chain(rows, identity, task, saved, basis):
         if len(matches) != 1:
             return None
         key, journal = matches[0]
-        # Specialized amendments retain their existing reassessment paths.
+        # Recording, timing and source-reaudit amendments retain their own paths.
         if (journal.get("recording") or journal.get("authority_reassessment")
-                or journal["patch"].get("timing_corrections") or journal["patch"].get("contract_corrections")):
+                or journal["patch"].get("timing_corrections")):
             return None
         history = rows.get(f"plan_revision/history/{revision - 1}", {})
         previous = journal["previous_plan"]
@@ -79,6 +79,16 @@ def _chain(rows, identity, task, saved, basis):
         if ({k: v for k, v in previous.items() if k not in {"document", "tasks"}}
                 != {k: v for k, v in current.items() if k not in {"document", "tasks"}}):
             return None
+        if journal["patch"].get("contract_corrections"):
+            # Revalidate the explicit correction in its original plan context.
+            # This proves a historical transition; it never reuses its permit.
+            # Legacy journals without both frozen role inputs remain conservative.
+            if journal.get("version") != 3:
+                return None
+            from .contract_corrections import validate_contract_journal
+            historical = {**rows, "plan": previous,
+                          "plan_revision/current": {"version": 1, "revision": revision - 1}}
+            validate_contract_journal(journal, historical.get)
         old = PlanResult.model_validate(previous)
         patch = PlanPatch.model_validate(journal["patch"])
         candidate, affected, reopen = apply_patch(old, patch, revision - 1, set(patch.failure_ids),
