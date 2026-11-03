@@ -342,7 +342,7 @@ Python 准备在真实 pip install 成功时保存官方 `--report` JSON 和完�
 
 项目声明 Playwright 时，EnvironmentManager 使用该项目锁定的 CLI 安装匹配浏览器，默认 Chromium；`environment.playwright_browsers` 可配置 chromium、firefox、webkit。目标命令使用 `PLAYWRIGHT_BROWSERS_PATH=0`，浏览器位于项目 node_modules 内，安装完成后才保存 Node 就绪记录，浏览器内容也计入依赖完整性和检查输入身份。目标运行环境采用无头模式，不继承 DISPLAY、WAYLAND_DISPLAY、XDG_RUNTIME_DIR 等桌面会话入口，避免 WSLg 干扰渲染帧；不修改宿主会话变量或放宽沙箱权限。VerificationService 仅执行检查，不安装浏览器；静态原型检查继续使用控制器自己的浏览器环境。
 
-ResourceManager 只管理登记的资源。步骤、任务、阶段完成及恢复时触发回收，每六十秒补扫。默认可再生缓存上限十 GiB、闲置期限七天、最低可用磁盘五 GiB。自动与手动 GC 使用同一规则。
+ResourceManager 只管理登记的资源。步骤、任务、阶段完成及恢复时触发回收，每六十秒补扫。默认可再生缓存上限十 GiB、闲置期限七天、最低可用磁盘五 GiB。自动与手动 GC 使用同一规则。 产物标记在原写事务内逐条读取检查点正文，避免将全部历史正文同时留在内存；标记期间不修改检查点或运行状态，引用、保留、退役和删除规则不变。这不改变图遍历成本、写锁持续时间或周期回收的调度方式。
 
 私有 Git exclude 与源码采集对嵌套生成目录采用一致规则，包括 `frontend/node_modules`、构建输出和 Python 缓存。恢复既有工作区时幂等补齐排除规则；已跟踪源码和未知未跟踪文件仍受未归档改动检查保护。新 npm 项目的缺失锁文件由 EnvironmentManager 使用真实 npm 解析生成，不要求模型手写依赖图或完整锁文件。
 

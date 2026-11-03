@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 
 from .diagnostics import LOG_KINDS, references
 from .review_evidence import is_review_consumer
@@ -14,7 +15,6 @@ def collect_artifacts(store):
     with file_lock(store.root / "artifact-gc.lock"):
         with store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            rows = list(db.execute("SELECT c.key,c.data,r.status FROM checkpoints c JOIN runs r ON r.id=c.run_id"))
             states = {r["id"]: r["status"] for r in db.execute("SELECT id,status FROM runs")}
             kinds, owners, edges = {}, {}, {}
             for sha, kind in db.execute("SELECT hash,kind FROM artifact_kinds"):
@@ -95,22 +95,26 @@ def collect_artifacts(store):
                     held.update(owners)
             for sha in held:
                 mark_object(sha, True, True)
-            for row in rows:
-                try:
-                    value = json.loads(row["data"])
-                except ValueError:
-                    if row["key"] == "delivery/receipt":
-                        continue  # Its entire owned dependency closure is quarantined.
-                    raise
-                active = row["status"] not in {"SUCCEEDED", "CANCELLED"}
-                if is_review_consumer(row["key"]):
-                    mark(value, active and value.get("phase") == "pending", True)
-                elif row["key"] == "issues":
-                    for issue in value.values():
-                        mark(issue, issue.get("status") in {"open", "stale"}, True)
-                else:
-                    mark(value, active or row["key"].startswith("recovery/required/"),
-                         row["key"].startswith(("recovery/required/", "candidate/", "recovery/active")))
+            # Keep raw checkpoint bodies bounded to the current row. The same
+            # write transaction protects roots; marking only changes artifact metadata.
+            with closing(db.execute(
+                    "SELECT c.key,c.data,r.status FROM checkpoints c JOIN runs r ON r.id=c.run_id")) as rows:
+                for row in rows:
+                    try:
+                        value = json.loads(row["data"])
+                    except ValueError:
+                        if row["key"] == "delivery/receipt":
+                            continue  # Its entire owned dependency closure is quarantined.
+                        raise
+                    active = row["status"] not in {"SUCCEEDED", "CANCELLED"}
+                    if is_review_consumer(row["key"]):
+                        mark(value, active and value.get("phase") == "pending", True)
+                    elif row["key"] == "issues":
+                        for issue in value.values():
+                            mark(issue, issue.get("status") in {"open", "stale"}, True)
+                    else:
+                        mark(value, active or row["key"].startswith("recovery/required/"),
+                             row["key"].startswith(("recovery/required/", "candidate/", "recovery/active")))
             candidates = []
             for sha, runs in owners.items():
                 if sha in live or len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
