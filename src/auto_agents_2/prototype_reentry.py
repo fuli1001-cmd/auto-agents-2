@@ -22,6 +22,20 @@ class PrototypeReentry:
         return (records.get("prototype/pending", {}).get("document")
                 or records.get("prototype") or records.get("invocation/prototype", {}).get("result"))
 
+    def _transition_approval(self, rid, history):
+        records = history.get("checkpoints", {})
+        if "prototype_approval" in records:
+            return records["prototype_approval"]
+        expected = history.get("pending", {}).get("correction_request", {}).get(
+            "bindings", {}).get("prototype_approval")
+        current = self.store.get(rid, "prototype_approval")
+        if digest(current) == expected or not isinstance(expected, str):
+            return current
+        # Normal publication archives the exact previous receipt. A later
+        # approval must not replace the preimage bound by this completed reset.
+        retained = self.store.get(rid, "candidate/prototype-approval-history/" + expected)
+        return retained if retained is not None and digest(retained) == expected else current
+
     def _transition(self, rid, work, history, generation, feedback):
         pending = history.get("pending", {})
         request = feedback.get("correction_request")
@@ -40,6 +54,8 @@ class PrototypeReentry:
                 return archived[key]
             if key in request.get("invalidate_stages", []):
                 return None
+            if key == "prototype_approval":
+                return self._transition_approval(rid, history)
             return self.store.get(rid, key)
         try:
             validate_correction_request(request, before, action=stage)
@@ -162,7 +178,7 @@ class PrototypeReentry:
         actions = next(((k, h) for k, h in histories if self._document(h).get("browser_actions")), None)
         if actions:
             chosen.append(("recent_actions", *actions, None))
-        approval = self.store.get(rid, "prototype_approval", {})
+        approval = self._transition_approval(rid, latest) or {}
         for k, h in histories:
             document = self._document(h)
             records = h.get("checkpoints", {})

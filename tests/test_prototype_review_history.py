@@ -271,9 +271,12 @@ async def test_format_retry_keeps_exact_review_materials_frozen(tmp_path,monkeyp
     assert workflow.store.get(rid,'proposal-recovery/count/retained')==3
 
 
-async def test_actual_review_sandbox_reads_complete_historical_arrays_and_bound_reviews(tmp_path,monkeypatch):
+@pytest.mark.parametrize('successor_approval', [False, True])
+async def test_actual_review_sandbox_reads_complete_historical_arrays_and_bound_reviews(tmp_path,monkeypatch,successor_approval):
     workflow,rid,_,docs,_,question=await history_fixture(tmp_path/'project',monkeypatch)
     work=workflow.project
+    if successor_approval:
+        publish_successor_approval(workflow, rid, work, docs[0])
     document=docs[0].model_copy(update={'files':[]})
     # This test isolates text-history admission; no image capability probe or
     # product acceptance is claimed. Other entrypoint cases retain browser rows.
@@ -342,3 +345,100 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_toke
         assert row['proposal']['artifact']['hash'] in mounted
         assert workflow.artifacts.json(row['proposal']['artifact'])['document']
     assert workflow.store.question(question['id'])['answer']=='1'
+
+
+def publish_successor_approval(workflow, rid, work, original):
+    """Exercise the normal publication that archives an older exact approval."""
+    from auto_agents_2.interaction import choice_spec
+    from auto_agents_2.models import BrowserAction
+
+    document = original.model_copy(update={"files": [], "browser_actions": [
+        *original.browser_actions,
+        BrowserAction(route="/index.html", action="expect_text", selector="h1", value="New assertion"),
+    ]})
+    raw = document.model_dump(mode="json")
+    workflow.store.checkpoint(rid, "prototype", raw)
+    context = workflow._prototype_review_context(rid, work, review_context(workflow, document, work))
+    review = prototype_verdict(context).model_dump()
+    binding = prototype_identity(work, raw["browser_actions"])
+    question = workflow.store.request(rid, "prototype-approval", "Approve successor content and actions",
+        binding["identity"], choice_spec(["Approve", "Reject"], ["approve", "reject"]))
+    workflow.store.answer(question["id"], "1", binding["identity"])
+    human = workflow.approvals.human(rid, work, raw["browser_actions"])
+    record = workflow.approvals.publish(rid, work, raw["browser_actions"], human, review,
+        context["browser_evidence"], workflow.browser_check_version())
+    return document, record, workflow.store.question(question["id"])
+
+
+@pytest.mark.parametrize("stage", ["prototype", "review"])
+async def test_successor_approval_preserves_bound_history_without_promoting_old_consent(tmp_path, monkeypatch, stage):
+    workflow, rid, _, docs, _, old_question = await history_fixture(tmp_path, monkeypatch)
+    old_approval = workflow.store.get(rid, "prototype_approval")
+    document, accepted, current_question = publish_successor_approval(workflow, rid, tmp_path, docs[0])
+    old_question = workflow.store.question(old_question["id"])
+    history_key = "candidate/prototype-approval-history/" + digest(old_approval)
+    assert workflow.store.get(rid, history_key) == old_approval
+    assert accepted["identity"] != old_approval["identity"]
+    calls = []
+
+    class Agent(ApprovingAgent):
+        async def invoke(self, actual_stage, context, *args, **kwargs):
+            assert actual_stage == stage
+            bridge = context["controller_prototype_reentry"]
+            assert bridge["status"] == "historical_reentry"
+            assert bridge["current_automatic_gates"] == "not_evaluated"
+            roles = {role: row for row in bridge["candidates"] for role in row["roles"]}
+            assert set(roles) == {"previous", "recent_actions", "human_baseline"}
+            for role, index in [("previous", 3), ("recent_actions", 2), ("human_baseline", 0)]:
+                assert workflow.artifacts.json(roles[role]["proposal"]["artifact"]) == docs[index].model_dump(mode="json")
+            assert roles["human_baseline"]["consent"]["question"]["id"] == old_question["id"]
+            assert roles["human_baseline"]["consent"]["approval_hash"] == digest(old_approval)
+            calls.append(context)
+            return document if stage == "prototype" else prototype_verdict(context)
+
+    workflow.agent = Agent()
+    context = {} if stage == "prototype" else review_context(workflow, document, tmp_path)
+    schema = DocumentResult if stage == "prototype" else ReviewResult
+    await workflow._invoke(stage, context, schema, tmp_path, rid, "successor-history-" + stage, fresh=True)
+    assert len(calls) == 1
+    assert workflow.store.get(rid, "prototype_approval") == accepted
+    assert workflow.store.question(old_question["id"]) == old_question
+    assert workflow.store.question(current_question["id"]) == current_question
+    assert workflow.store.run(rid)["data"]["replans"] == 4
+    assert workflow.store.get(rid, "rounds/retained") == {"round": 8}
+    assert workflow.store.get(rid, "proposal-recovery/count/retained") == 3
+
+
+@pytest.mark.parametrize("damage", ["missing", "changed", "wrong_key"])
+async def test_successor_cannot_replace_missing_or_mismatched_transition_approval(tmp_path, monkeypatch, damage):
+    workflow, rid, _, docs, _, _ = await history_fixture(tmp_path, monkeypatch)
+    old = workflow.store.get(rid, "prototype_approval")
+    document, accepted, question = publish_successor_approval(workflow, rid, tmp_path, docs[0])
+    key = "candidate/prototype-approval-history/" + digest(old)
+    if damage == "changed":
+        workflow.store.checkpoint(rid, key, {**old, "review": {"approved": False, "summary": "Unbound body"}})
+    else:
+        with workflow.store.connect() as db:
+            db.execute("DELETE FROM checkpoints WHERE run_id=? AND key=?", (rid, key))
+        if damage == "wrong_key":
+            workflow.store.checkpoint(rid, "candidate/prototype-approval-history/" + "f" * 64, old)
+    context = workflow._prototype_review_context(rid, tmp_path, review_context(workflow, document, tmp_path))
+    assert context["controller_prototype_reentry"]["status"] == "unverified_transition"
+    assert context["controller_prototype_reentry"]["candidates"] == []
+    assert workflow.store.get(rid, "prototype_approval") == accepted
+    assert workflow.store.question(question["id"]) == question
+
+
+async def test_bound_old_approval_does_not_restore_revoked_human_baseline(tmp_path, monkeypatch):
+    workflow, rid, _, docs, _, old_question = await history_fixture(tmp_path, monkeypatch)
+    document, accepted, question = publish_successor_approval(workflow, rid, tmp_path, docs[0])
+    with workflow.store.connect() as db:
+        db.execute("UPDATE questions SET superseded=1 WHERE id=?", (old_question["id"],))
+    context = workflow._prototype_review_context(rid, tmp_path, review_context(workflow, document, tmp_path))
+    bridge = context["controller_prototype_reentry"]
+    assert bridge["status"] == "historical_reentry"
+    assert not any("human_baseline" in row["roles"] for row in bridge["candidates"])
+    assert bridge["current_automatic_gates"] == "not_evaluated"
+    assert workflow.store.get(rid, "prototype_approval") == accepted
+    assert workflow.store.question(question["id"]) == question
+    assert workflow.store.question(old_question["id"])["superseded"] == 1
