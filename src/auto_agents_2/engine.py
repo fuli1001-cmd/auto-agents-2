@@ -176,6 +176,7 @@ class WorkflowEngine:
         from .storage_space import StorageMonitor
         self.storage = StorageMonitor(self.store.root)
         self._storage_status = None
+        self._active_check_batches = 0
         self.environments = EnvironmentManager(self.config, self.sandbox)
         self.toolchain = ToolchainPreflight(self.config, self.sandbox)
         self.verifier = VerificationService(self.store.root, self.sandbox, self.resources)
@@ -769,8 +770,12 @@ class WorkflowEngine:
     async def _run_checks(self, rid, commands, work, environment):
         # The whole verifier batch is one natural boundary; active commands keep
         # their existing timeout, cancellation and evidence-collection contract.
-        await self._storage_boundary(rid, "verification", force=True)
-        return await self.verifier.run(commands, work, environment)
+        self._active_check_batches += 1
+        try:
+            await self._storage_boundary(rid, "verification", force=True)
+            return await self.verifier.run(commands, work, environment)
+        finally:
+            self._active_check_batches -= 1
 
     async def _checks(self, rid, commands, work, environment, task=None, *, phase="final", operation=None):
         identity = self._verification_operation(rid, commands, work, environment, task, phase=phase, operation=operation)
@@ -895,9 +900,10 @@ class WorkflowEngine:
                     # boundary, preserving the existing cancellation/retry contract.
                     await self._storage_observation(rid, force=True)
                     self.resources.collect()
-                    # A full graph scan holds the SQLite writer lock. Leave it
-                    # available to respond while the controller awaits input.
-                    if self.store.run(rid)["status"] != "WAITING_USER":
+                    # A full graph scan holds the SQLite writer lock and the
+                    # event loop needed by active checks' output and deadlines.
+                    # Recheck after the awaited observation; batches can overlap.
+                    if self.store.run(rid)["status"] != "WAITING_USER" and not self._active_check_batches:
                         self.resources.collect_artifacts_safely()
                     elapsed = 0
             except Exception as exc:
