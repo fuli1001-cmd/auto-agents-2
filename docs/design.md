@@ -746,12 +746,34 @@ The request has exactly these fields: `version=1`, absolute `project`, basename
 `events_sha256` is the existing canonical `util.digest` of the two original event
 objects in started/spawned order, each with keys `seq`, `run_id`, `time`, `kind`
 and decoded JSON `data`. File hashes bind the exact bytes. The launcher must be
-an original local `running.json`-style record containing `started_utc`,
-`runner_pid`, `runner_start_ticks`, `controller_pid`, `controller_start_ticks`
-and the exact aa2 resume argv. Unavailable original evidence is not repaired by
-inventing a launcher or rewriting an event. This exceptional entrypoint currently
+an original local `running.json`-style record containing `started_utc`, positive
+integer `runner_pid` and `controller_pid`, and the exact aa2 resume argv. When both
+`runner_start_ticks` and `controller_start_ticks` are present, their original
+identities must no longer be live. A legacy launcher with both tick fields absent
+is eligible only when neither launcher PID is live, including a reused PID; a
+missing or zombie process passes this corroborating check, while an unreadable
+identity blocks it. Partially present or malformed tick evidence is rejected.
+The same directly observed host reboot, original pre-reboot bytes and timestamps,
+provider event bindings, lock, durable archive and final rechecks are required for
+both shapes. Request and receipt version 1 remain unchanged, preserving exact
+replay of existing archives. Unavailable original evidence is not repaired by
+inventing ticks, inventing a launcher or rewriting an event. This exceptional entrypoint currently
 requires the standard Windows PowerShell location on `/mnt/c`; other layouts
 remain blocked instead of executing a caller-supplied verifier.
+
+Recovery supports bounded process records up to 1 MiB and receipts up to 4 MiB;
+requests, original launcher files, Windows query output and each original provider
+event JSON payload remain limited to 256 KiB. Within one read-only transaction,
+event fetches are bounded by storage bytes (256 KiB for SQLite UTF-8, 512 KiB for
+UTF-16), then the decoded UTF-8 byte length is checked before JSON parsing. These
+are independent recovery limits: the producer preserves all readable leaf paths
+and has no equivalent record cap. Base64 and JSON escaping can enlarge the
+archive, so the final encoded receipt is checked before publication; individually
+admissible inputs are not a promise that every combination fits the receipt limit.
+All initial, persistence, replay and final reads use the corresponding bound,
+including the decoded archived record on an already-absent replay. Oversized or
+changed evidence retains the process record and never creates an oversized
+unreadable receipt. Existing version-1 receipt bytes are not migrated or rewritten.
 
 
 ### Native discovery cache lifecycle and actual host storage

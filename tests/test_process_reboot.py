@@ -36,8 +36,9 @@ def boot_observation(boot):
     }
 
 
-@pytest.fixture
-def scene(tmp_path, monkeypatch):
+@pytest.fixture(params=["ticks", "legacy"])
+def scene(tmp_path, monkeypatch, request):
+    launcher_shape = request.param
     project = tmp_path / 'project'
     state = project / '.aa2'
     processes = state / 'processes'
@@ -54,11 +55,14 @@ def scene(tmp_path, monkeypatch):
     original = record.read_bytes()
     boot = time.time() + 60  # Synthetic host proof; fixture files predate it.
     controller = tmp_path / 'running.json'
-    controller.write_text(json.dumps({
-        'started_utc': utc(boot - 1000), 'runner_pid': 12343, 'runner_start_ticks': 800000,
-        'controller_pid': 12344, 'controller_start_ticks': 800001,
+    launcher = {
+        'started_utc': utc(boot - 1000), 'runner_pid': 12343,
+        'controller_pid': 12344,
         'argv': ['/fixture/python', '-B', '-m', 'auto_agents_2', 'resume', '--project', str(project), '--run', rid],
-    }))
+    }
+    if launcher_shape == 'ticks':
+        launcher.update(runner_start_ticks=800000, controller_start_ticks=800001)
+    controller.write_text(json.dumps(launcher))
     events = [
         {'seq': 10, 'run_id': rid, 'time': boot - 100, 'kind': 'agent.started',
          'data': {'attempt': aid, 'stage': 'decision', 'operation': 'decisions/fixture/1'}},
@@ -445,3 +449,285 @@ def test_atomic_receipt_publication_can_resume_after_directory_sync_interruption
     assert scene.record.read_bytes() == scene.original
     apply(scene)
     assert receipt.read_bytes() == before and not scene.record.exists()
+
+
+
+def revise_launcher(scene, change):
+    launcher = json.loads(scene.controller.read_text())
+    change(launcher)
+    scene.controller.write_text(json.dumps(launcher))
+    scene.request['controller_sha256'] = digest(scene.controller.read_bytes())
+    scene.expected = scene.save_request()
+
+
+@pytest.mark.parametrize('name', ['runner', 'controller'])
+@pytest.mark.parametrize('pid', [None, True, False, 0, -1, '12343', 12343.0])
+def test_invalid_launcher_pid_never_uses_legacy_fallback(scene, name, pid):
+    revise_launcher(scene, lambda launcher: launcher.update({name + '_pid': pid}))
+    with pytest.raises(PolicyViolation):
+        apply(scene)
+    assert scene.record.read_bytes() == scene.original
+
+
+@pytest.mark.parametrize('name', ['runner', 'controller'])
+@pytest.mark.parametrize('damage', ['missing', None, False, '', 'invalid', 1.5, [], {}])
+def test_partial_or_malformed_ticks_never_use_legacy_fallback(scene, name, damage):
+    def corrupt(launcher):
+        launcher.update(runner_start_ticks=800000, controller_start_ticks=800001)
+        if damage == 'missing':
+            del launcher[name + '_start_ticks']
+        else:
+            launcher[name + '_start_ticks'] = damage
+    revise_launcher(scene, corrupt)
+    with pytest.raises(PolicyViolation):
+        apply(scene)
+    assert scene.record.read_bytes() == scene.original
+
+
+@pytest.mark.parametrize('pid', [12343, 12344])
+def test_reused_launcher_pid_requires_original_ticks(scene, monkeypatch, pid):
+    monkeypatch.setattr(recovery, 'process_start', lambda current: '999999' if current == pid else '')
+    if scene.launcher_shape == 'legacy':
+        with pytest.raises(PolicyViolation, match='still live'):
+            apply(scene)
+        assert scene.record.read_bytes() == scene.original
+    else:
+        assert apply(scene)['already_absent'] is False
+
+
+@pytest.mark.parametrize('pid', [12343, 12344])
+def test_unreadable_launcher_identity_retains_record(scene, monkeypatch, pid):
+    def inspect(current):
+        if current == pid:
+            raise PolicyViolation('Process identity cannot be inspected; preserving recovery state')
+        return ''
+    monkeypatch.setattr(recovery, 'process_start', inspect)
+    with pytest.raises(PolicyViolation, match='cannot be inspected'):
+        apply(scene)
+    assert scene.record.read_bytes() == scene.original
+
+
+@pytest.mark.parametrize('pid,start', [(12343, '800000'), (12344, '800001')])
+def test_launcher_becoming_live_after_archive_retains_record(scene, monkeypatch, pid, start):
+    save = recovery.save_receipt
+    def published(*args):
+        save(*args)
+        monkeypatch.setattr(recovery, 'process_start', lambda current: start if current == pid else '')
+    monkeypatch.setattr(recovery, 'save_receipt', published)
+    with pytest.raises(PolicyViolation, match='still live'):
+        apply(scene)
+    assert scene.record.read_bytes() == scene.original
+    receipt = json.loads(next((scene.state / 'process-reboot-recovery').glob('*.json')).read_text())
+    assert base64.b64decode(receipt['record_bytes']) == scene.original
+    assert base64.b64decode(receipt['controller_bytes']) == scene.controller.read_bytes()
+
+
+def test_preexisting_version_one_receipt_replays_without_schema_migration(scene):
+    # Independently encode the existing v1 format, rather than using a receipt
+    # just emitted by the implementation under test as its compatibility oracle.
+    with closing(sqlite3.connect(scene.database)) as db:
+        db.row_factory = sqlite3.Row
+        original_events = [dict(row) for row in db.execute(
+            'SELECT seq,run_id,time,kind,data FROM events ORDER BY seq')]
+    def metadata(path):
+        info = path.stat()
+        return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+    def encoded(raw):
+        return base64.b64encode(raw).decode('ascii')
+    receipt = {
+        'version': 1, 'kind': 'verified_wsl_host_reboot',
+        'request_sha256': scene.expected, 'request_bytes': encoded(scene.request_path.read_bytes()),
+        'record_sha256': digest(scene.original), 'record_bytes': encoded(scene.original),
+        'record_metadata': metadata(scene.record),
+        'controller_sha256': digest(scene.controller.read_bytes()),
+        'controller_bytes': encoded(scene.controller.read_bytes()),
+        'controller_metadata': metadata(scene.controller),
+        'events': original_events, 'kernel': scene.kernel, 'windows': scene.observed,
+        'windows_xml_sha256': digest(scene.observed['event_xml']),
+        'termination_basis': 'Operator-confirmed local host reboot, independently observed from Windows',
+    }
+    archive = scene.state / 'process-reboot-recovery'
+    archive.mkdir()
+    archived = archive / (scene.expected + '.json')
+    prior = (json.dumps(receipt, ensure_ascii=True, indent=2) + '\n').encode()
+    archived.write_bytes(prior)
+    scene.record.unlink()
+    assert apply(scene)['already_absent'] is True
+    assert archived.read_bytes() == prior
+
+
+
+def large_leaf_record(scene):
+    document = json.loads(scene.original)
+    leaf = str(scene.attempt / 'artifacts' / ('a' * 64))
+    base = json.dumps(document).encode()
+    count = (812319 - len(base)) // (len(leaf) + 11) + 1
+    document['paths'].extend(f'{leaf}-{index:06d}' for index in range(count))
+    raw = json.dumps(document).encode()
+    assert 812319 <= len(raw) <= recovery.PROCESS_RECORD_LIMIT
+    scene.record.write_bytes(raw)
+    scene.original = raw
+    scene.request['record_sha256'] = digest(raw)
+    scene.expected = scene.save_request()
+    return raw
+
+
+def test_realistic_large_leaf_pin_record_archives_rechecks_and_replays(scene):
+    raw = large_leaf_record(scene)
+    before_database = scene.database.read_bytes()
+    result = apply(scene)
+    receipt = Path(result['receipt'])
+    archived = receipt.read_bytes()
+    assert recovery.LIMIT < len(archived) <= recovery.RECEIPT_LIMIT
+    assert base64.b64decode(json.loads(archived)['record_bytes']) == raw
+    assert not scene.record.exists()
+    assert apply(scene)['already_absent'] is True
+    assert receipt.read_bytes() == archived
+    assert scene.database.read_bytes() == before_database
+
+
+def test_large_record_drift_at_final_identity_check_is_retained(scene, monkeypatch):
+    raw = large_leaf_record(scene)
+    calls = 0
+    def inspect(pid):
+        nonlocal calls
+        calls += 1
+        if calls == 6:
+            scene.record.write_bytes(raw + b' ')
+        return ''
+    monkeypatch.setattr(recovery, 'process_start', inspect)
+    with pytest.raises(PolicyViolation, match='record changed'):
+        apply(scene)
+    assert scene.record.read_bytes() == raw + b' '
+
+
+@pytest.mark.parametrize('limit', [recovery.LIMIT, recovery.PROCESS_RECORD_LIMIT, recovery.RECEIPT_LIMIT])
+def test_evidence_bounds_accept_exact_size_and_reject_one_more(tmp_path, limit):
+    path = tmp_path / 'evidence'
+    path.write_bytes(b'x' * limit)
+    with recovery.directory(tmp_path) as folder:
+        assert recovery.owned_file(folder, path.name, limit=limit)[0] == b'x' * limit
+        with path.open('ab') as stream:
+            stream.write(b'x')
+        with pytest.raises(PolicyViolation, match='bounded'):
+            recovery.owned_file(folder, path.name, limit=limit)
+
+
+@pytest.mark.parametrize('limit', [recovery.LIMIT, recovery.PROCESS_RECORD_LIMIT, recovery.RECEIPT_LIMIT])
+def test_growing_evidence_during_bounded_read_is_rejected(tmp_path, monkeypatch, limit):
+    path = tmp_path / 'evidence'
+    path.write_bytes(b'x' * limit)
+    identity = path.stat().st_ino
+    original = recovery.os.fstat
+    changed = False
+    def inspect(fd):
+        nonlocal changed
+        info = original(fd)
+        if info.st_ino == identity and not changed:
+            changed = True
+            with path.open('ab') as stream:
+                stream.write(b'x')
+        return info
+    with recovery.directory(tmp_path) as folder:
+        monkeypatch.setattr(recovery.os, 'fstat', inspect)
+        with pytest.raises(PolicyViolation, match='changed'):
+            recovery.owned_file(folder, path.name, limit=limit)
+
+
+@pytest.mark.parametrize('damage', ['hardlink', 'symlink', 'owner'])
+def test_large_record_limit_does_not_relax_file_ownership(tmp_path, monkeypatch, damage):
+    path = tmp_path / 'evidence'
+    path.write_bytes(b'x' * (recovery.LIMIT + 1))
+    if damage == 'hardlink':
+        os.link(path, tmp_path / 'other-link')
+    elif damage == 'symlink':
+        original = tmp_path / 'original'
+        path.rename(original)
+        path.symlink_to(original)
+    else:
+        original = recovery.os.fstat
+        identity = path.stat().st_ino
+        def other_owner(fd):
+            info = original(fd)
+            if info.st_ino == identity:
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=os.getuid() + 1,
+                                       st_nlink=info.st_nlink, st_size=info.st_size)
+            return info
+        monkeypatch.setattr(recovery.os, 'fstat', other_owner)
+    with recovery.directory(tmp_path) as folder:
+        with pytest.raises((OSError, PolicyViolation)):
+            recovery.owned_file(folder, path.name, limit=recovery.PROCESS_RECORD_LIMIT)
+    assert (tmp_path / 'original' if damage == 'symlink' else path).read_bytes() == b'x' * (recovery.LIMIT + 1)
+
+
+def test_base64_amplification_is_rejected_before_receipt_publication(scene, monkeypatch):
+    raw = large_leaf_record(scene)
+    # An individually admissible input must not publish an unreadable envelope.
+    envelope = len(raw) + 100
+    assert envelope < len(base64.b64encode(raw))
+    monkeypatch.setattr(recovery, 'RECEIPT_LIMIT', envelope)
+    monkeypatch.setattr(recovery, 'save_receipt', lambda *args: pytest.fail('oversized receipt must not be published'))
+    with pytest.raises(PolicyViolation, match='archive exceeds'):
+        apply(scene)
+    assert scene.record.read_bytes() == raw
+    assert not list((scene.state / 'process-reboot-recovery').iterdir())
+
+
+def test_absent_record_replay_enforces_decoded_record_bound(scene):
+    archive = scene.state / 'process-reboot-recovery'
+    archive.mkdir()
+    path = archive / (scene.expected + '.json')
+    value = {'record_bytes': base64.b64encode(b'x' * (recovery.PROCESS_RECORD_LIMIT + 1)).decode(),
+             'record_metadata': recovery.signature(scene.record.stat())}
+    path.write_text(json.dumps(value))
+    before = path.read_bytes()
+    assert len(before) < recovery.RECEIPT_LIMIT
+    scene.record.unlink()
+    with pytest.raises(PolicyViolation, match='record size bound'):
+        apply(scene)
+    assert path.read_bytes() == before and not scene.record.exists()
+
+
+def test_provider_event_limit_counts_utf8_bytes_before_materialization(scene):
+    row = scene.events[0]
+    row['data']['padding'] = '\u00e9' * (recovery.LIMIT // 2)
+    raw = json.dumps(row['data'], ensure_ascii=False)
+    assert len(raw) < recovery.LIMIT < len(raw.encode())
+    with closing(sqlite3.connect(scene.database)) as db, db:
+        db.execute('UPDATE events SET data=? WHERE seq=10', (raw,))
+    scene.request['events_sha256'] = digest(scene.events)
+    scene.expected = scene.save_request()
+    with pytest.raises(PolicyViolation, match='provider event exceeds'):
+        apply(scene)
+    assert scene.record.read_bytes() == scene.original
+
+
+
+@pytest.mark.parametrize('encoding', ['UTF-16le', 'UTF-16be'])
+@pytest.mark.parametrize('oversized', [False, True])
+def test_original_event_utf8_bound_survives_sqlite_text_encodings(scene, encoding, oversized):
+    with closing(sqlite3.connect(scene.database)) as db:
+        script = '\n'.join(db.iterdump())
+    scene.database.unlink()
+    row = scene.events[0]
+    row['data']['padding'] = '\u6c49' * (recovery.LIMIT // 2) if oversized else 'x' * (200 * 1024)
+    raw = json.dumps(row['data'], ensure_ascii=False)
+    with closing(sqlite3.connect(scene.database)) as db, db:
+        db.execute(f"PRAGMA encoding='{encoding}'")
+        db.executescript(script)
+        db.execute('UPDATE events SET data=? WHERE seq=10', (raw,))
+        stored = db.execute('SELECT length(CAST(data AS BLOB)) FROM events WHERE seq=10').fetchone()[0]
+        assert recovery.LIMIT < stored <= 2 * recovery.LIMIT
+    scene.request['events_sha256'] = digest(scene.events)
+    scene.expected = scene.save_request()
+    if oversized:
+        assert len(raw.encode()) > recovery.LIMIT
+        with pytest.raises(PolicyViolation, match='provider event exceeds'):
+            apply(scene)
+        assert scene.record.read_bytes() == scene.original
+    else:
+        assert len(raw.encode()) < recovery.LIMIT
+        result = apply(scene)
+        archived = Path(result['receipt']).read_bytes()
+        assert apply(scene)['already_absent'] is True
+        assert Path(result['receipt']).read_bytes() == archived

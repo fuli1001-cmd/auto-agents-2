@@ -27,6 +27,8 @@ from .sandbox import process_start
 from .util import digest
 
 LIMIT = 256 * 1024
+PROCESS_RECORD_LIMIT = 1024 * 1024
+RECEIPT_LIMIT = 4 * 1024 * 1024
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 POWERSHELL = '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
 EVENT_NS = '{http://schemas.microsoft.com/win/2004/08/events/event}'
@@ -77,17 +79,17 @@ def directory(path):
         os.close(fd)
 
 
-def owned_file(folder, name, *, sync=False):
+def owned_file(folder, name, *, sync=False, limit=LIMIT):
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
     with os.fdopen(fd, 'rb') as stream:
         before = os.fstat(stream.fileno())
         if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
-                or before.st_nlink != 1 or before.st_size > LIMIT):
+                or before.st_nlink != 1 or before.st_size > limit):
             reject('evidence must be a bounded, owned, single-link regular file')
-        raw = stream.read(LIMIT + 1)
+        raw = stream.read(limit + 1)
         if sync:
             os.fsync(stream.fileno())
-        if len(raw) > LIMIT or signature(before) != signature(os.fstat(stream.fileno())):
+        if len(raw) > limit or signature(before) != signature(os.fstat(stream.fileno())):
             reject('evidence changed while being read')
     return raw, signature(before)
 
@@ -228,8 +230,21 @@ def events(state_fd, request):
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA query_only=ON')
         db.execute('BEGIN')
-        rows = [db.execute('SELECT seq,run_id,time,kind,data FROM events WHERE seq=?', (seq,)).fetchone()
-                for seq in (request['started_event_seq'], request['spawned_event_seq'])]
+        encoding = db.execute('PRAGMA encoding').fetchone()[0]
+        if encoding not in {'UTF-8', 'UTF-16le', 'UTF-16be'}:
+            reject('unsupported state database text encoding')
+        # SQLite BLOB length uses the database encoding. Bound the fetch even
+        # for UTF-16, then enforce the UTF-8 JSON limit before parsing it.
+        storage_limit = LIMIT if encoding == 'UTF-8' else 2 * LIMIT
+        rows = []
+        for seq in (request['started_event_seq'], request['spawned_event_seq']):
+            size = db.execute('SELECT length(CAST(data AS BLOB)) FROM events WHERE seq=?', (seq,)).fetchone()
+            if size is not None and (type(size[0]) is not int or not 0 <= size[0] <= storage_limit):
+                reject('original provider event exceeds its evidence size bound')
+            row = db.execute('SELECT seq,run_id,time,kind,data FROM events WHERE seq=?', (seq,)).fetchone()
+            if row is not None and (not isinstance(row['data'], str) or len(row['data'].encode('utf-8')) > LIMIT):
+                reject('original provider event exceeds its evidence size bound')
+            rows.append(row)
         after = database_identities()
         if any(after.get(name) != identity for name, identity in before.items()):
             reject('database files changed while reading provider evidence')
@@ -250,6 +265,8 @@ def events(state_fd, request):
 
 
 def validate_record(raw, metadata, request, project, parsed, controller_raw, controller_metadata, boot):
+    if len(raw) > PROCESS_RECORD_LIMIT:
+        reject('process evidence exceeds its record size bound')
     if digest(raw) != request['record_sha256'] or digest(controller_raw) != request['controller_sha256']:
         reject('reviewed process/controller bytes changed')
     record = object_json(raw)
@@ -281,12 +298,25 @@ def validate_record(raw, metadata, request, project, parsed, controller_raw, con
     if any(value / 1_000_000_000 >= boot for value in [*metadata[-2:], *controller_metadata[-2:]]):
         reject('process/controller evidence was changed after the verified reboot')
     identities = [{'pid': record['pid'], 'start': record['start']}]
+    tick_fields = {'runner_start_ticks', 'controller_start_ticks'}
+    present_ticks = tick_fields.intersection(controller)
+    if present_ticks and present_ticks != tick_fields:
+        reject('prior launcher start tick evidence is incomplete')
     for name in ('runner', 'controller'):
-        identity = {'pid': controller.get(name + '_pid'), 'start': str(controller.get(name + '_start_ticks', ''))}
-        require_identity(identity)
+        pid = controller.get(name + '_pid')
+        if not present_ticks:
+            # Original launchers recorded PIDs only. Host reboot remains the
+            # authority; without a start tick even a reused live PID blocks.
+            if type(pid) is not int or pid <= 0:
+                reject('prior launcher PID is invalid')
+            identity = {'pid': pid, 'start': None}
+        else:
+            identity = {'pid': pid, 'start': str(controller[name + '_start_ticks'])}
+            require_identity(identity)
         identities.append(identity)
     for identity in identities:
-        if process_start(identity['pid']) == identity['start']:
+        current = process_start(identity['pid'])
+        if current and (identity['start'] is None or current == identity['start']):
             reject('a recorded process identity is still live')
     return record
 
@@ -361,12 +391,12 @@ def reconcile(project, request_path, expected_hash, *, confirm_local_host_reboot
             receipt_name = expected_hash + '.json'
             receipt_path = state / archive_name / receipt_name
             try:
-                previous_raw, _ = owned_file(archive_fd, receipt_name)
+                previous_raw, _ = owned_file(archive_fd, receipt_name, limit=RECEIPT_LIMIT)
                 previous = object_json(previous_raw)
             except FileNotFoundError:
                 previous = None
             try:
-                raw, metadata = owned_file(processes_fd, request['record'])
+                raw, metadata = owned_file(processes_fd, request['record'], limit=PROCESS_RECORD_LIMIT)
                 absent = False
             except FileNotFoundError:
                 if previous is None:
@@ -388,6 +418,8 @@ def reconcile(project, request_path, expected_hash, *, confirm_local_host_reboot
                 'termination_basis': 'Operator-confirmed local host reboot, independently observed from Windows',
             }
             receipt_raw = (json.dumps(receipt, ensure_ascii=True, indent=2) + '\n').encode()
+            if len(receipt_raw) > RECEIPT_LIMIT:
+                reject('reboot archive exceeds its evidence size bound')
             if previous is not None:
                 if previous_raw != receipt_raw:
                     reject('existing reboot archive conflicts; preserve both the record and evidence')
@@ -395,7 +427,7 @@ def reconcile(project, request_path, expected_hash, *, confirm_local_host_reboot
                 save_receipt(archive_fd, receipt_name, receipt_raw)
             # A retry may encounter a complete receipt whose prior directory
             # fsync failed. Re-establish durability even for an exact replay.
-            persisted, receipt_metadata = owned_file(archive_fd, receipt_name, sync=True)
+            persisted, receipt_metadata = owned_file(archive_fd, receipt_name, sync=True, limit=RECEIPT_LIMIT)
             if persisted != receipt_raw:
                 reject('reboot receipt changed during persistence')
             os.fsync(archive_fd)
@@ -414,7 +446,7 @@ def reconcile(project, request_path, expected_hash, *, confirm_local_host_reboot
                 reject('current Linux boot changed before consumption')
             current_archive = os.stat(archive_name, dir_fd=state_fd, follow_symlinks=False)
             if ((current_archive.st_dev, current_archive.st_ino) != (os.fstat(archive_fd).st_dev, os.fstat(archive_fd).st_ino)
-                    or owned_file(archive_fd, receipt_name) != (receipt_raw, receipt_metadata)):
+                    or owned_file(archive_fd, receipt_name, limit=RECEIPT_LIMIT) != (receipt_raw, receipt_metadata)):
                 reject('reboot archive changed before record consumption')
             current_lock = os.stat('controller.lock', dir_fd=state_fd, follow_symlinks=False)
             if (current_lock.st_dev, current_lock.st_ino) != (info.st_dev, info.st_ino):
@@ -428,7 +460,7 @@ def reconcile(project, request_path, expected_hash, *, confirm_local_host_reboot
                 except FileNotFoundError:
                     return {'receipt': str(receipt_path), 'record': request['record'], 'already_absent': True}
                 reject('process record reappeared during reconciliation')
-            if owned_file(processes_fd, request['record']) != (raw, metadata):
+            if owned_file(processes_fd, request['record'], limit=PROCESS_RECORD_LIMIT) != (raw, metadata):
                 reject('process record changed before consumption')
             os.unlink(request['record'], dir_fd=processes_fd)
             consumed = True
