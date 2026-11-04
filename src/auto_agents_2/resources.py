@@ -209,6 +209,12 @@ class ResourceManager:
     def collect(self, dry_run: bool = False) -> dict:
         result = {"removed": 0, "bytes": 0, "candidates": [], "errors": []}
         with file_lock(self.store.root / "gc.lock"):
+            from .native_cache import collect as collect_native_cache
+            native = collect_native_cache(self, dry_run=dry_run)
+            result["session_cache"] = native
+            result["bytes"] += native["bytes"]
+            result["candidates"].extend(native["candidates"])
+            result["errors"].extend("Native session cache retained: " + row["error_type"] for row in native["errors"])
             with self.store.connect() as db:
                 if not dry_run:
                     db.execute("""UPDATE resources SET refs=0 WHERE run_id IN
@@ -296,7 +302,7 @@ class ResourceManager:
                     cache_size -= size if row["kind"] in {"cache", "environment"} else 0
                 except (OSError, AA2Error, sqlite3.Error) as exc:
                     result["errors"].append(str(exc))
-        if not dry_run and (result["removed"] or result["errors"]):
+        if not dry_run and (result["removed"] or result["bytes"] or result["errors"]):
             from .progress import safe_event
             safe_event(self.store, None, "resources.collected", result)
         return result

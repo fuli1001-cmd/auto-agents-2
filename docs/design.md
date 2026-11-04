@@ -748,3 +748,73 @@ and the exact aa2 resume argv. Unavailable original evidence is not repaired by
 inventing a launcher or rewriting an event. This exceptional entrypoint currently
 requires the standard Windows PowerShell location on `/mnt/c`; other layouts
 remain blocked instead of executing a caller-supplied verifier.
+
+
+### Native discovery cache lifecycle and actual host storage
+
+New provider calls may seal only the built-in Codex 0.163.0 discovery cache
+layout after the existing bounded version probe observes that exact version and
+records the executable digest. The applicable provider sources are
+[remote catalogue persistence](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/core-plugins/src/remote/catalog_cache.rs),
+[catalogue refresh](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/core-plugins/src/remote.rs),
+and [connector cold-start persistence](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/connectors/src/connector_runtime/persistence.rs).
+They treat missing discovery snapshots as a cache miss and rebuild them through
+normal discovery. This contract covers only flat, owned ordinary JSON files in
+cache/remote_plugin_catalog (16 lowercase hex names), cache/codex_apps_tools and
+cache/codex_apps_server_info (40 lowercase hex names). It does not cover sessions,
+authentication, configuration, history, audit or approval data.
+
+The existing session resource remains referenced. An explicit per-attempt active
+lease replaces its prior seal under gc.lock before mirror refresh or dispatch.
+Only a durable response plus successful workload exit, confirmed process-tree
+cleanup and supervisor join can produce a seal. Collection then verifies the
+exact response, invocation/input/cleanup-record, native-session and non-pending
+infra checkpoints, together with existing resource holds, process records and
+delivery pins. Missing or inconsistent consumer evidence preserves the cache.
+Engine completion preserves a versioned provider receipt alongside its own
+input identity; both current result and original transport completion remain
+bound. Unknown receipt versions preserve the cache rather than falling back.
+This uses finite exact checkpoint keys; material probes without the normal infra
+completion record remain retained. Legacy resources with no seal, unknown
+versions, failed/unjoined attempts and unknown layouts are not adopted retroactively.
+
+Inventory is bounded to 256 files and 256 MiB per class, 64 MiB per remote
+catalogue file or 32 MiB per connector file, and 256 KiB per manifest. No native
+cache body is read. All lifecycle operations take gc.lock before a DB transaction.
+A committed deletion intent precedes descriptor-relative unlink; file and
+directory identities are rechecked, links are refused, and a partial failure can
+replay only unchanged remaining entries from that same manifest. Audit events
+retain the attempt, version, manifest identity and observed removal counts.
+Parent reference exemption applies only to these proven leaves; the native
+session and every other consumer retain their existing protections. This
+controls eligible new growth, not historical session or shared dependency cache
+cleanup, and does not promise host VHD compaction.
+
+Production storage observation measures the project filesystem and, on WSL2,
+the actual registered distribution VHD's Windows volume. The local system
+PowerShell must be on a verified Windows drive mount; the fixed read-only query
+uses its own system modules, rejects ambiguous/reparse backing paths and resolves
+the VHD with [Get-Volume -FilePath](https://learn.microsoft.com/en-us/powershell/module/storage/get-volume).
+The volume is discovered rather than assuming a drive letter. Native non-WSL
+hosts use their project filesystem. An unverifiable WSL host is a resource
+prerequisite, not a healthy guest-only result.
+
+The existing minimum (5 GiB by default) applies to each applicable volume.
+A bounded worker probe runs outside GC/DB locks and off the event loop; cancellation
+joins it. Observations during an active call display a bounded notice with verified volume
+labels, free space and the floor, without registry paths or native diagnostics;
+they do not interrupt the call.
+Startup and natural provider/environment/verification/generation boundaries
+recheck space before new work and use the existing resource prerequisite flow.
+The verification boundary is the existing whole-batch entry, including legacy
+and recovery entries. Individual commands inside that batch retain their existing
+timeout/cancellation/recovery semantics. A provider retry after a user wait
+performs a new observation before dispatch.
+After permitted ordinary collection, another real observation is required;
+a user answer cannot substitute for sufficient verified space. The floor is
+neither a disk quota nor a reservation for a currently running command. Model
+permissions, retry counts, approval evidence, shared-cache policy and the existing
+artifact-GC transaction/scheduling contract are unchanged. Existing whole-session
+cleanup after a terminal run remains governed by its original policy; this
+feature neither extends that deletion authority nor introduces permanent
+retention of all terminal native session bodies.

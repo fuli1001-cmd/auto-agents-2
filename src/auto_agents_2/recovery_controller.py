@@ -362,7 +362,7 @@ class RecoveryController:
             if (set(matching) != {row.command_hash for row in rows} or len(rows) != len(matching)
                     or any(row.command_hash not in matching or not assess_observation(
                         matching[row.command_hash], row, work, environment, engine.artifacts).valid for row in rows)):
-                rows = await engine.verifier.run(commands, work, environment)
+                rows = await engine._run_checks(rid, commands, work, environment)
             engine._replan_checks(rid, "task/" + failure.origin_id, commands, rows, work, environment)
             failure.evidence["checks"] = [c.model_dump() for c in rows]
             active.update(failure=failure.model_dump(), evidence_reconciled=True, evidence_source_hash=source)
@@ -996,7 +996,7 @@ class RecoveryController:
                 assessment = IntakeResult.model_validate(self.store.get(rid, "clarify"))
                 checks = assessment.verification or engine.config.load().verification
                 environment = await engine._environment(work, rid, plan)
-                evidence = await engine.verifier.run(checks, work, environment) if checks else []
+                evidence = await engine._run_checks(rid, checks, work, environment) if checks else []
                 engine._replan_checks(rid, "coverage", checks, evidence, work, environment)
                 satisfied, _ = validate_coverage(assessment, work)
                 coverage_verified = satisfied and bool(evidence) and passed(evidence)

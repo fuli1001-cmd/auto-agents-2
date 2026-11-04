@@ -458,7 +458,10 @@ class ProviderRouter:
             argv = transport.argv(eff, workspace, schema_file, out / "result.json", delivery.text, previous,
                                   assets, context_files)
             env = dict(eff["environment"])
-            overlays = self._session_overlay(eff, run_id, operation + VIEW_VERSION + PROMPT_VERSION + CONTEXT_VERSION + eff["fingerprint"] + digest(self.config.load().sensitive_paths))
+            cache_invocation = {"attempt": aid, "operation": operation, "provider": eff["provider"],
+                                "session_key": session_key, "input_identity": input_identity}
+            overlays = self._session_overlay(eff, run_id, operation + VIEW_VERSION + PROMPT_VERSION + CONTEXT_VERSION + eff["fingerprint"] + digest(self.config.load().sensitive_paths),
+                                             cache_invocation=cache_invocation)
             secret_values = [v for k, v in env.items() if any(s in k.upper() for s in ("TOKEN", "SECRET", "API_KEY", "PASSWORD"))]
             self.store.event(run_id, "agent.started", {"attempt": aid, "operation": operation, "stage": stage,
                              "provider": eff["provider"], "level": eff["level"], "model": eff["model"],
@@ -594,6 +597,9 @@ class ProviderRouter:
                     lambda: self.store.event(run_id, "agent.finished", {"attempt": aid, "complete": decoder.finished,
                         "outcome": outcome, "last_output": last_output,
                         "diagnostic": diagnostic_summary(decoder.error or getattr(decoder, "stream_error", "") or "".join(errors)) if outcome == "error" else ""}))
+                if outcome == "success" and process is not None and cache_invocation.get("handle"):
+                    from .native_cache import seal
+                    seal(resource_manager, cache_invocation["handle"], process)
                 if (cancellation is not None and process.cleanup_confirmed
                         and not getattr(cancellation, "__notes__", ())
                         and not decoder.finished and not decoder.error and not getattr(decoder, "stream_error", "")
@@ -656,7 +662,10 @@ class ProviderRouter:
             raise ProviderError("Provider capability probe timed out", retryable=True) from exc
         finally:
             await self.sandbox.stop(process)
-        identity = digest([eff["fingerprint"], file_digest(Path(eff["binary"])), digest(version),
+        binary_hash = file_digest(Path(eff["binary"]))
+        from .native_cache import observed_layout
+        eff["native_cache_layout"] = observed_layout(self.transports[eff["kind"]], version, binary_hash)
+        identity = digest([eff["fingerprint"], binary_hash, digest(version),
                            VIEW_VERSION, PROMPT_VERSION, self.config.load().sensitive_paths, image_read])
         key = "material-capability/" + identity
         if self.store.get(run_id, key, {}).get("status") == "observed_read":
@@ -670,15 +679,22 @@ class ProviderRouter:
             self.store.checkpoint(run_id, key, {**proof, "capability": identity,
                                               "scope": "text and PNG read; not task correctness" if image_read else "text read; not task correctness"})
 
-    def _session_overlay(self, eff, run_id, operation):
+    def _session_overlay(self, eff, run_id, operation, *, cache_invocation=None):
         env = eff["environment"]
         transport = self.transports[eff["kind"]]
         native = transport.native_home(env)
         mirror = self.store.root / "sessions" / run_id / digest(eff["provider"])[:16] / digest(operation)[:20]
         from .safe_files import directory_fd, regular_exists, write_regular
-        with directory_fd(mirror, create=True):
-            pass
-        ResourceManager(self.store, self.config.load().cleanup).register(mirror, "session", run_id)
+        manager = ResourceManager(self.store, self.config.load().cleanup)
+        from .native_cache import begin
+        invocation = dict(cache_invocation) if cache_invocation is not None else {
+            "attempt": "untracked", "operation": operation, "provider": eff["provider"],
+            "session_key": "", "input_identity": "",
+        }
+        handle = begin(manager, mirror, run_id, invocation,
+                       eff.get("native_cache_layout") if cache_invocation is not None else None)
+        if cache_invocation is not None:
+            cache_invocation["handle"] = handle
         # Remember the native source digest independently of provider-written
         # mirror refreshes. A changed native source replaces an old credential.
         source_key = "native-auth/" + digest(str(mirror))

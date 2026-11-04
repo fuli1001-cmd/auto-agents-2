@@ -140,6 +140,22 @@ class ProgressDisplay:
                 for option in data.get("interaction", {}).get("options", []):
                     self.message(f"{option['key']}. {option['label']}")
                 self.message(data["reply_hint"])
+        elif kind in {"resources.space_low", "resources.space_unknown"}:
+            # Only controller-owned volume labels and numeric measurements belong
+            # in the notice; registry paths and probe/native diagnostics do not.
+            volumes = []
+            for row in data.get("volumes", [])[:4]:
+                if (isinstance(row, dict) and isinstance(row.get("name"), str)
+                        and re.fullmatch(r"filesystem|host:[A-Z]", row["name"])
+                        and type(row.get("free")) is int and row["free"] >= 0):
+                    name = "项目文件系统" if row["name"] == "filesystem" else row["name"]
+                    volumes.append(f"{name} 剩余 {row['free'] / 1024**3:.2f} GiB")
+            minimum = data.get("minimum_free_bytes")
+            floor = f"{minimum / 1024**3:.2f} GiB" if type(minimum) is int and minimum >= 0 else "待核验"
+            reason = "实际存储空间不足" if kind.endswith("_low") else "实际存储卷空间待核验"
+            details = "；".join(volumes)
+            self.message(f"存储空间告警｜{reason}｜{details}｜最低 {floor}"
+                         "｜请释放所列卷空间或恢复宿主探测；新工作派发前重新核验。")
         elif kind == "tasks.planned":
             self.message(f"任务计划｜共 {data['total']} 个任务｜已验收 {data['done']}/{data['total']}")
         elif kind == "task.started":

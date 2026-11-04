@@ -173,6 +173,9 @@ class WorkflowEngine:
         self.contexts = ContextBuilder(self.config.load().sensitive_paths)
         self.patch_repair = PatchRepairService(self)
         self.resources = ResourceManager(self.store, cfg.cleanup)
+        from .storage_space import StorageMonitor
+        self.storage = StorageMonitor(self.store.root)
+        self._storage_status = None
         self.environments = EnvironmentManager(self.config, self.sandbox)
         self.toolchain = ToolchainPreflight(self.config, self.sandbox)
         self.verifier = VerificationService(self.store.root, self.sandbox, self.resources)
@@ -250,6 +253,7 @@ class WorkflowEngine:
                 while True:
                     try:
                         if not preflight_complete:
+                            await self._storage_boundary(rid, "startup", force=True)
                             report = await self.toolchain.check()
                             self.store.checkpoint(rid, "environment/preflight", report)
                             self.store.event(rid, "environment.preflight_passed", report)
@@ -654,7 +658,7 @@ class WorkflowEngine:
             self.store.checkpoint(rid, recovery_key, record)
             with observe_activity(self.store, rid, f"重新采集检查证据（{task.id}）") as activity:
                 environment = await self._environment(work, rid, plan)
-                checks = await self.verifier.run(task.checks, work, environment)
+                checks = await self._run_checks(rid, task.checks, work, environment)
                 activity.finish("verified" if passed(checks) else "unpassed")
             record["checks"] = [row.model_dump() for row in checks]
             self.store.checkpoint(rid, recovery_key, record)
@@ -713,7 +717,7 @@ class WorkflowEngine:
             self.store.checkpoint(rid, recovery_key, record)
             with observe_activity(self.store, rid, f"补齐构建前置并复测（{task.id}）") as activity:
                 environment = await self._environment(work, rid, plan)
-                checks = await self.verifier.run(commands, work, environment)
+                checks = await self._run_checks(rid, commands, work, environment)
                 activity.finish("verified" if passed(checks) else "unpassed")
             record["checks"] = [c.model_dump() for c in checks]
             self.store.checkpoint(rid, recovery_key, record)
@@ -762,12 +766,18 @@ class WorkflowEngine:
         return digest([rid, phase, str(work), tree_hash(work), environment.fingerprint if environment else "host",
                        [c.model_dump() for c in commands], CHECKER_VERSION, permit, saved.get("observation_id"), operation])
 
+    async def _run_checks(self, rid, commands, work, environment):
+        # The whole verifier batch is one natural boundary; active commands keep
+        # their existing timeout, cancellation and evidence-collection contract.
+        await self._storage_boundary(rid, "verification", force=True)
+        return await self.verifier.run(commands, work, environment)
+
     async def _checks(self, rid, commands, work, environment, task=None, *, phase="final", operation=None):
         identity = self._verification_operation(rid, commands, work, environment, task, phase=phase, operation=operation)
         token = verification_operation.set(identity)
         consumer_token = review_consumer.set(consumer_key(task, phase))
         try:
-            return await self.verifier.run(commands, work, environment)
+            return await self._run_checks(rid, commands, work, environment)
         except VerificationRefreshNeeded as exc:
             evidence = {"commands": [c.model_dump() for c in commands], "checks": exc.checks,
                 "execution_interrupted": exc.reason_code == "execution_interrupted", "verification_assessment": {
@@ -844,6 +854,33 @@ class WorkflowEngine:
             return True
         return False
 
+    async def _storage_observation(self, rid, *, force=False):
+        from .storage_space import boundary
+        report = await self.storage.sample(force=force)
+        minimum = self.config.load().cleanup.min_free_bytes
+        self.store.checkpoint(rid, "resources/storage", {"minimum_free_bytes": minimum, **report})
+        error = boundary(report, minimum, "storage")
+        status = ("unknown" if report["errors"] else "low" if error else "ready",
+                  tuple(row["name"] for row in report["volumes"] if row["free"] < minimum))
+        if status != self._storage_status:
+            safe_event(self.store, rid, "resources.space_" + status[0],
+                       {"minimum_free_bytes": minimum, **report})
+            self._storage_status = status
+        return report
+
+    async def _storage_boundary(self, rid, phase, *, force=True):
+        from .storage_space import boundary
+        report = await self._storage_observation(rid, force=force)
+        error = boundary(report, self.config.load().cleanup.min_free_bytes, phase)
+        if error and not report["errors"]:
+            # Preserve the existing attempt to reclaim registered disposable
+            # resources before pausing. Host queries never run under gc/DB locks.
+            self.resources.collect()
+            report = await self._storage_observation(rid, force=True)
+            error = boundary(report, self.config.load().cleanup.min_free_bytes, phase)
+        if error:
+            raise error
+
     async def _collect_periodically(self, rid, owner):
         elapsed = 0
         while True:
@@ -854,6 +891,9 @@ class WorkflowEngine:
             elapsed += 1
             try:
                 if elapsed >= self.config.load().cleanup.interval_seconds:
+                    # Observe/warn while active; block only at a natural dispatch
+                    # boundary, preserving the existing cancellation/retry contract.
+                    await self._storage_observation(rid, force=True)
                     self.resources.collect()
                     self.resources.collect_artifacts_safely()
                     elapsed = 0
@@ -1136,6 +1176,7 @@ class WorkflowEngine:
             result = self._validate_stage_response(schema.model_validate(saved["result"]), stage, context, rid)
             self.authority.record(rid, result, context, logical_operation or key)
             return result
+        await self._storage_boundary(rid, "provider")
         self.store.update(rid, stage=stage)
         try:
             result = await self.agent.invoke(stage, context, schema, workspace, rid, key, fresh)
@@ -1145,6 +1186,7 @@ class WorkflowEngine:
             await self._ask(rid, f"provider/{key}", f"可用 provider 暂时无法完成任务：{exc}\n处理上述问题后回复 retry。", digest(str(exc)))
             if isinstance(self.agent, ProviderRouter):
                 self.agent.grant_retry(rid, key)
+            await self._storage_boundary(rid, "provider", force=True)
             result = await self.agent.invoke(stage, context, schema, workspace, rid, key, fresh)
         if tree_hash(workspace) != source_before:
             self.store.checkpoint(rid, "invocation-drift/" + key, {"source_hash": source_before,
@@ -1158,6 +1200,18 @@ class WorkflowEngine:
             IssueLedger(self.store, self.artifacts).record(rid, issue_scope, result, context)
         record = {"identity": identity, "result": result.model_dump(mode="json"), "artifact": artifact,
                   **({"logical_input": logical_key} if logical else {})}
+        if isinstance(self.agent, ProviderRouter):
+            completion = self.store.get(rid, invocation_key)
+            provider_result = self.store.get(rid, "provider-result/" + key)
+            if (isinstance(completion, dict) and isinstance(provider_result, dict)
+                    and completion.get("artifact") == artifact == provider_result.get("artifact")
+                    and completion.get("attempt") == provider_result.get("attempt")
+                    and all(isinstance(completion.get(field), str) and completion[field]
+                            for field in ("attempt", "identity", "cleanup_record"))):
+                # Engine and transport bind different input presentations. Keep the
+                # exact durable transport receipt when publishing the Engine result.
+                record["provider_receipt"] = {"version": 1, **{
+                    field: completion[field] for field in ("attempt", "identity", "artifact", "cleanup_record")}}
         updates = {invocation_key: record}
         if logical_operation and logical_operation != key:
             updates["invocation/" + logical_operation] = {**record, "recovered_from": key,
@@ -1674,7 +1728,7 @@ class WorkflowEngine:
                     self.store.checkpoint(rid, "recovery/coverage-contract/" + digest(assessment), assessment)
                     raise Replan("clarify", "Invalid existing-coverage verification contract: " + str(exc)) from exc
                 environment = await self._environment(work, rid)
-                evidence = await self.verifier.run(result.verification, work, environment)
+                evidence = await self._run_checks(rid, result.verification, work, environment)
                 self._replan_checks(rid, "coverage", result.verification, evidence, work, environment)
                 self.store.checkpoint(rid, "clarify_context", {**context, "coverage_verification": [r.model_dump() for r in evidence]})
                 raise Replan("clarify", "Resolve unknown coverage using the persisted verification evidence before planning changes")
@@ -1694,7 +1748,7 @@ class WorkflowEngine:
                     "reimplement satisfied behaviour; the controller must execute and validate the checks.")
             environment = await self._environment(work, rid,
                 PlanResult.model_validate(self.store.get(rid, "plan")) if retained_verification else None)
-            evidence = await self.verifier.run(checks, work, environment)
+            evidence = await self._run_checks(rid, checks, work, environment)
             self._replan_checks(rid, "coverage", checks, evidence, work, environment)
             self.store.checkpoint(rid, "coverage_checks", [r.model_dump() for r in evidence])
             if passed(evidence):
@@ -2084,6 +2138,7 @@ class WorkflowEngine:
                 await asyncio.sleep(min(2 ** failures, 8))
 
     async def _environment_once(self, work, rid, plan=None):
+        await self._storage_boundary(rid, "environment")
         profile = ProjectProfile.detect(work, self.config.load().project_profile)
         with observe_activity(self.store, rid, f"准备项目环境（{work.name}）｜{profile.name}"):
             self.store.event(rid, "environment.preparing", {"profile": profile.name})
@@ -2113,11 +2168,7 @@ class WorkflowEngine:
         while len(done) < len(plan.tasks):
             if context.get("specification", {}).get("frontend"):
                 context["prototype_approval"] = await self._ensure_prototype_approval(rid, integration)
-            if shutil.disk_usage(self.store.root).free < cfg.cleanup.min_free_bytes:
-                self.resources.collect()
-                if shutil.disk_usage(self.store.root).free < cfg.cleanup.min_free_bytes:
-                    raise ResourceBoundary("磁盘空间仍不足", action="释放项目所在文件系统的磁盘空间。",
-                        condition="资源管理器核对可用空间达到当前配置要求。", phase="generation")
+            await self._storage_boundary(rid, "generation")
             base = git(integration, "rev-parse", "HEAD")
             from .task_repair_order import dispatched_repair
             repair = dispatched_repair(self, rid, plan, done, base)
