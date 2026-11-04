@@ -895,7 +895,10 @@ class WorkflowEngine:
                     # boundary, preserving the existing cancellation/retry contract.
                     await self._storage_observation(rid, force=True)
                     self.resources.collect()
-                    self.resources.collect_artifacts_safely()
+                    # A full graph scan holds the SQLite writer lock. Leave it
+                    # available to respond while the controller awaits input.
+                    if self.store.run(rid)["status"] != "WAITING_USER":
+                        self.resources.collect_artifacts_safely()
                     elapsed = 0
             except Exception as exc:
                 # Maintenance cannot remove the only cancellation observer.
