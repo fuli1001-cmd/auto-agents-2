@@ -138,7 +138,16 @@ class ContextBuilder:
                 raw = files[name].read_bytes()
                 selected.insert(0, {"path": name, "content": raw.decode("utf-8"), "source_hash": digest(raw),
                                     "reason": "applicable project instructions"})
+        complete = {item["path"] for item in selected} == set(files) and not available
+        discovery = (
+            "All files in this filtered public snapshot are supplied in this request. "
+            "Use the supplied contents and explicit evidence attachments; do not list directories, "
+            "run commands, or read additional workspace files. This does not establish absence "
+            "of excluded files in the execution workspace."
+            if complete else
+            "Search the mounted public workspace for additional relevant files; read scopes do not grant writes."
+        )
         return {"workspace": str(workspace), "view_contract": view_contract(),
                 "files": selected, "read_on_demand": available,
                 "roots": sorted({Path(p).parts[0] for p in files}), "public_file_count": len(files),
-                "discovery": "Search the mounted public workspace for additional relevant files; read scopes do not grant writes."}
+                "discovery": discovery}

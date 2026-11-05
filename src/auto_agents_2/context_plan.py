@@ -19,7 +19,7 @@ from .research_sections import extract_sections, select_section
 from .util import digest
 from .workspace import git_environment, path_allowed
 
-CONTEXT_VERSION = "context-v7"
+CONTEXT_VERSION = "context-v8"
 TEXT_INLINE = 12000
 REFERENCE_INLINE = 2000
 RESEARCH_INLINE = 16000
