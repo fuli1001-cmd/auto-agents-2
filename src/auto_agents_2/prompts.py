@@ -9,7 +9,7 @@ from .research import request_documents
 from .visual_design import visual_instructions
 
 INVOCATION_CONTRACT_VERSION = "2026-10-16.2"
-PROMPT_VERSION = "2026-10-30.visual-design-v1"
+PROMPT_VERSION = "2026-11-05.worker-controller-scope-v1"
 CORE = COMMON
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
