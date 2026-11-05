@@ -197,9 +197,10 @@ def test_bounded_regular_read_checks_bytes_even_when_metadata_is_stale(tmp_path,
     import auto_agents_2.safe_files as safe
     source = tmp_path / 'document.txt'
     source.write_bytes(b'x' * 17)
-    monkeypatch.setattr(safe.os, 'fstat', lambda fd: SimpleNamespace(st_size=1, st_mode=stat.S_IFREG | 0o600))
-    with pytest.raises(ValueError, match='size'):
-        safe.read_regular(source, 16)
+    with monkeypatch.context() as patch:
+        patch.setattr(safe.os, 'fstat', lambda fd: SimpleNamespace(st_size=1, st_mode=stat.S_IFREG | 0o600))
+        with pytest.raises(ValueError, match='size'):
+            safe.read_regular(source, 16)
 
 
 def test_stream_growth_cannot_escape_attachment_budget(tmp_path):

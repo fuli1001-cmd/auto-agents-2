@@ -58,6 +58,8 @@ Agent 接口接收阶段、上下文、输出 schema、工作区和操作身份�
 
 支持环境变量及 argv 数组 extra_args；null 移除继承变量。模型与推理参数属于用户配置。aa2 不做自动追新，模型 prompt profile 的自动识别只调整文本表达。
 
+Antigravity 会话计费设置由现有 `extra_args` 表达：`--settings` 的完整 JSON 对象只能包含唯一的 `useG1Credits` 布尔值。校验按 provider kind 限定，拒绝文件路径、未知字段、非布尔值及重复参数/键；统一 profile 与实例参数后再校验，并纳入执行身份。未配置时保留原生继承行为；aa2 不为该字段填默认值或改写原生设置，权限与输出协议仍受原有约束。
+
 切换只能发生在配置实例集合中，成功后保存 active provider。已经派发的调用保持原配置；后续调用采用新配置。成功故障切换不自动跳回旧 provider。用量保留所有失败调用。
 
 Prompt 分为通用任务语义、阶段角色、模型适配、工具调用适配。参考 GPT-6、Gemini、Claude 官方指导，版本化维护并回归测试。模型不得通过原始文档、AGENTS.md 或自评扩大硬权限。

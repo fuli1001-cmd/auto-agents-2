@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tomllib
@@ -258,7 +259,7 @@ class ConfigStore:
             else:
                 environment[key] = os.path.expanduser(value)
         extra = profile.extra_args + spec.extra_args
-        validate_extra_args(extra)
+        validate_extra_args(extra, kind=spec.kind)
         model = profile.model
         effort = profile.effort
         i = 0
@@ -296,12 +297,32 @@ class ConfigStore:
         return {**public, "binary": binary, "environment": environment, "args": extra}
 
 
-def validate_extra_args(args: list[str]) -> None:
+def _antigravity_billing_settings(pairs):
+    # Reject duplicate keys as well as non-billing settings before passing JSON
+    # to the CLI. Strict booleans avoid JSON coercion or truthy string values.
+    if len(pairs) != 1 or pairs[0][0] != "useG1Credits" or type(pairs[0][1]) is not bool:
+        raise ValueError
+    return dict(pairs)
+
+
+def validate_extra_args(args: list[str], *, kind: str = "") -> None:
+    settings_seen = False
     permitted_values = {"--model", "-m", "--effort", "--print-timeout"}
     i = 0
     while i < len(args):
         arg = args[i]
         key = arg.split("=", 1)[0]
+        if key == "--settings" and kind == "antigravity" and not settings_seen:
+            value = arg.partition("=")[2] if "=" in arg else args[i + 1] if i + 1 < len(args) else ""
+            try:
+                settings = json.loads(value, object_pairs_hook=_antigravity_billing_settings)
+                if not isinstance(settings, dict):
+                    raise ValueError
+            except (ValueError, RecursionError):
+                raise ConfigurationError("Unsupported Antigravity session settings") from None
+            settings_seen = True
+            i += 1 if "=" in arg else 2
+            continue
         if key in permitted_values:
             value = arg.partition("=")[2] if "=" in arg else args[i + 1] if i + 1 < len(args) else ""
             if not value.strip() or "=" not in arg and value.startswith("-"):

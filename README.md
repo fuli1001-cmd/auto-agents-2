@@ -113,6 +113,8 @@ Codex 字符串 profile 使用 `$CODEX_HOME/<name>.config.toml`。其他 provide
 
 `environment` 中 `null` 移除继承变量，空字符串保留。`extra_args` 是 argv 数组，支持模型、effort 和兼容的模型配置覆盖；输出协议和权限参数受保护。
 
+`antigravity` 的 `extra_args` 还支持会话级计费开关，例如 `["--settings", "{\"useG1Credits\":false}"]`（也支持 `--settings=...`）。只允许这个键和严格 JSON 布尔值，拒绝文件路径、重复键、重复 `--settings` 及其他设置；provider 和 profile 合并后统一检查。省略时沿用原生 CLI 行为，不把缺省值视为 `false`。显式设置随执行指纹绑定，通过 argv 传给 CLI，不改写原生配置或工具权限。
+
 ```bash
 aa2 run --project ./demo --provider antigravity
 aa2 provider use codex --project ./demo
