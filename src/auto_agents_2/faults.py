@@ -14,6 +14,7 @@ from .errors import (
     PolicyViolation,
     ProviderError,
     ResearchDestinationRejected,
+    ResearchResolverUnavailable,
     RetryableInfrastructureError,
     ToolchainUnavailable,
 )
@@ -87,6 +88,11 @@ def known_exception(error, phase):
         return HumanIntervention(HumanRequirement(kind="external_input", reason=str(error),
             action="检查 aa2 控制器进程的网络连通性及 HTTP_PROXY/HTTPS_PROXY；保留已生成的候选和来源。",
             resume_condition="连接恢复后重新抓取并核验同一来源；确认不替代来源核验、独立审查或原有批准。",
+            evidence=error.evidence), reason_code=error.code, phase=phase)
+    if isinstance(error, ResearchResolverUnavailable):
+        return HumanIntervention(HumanRequirement(kind="external_input", reason=str(error),
+            action="核对已配置的 HTTPS 解析服务、HTTP 状态及 aa2 控制器代理连接；保留来源候选和安全诊断，原因未定不授权改权限或自动重试。",
+            resume_condition="原采集阶段重新解析同一来源的全部地址、通过公网核对并完成实际采集及来源审查；确认不替代核验或原有批准。",
             evidence=error.evidence), reason_code=error.code, phase=phase)
     if isinstance(error, ResearchDestinationRejected):
         return HumanIntervention(HumanRequirement(kind="external_input", reason=str(error),

@@ -10,7 +10,7 @@ from http.cookiejar import CookieJar, DefaultCookiePolicy
 
 import httpx
 
-from .errors import AA2Error
+from .errors import AA2Error, ResearchResolverUnavailable
 from .http_body import read_body
 from .util import digest
 
@@ -156,8 +156,23 @@ class HTTPSJSONResolver:
                         task.cancel()
                     await asyncio.gather(*queries, return_exceptions=True)
                     raise
-        except httpx.HTTPError:
-            raise AA2Error("Research HTTPS DNS JSON request failed") from None
+        except httpx.HTTPError as error:
+            category = next(label for kind, label in (
+                (httpx.HTTPStatusError, "http_status"), (httpx.ProxyError, "proxy"),
+                (httpx.TimeoutException, "timeout"), (httpx.NetworkError, "network"),
+                (httpx.ProtocolError, "protocol"), (httpx.HTTPError, "http")) if isinstance(error, kind))
+            # Fixed HTTPX names only: never persist the exception, request, text or response body.
+            names = ("HTTPStatusError", "ProxyError", "ConnectTimeout", "ReadTimeout", "WriteTimeout",
+                     "PoolTimeout", "ConnectError", "ReadError", "WriteError", "CloseError",
+                     "LocalProtocolError", "RemoteProtocolError", "UnsupportedProtocol", "DecodingError",
+                     "TooManyRedirects", "TimeoutException", "NetworkError", "ProtocolError", "HTTPError")
+            error_type = next(name for name in names if isinstance(error, getattr(httpx, name)))
+            status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+            if type(status) is not int or not 100 <= status <= 599:
+                status = None
+            raise ResearchResolverUnavailable(category=category, error_type=error_type,
+                endpoint_origin=str(endpoint.copy_with(path="/", query=None)),
+                endpoint_url_hash=digest(self.endpoint), status_code=status) from None
         return ResolvedAddresses(host, tuple(dict.fromkeys((*ipv4, *ipv6))), "https_json")
 
     def connected(self, resolution, ip, port):

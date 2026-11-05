@@ -63,6 +63,21 @@ class DocumentAcquisitionTimeout(AA2Error, TimeoutError):
                          "HTTP_PROXY/HTTPS_PROXY in the aa2 process environment")
 
 
+class ResearchResolverUnavailable(AA2Error):
+    """An observed resolver HTTP failure, not a retry or network-policy permit."""
+    code = "RESEARCH_RESOLVER_UNAVAILABLE"
+
+    def __init__(self, *, category, error_type, endpoint_origin, endpoint_url_hash, status_code=None):
+        self.evidence = {"operation": "research_resolver", "category": category,
+                         "error_type": error_type, "endpoint_origin": endpoint_origin,
+                         "endpoint_url_hash": endpoint_url_hash}
+        if status_code is not None:
+            self.evidence["http_status"] = status_code
+        status = f", HTTP {status_code}" if status_code is not None else ""
+        super().__init__(f"Research HTTPS DNS JSON request failed ({category}, {error_type}{status}); "
+                         "check the configured resolver and aa2 process proxy route")
+
+
 class ResearchDestinationRejected(AA2Error):
     """The public research TCP boundary observed empty or non-public DNS results."""
 
