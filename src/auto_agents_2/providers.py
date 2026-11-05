@@ -18,6 +18,7 @@ from .errors import ConfigurationError, InvalidStructuredResponse, PostCommitErr
 from .evidence import invocation_identity
 from .materials import bundle, prepare_prompt, present_materials
 from .models import Usage, strict_schema
+from .output_limit_recovery import CALL, CORRECTION, Incident, current_call
 from .progress import capture_output
 from .prompts import PROMPT_VERSION, PromptCompiler
 from .readview import VIEW_VERSION, create_artifact_view, create_view
@@ -32,6 +33,9 @@ INPUT_LIMIT_DIAGNOSTIC = "provider 输入超过 CLI 长度上限"
 MOUNT_LIMIT_DIAGNOSTIC = "provider 只读材料挂载超过沙箱参数上限"
 CONTEXT_LIMIT_DIAGNOSTIC = "provider 会话超过模型上下文容量"
 MODEL_UNAVAILABLE_DIAGNOSTIC = "provider 所选模型不可用或不受支持"
+
+
+OUTPUT_LIMIT_DIAGNOSTIC = "provider response incomplete (max_output_tokens)"
 
 
 class _ConfirmedProviderCancellation(asyncio.CancelledError):
@@ -75,6 +79,7 @@ class EventDecoder:
         self.finished = False
         self.error = ""
         self.stream_error = ""
+        self.failure_diagnostic = ""
         self._turn_started = False
         self._terminal_seen = False
         self.last_counter = 0
@@ -103,6 +108,7 @@ class EventDecoder:
                     "thread.started", "turn.started", "turn.completed", "turn.failed", "error",
                     "item.started", "item.updated", "item.completed"}:
                 self.finished = False
+                self.failure_diagnostic = ""
                 self.error = self.error or (
                     str(event.get("error", event.get("message", ""))) if typ in {"error", "turn.failed"}
                     else "") or "Provider event after terminal result"
@@ -135,6 +141,12 @@ class EventDecoder:
                 self._terminal_seen = True
                 self.finished = not self.error
             if typ == "turn.failed":
+                error = event.get("error")
+                if (not self._terminal_seen and not self.error and isinstance(error, dict)
+                        and error.get("message") == "Incomplete response returned, reason: max_output_tokens"):
+                    # A fixed label from this terminal only, never arbitrary provider details.
+                    # This is diagnostic evidence, not a different failure or retry category.
+                    self.failure_diagnostic = OUTPUT_LIMIT_DIAGNOSTIC
                 self._terminal_seen = True
                 self.finished = False
                 self.error = self.error or str(event.get("error", "provider error")) or "provider error"
@@ -172,6 +184,9 @@ class ProviderRouter:
         self.decoders = decoders or {}
 
     def grant_retry(self, run_id: str, operation: str):
+        incident = Incident(self.store, run_id)
+        if incident.active():
+            raise incident.stop("retry_grant_outside_explicit_correction")
         cfg = self.config.load()
         for candidate in cfg.providers:
             key = f"infra/{operation}/{candidate}"
@@ -203,6 +218,9 @@ class ProviderRouter:
         return digest(identities)
 
     async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
+        incident = Incident(self.store, run_id)
+        if incident.active() and CALL.get() is None:
+            raise incident.stop("provider_call_outside_incident_workflow")
         previous = self.store.get(run_id, f"provider-result/{operation}")
         try:
             return await self._invoke_candidates(stage, context, schema, workspace, run_id, operation, fresh)
@@ -214,7 +232,23 @@ class ProviderRouter:
 
     async def _invoke_candidates(self, stage, context, schema, workspace, run_id, operation, fresh=False):
         cfg = self.config.load()
+        scope = CALL.get()
+        if scope is not None and scope.role == "correction":
+            request = scope.incident.require_active()["request"]
+            if (invocation_identity(stage, context, schema, workspace, cfg) != request["logical_input"]
+                    or digest(strict_schema(schema)) != request["schema_hash"]
+                    or str(workspace) != request["workspace"]):
+                raise scope.incident.stop("original_logical_input_changed")
+            effective = self.effective(stage, request["provider"])
+            if effective["model"] != request["model"] or effective["effort"] != request["effort"]:
+                raise scope.incident.stop("original_model_or_effort_changed")
+            await scope.ensure_runtime(self, context, schema, workspace)
+            return await self._call(effective, stage, context, schema, workspace, run_id, operation, True)
         candidates = [cfg.active_provider] + [n for n in cfg.providers if n != cfg.active_provider]
+        if scope is not None:
+            candidates = [cfg.active_provider]  # Acceptance retains its old budget, without failover.
+            if any(question["answer"] is None for question in self.store.decision_questions(run_id, ["provider/" + operation])):
+                raise scope.incident.stop("acceptance_provider_question_pending")
         retries = cfg.execution.infra_retries
         if stage == "decision":
             # One request is one provider call. Format correction is owned by the
@@ -227,6 +261,8 @@ class ProviderRouter:
             for retry in range(retries + 1):
                 key = f"infra/{operation}/{candidate}"
                 state = self.store.get(run_id, key, {"failures": 0, "grant": 0, "pending": False})
+                if scope is not None and state["pending"]:
+                    raise scope.incident.stop("acceptance_provider_call_uncertain")
                 if state["pending"]:
                     cancellation = state.pop("cancellation", None)
                     if (cancellation and cancellation["input"] == logical_input
@@ -252,6 +288,8 @@ class ProviderRouter:
                 previous = self.store.get(run_id, f"provider-result/{operation}")
                 try:
                     effective = self.effective(stage, candidate)
+                    if scope is not None:
+                        await scope.ensure_runtime(self, context, schema, workspace)
                     state["pending"] = True
                     self.store.checkpoint(run_id, key, state)
                     result = await self._call(effective, stage, context, schema, workspace, run_id, operation, fresh)
@@ -285,6 +323,8 @@ class ProviderRouter:
                     self.store.checkpoint(run_id, key, state)
                     errors.append(f"{candidate}: {exc}")
                     error_kinds[candidate] = "configuration"
+                    if scope is not None:
+                        raise
                     break
                 except ProviderError as exc:
                     completed = self.store.get(run_id, f"provider-result/{operation}")
@@ -295,6 +335,8 @@ class ProviderRouter:
                     error_kinds[candidate] = kind
                     self.store.checkpoint(run_id, key, state)
                     errors.append(f"{candidate}: {exc}")
+                    if scope is not None:
+                        raise  # A required acceptance failure cannot authorize another model call.
                     if stage == "decision" or stage == "recovery_diagnosis" and isinstance(exc, InvalidStructuredResponse):
                         raise
                     if not exc.retryable or retry == retries:
@@ -306,10 +348,14 @@ class ProviderRouter:
         raise error("; ".join(errors)[-3000:])
 
     async def _call(self, eff, stage, context, schema, workspace, run_id, operation, fresh):
+        scope = current_call(self.store, run_id, stage, operation)
         previous = self.store.get(run_id, f"provider-result/{operation}")
         try:
             with ArtifactStore(self.store.root).reading(context, run_id):
-                return await self._call_with_materials(eff, stage, context, schema, workspace, run_id, operation, fresh)
+                result = await self._call_with_materials(eff, stage, context, schema, workspace, run_id, operation, fresh)
+            if scope is not None:
+                scope.complete(result)
+            return result
         except BaseException as exc:
             # Re-read the transaction receipt: a commit may succeed before its caller
             # observes an I/O error. Such a result must never enter provider failover.
@@ -324,6 +370,13 @@ class ProviderRouter:
             raise
 
     async def _call_with_materials(self, eff, stage, context, schema, workspace, run_id, operation, fresh):
+        scope = current_call(self.store, run_id, stage, operation)
+        if scope is not None:
+            from .output_limit_runtime import require_binding
+            require_binding(scope.incident)
+        semantic_context, semantic_workspace = context, workspace
+        presentation_owner = (operation + "/output-limit/" + digest(scope.incident.record()["request"])
+                              if scope is not None else operation)
         if eff["kind"] not in self.transports:
             raise ConfigurationError(f"No installed provider transport: {eff['kind']}")
         transport = self.transports[eff["kind"]]
@@ -347,7 +400,11 @@ class ProviderRouter:
             task_title = context["task"].get("title", "") if isinstance(context.get("task"), dict) else ""
             prepared = self._prepare_context(stage, context, workspace, run_id, operation, input_identity)
             context = prepared.payload
-            workspace = create_view(workspace, root / "workspace", self.config.load().sensitive_paths)
+            workspace = create_view(workspace, root / "workspace", self.config.load().sensitive_paths,
+                                    **({"maintenance": False} if scope is not None else {}))
+            if scope is not None:
+                from .output_limit_runtime import prepared_tree
+                workspace_view_manifest = prepared_tree(workspace)
             read_status = "uncertified"
             # Self-contained input always names the actually mounted public snapshot.
             context = json.loads(json.dumps(context))
@@ -397,10 +454,12 @@ class ProviderRouter:
                 attach(prompt_context["evidence_materials"])
             context["context_files"] = sorted(referenced)
             prompt, family = self.compiler.compile(stage, prompt_context, eff["model"], eff["prompt_profile"])
+            if scope is not None and scope.role == "correction":
+                prompt += "\n\n" + CORRECTION
             prompt_file = root / "prompt.txt"
             atomic_write(prompt_file, prompt)
             delivery = prepare_prompt(prompt, prompt_file, getattr(transport, "max_prompt_characters", None))
-            session_key = f"session/{operation}/{eff['provider']}/{VIEW_VERSION}/{PROMPT_VERSION}/{CONTEXT_VERSION}/{eff['fingerprint']}/{digest(self.config.load().sensitive_paths)}"
+            session_key = f"session/{presentation_owner}/{eff['provider']}/{VIEW_VERSION}/{PROMPT_VERSION}/{CONTEXT_VERSION}/{eff['fingerprint']}/{digest(self.config.load().sensitive_paths)}"
             previous = self.store.get(run_id, session_key) if not fresh else None
             assets = []
 
@@ -443,7 +502,7 @@ class ProviderRouter:
                 on_demand_bytes=sum(p.stat().st_size for p in context_files),
                 over_target_reason="Mandatory instructions, constraints or unclassified extension" if material["over_target"] else "",
                 usage_scope="Initial prompt/schema characters and available attachment bytes; actual native tokens are recorded separately")
-            self.store.checkpoint(run_id, "materials/" + operation, material)
+            self.store.checkpoint(run_id, "materials/" + presentation_owner, material)
             # One selective read-only tree avoids one bwrap mount per evidence file.
             # Preserve every original address, including references inside attachments.
             reads = [schema_file, root / "prompt.txt", *assets, *context_files]
@@ -460,7 +519,10 @@ class ProviderRouter:
             env = dict(eff["environment"])
             cache_invocation = {"attempt": aid, "operation": operation, "provider": eff["provider"],
                                 "session_key": session_key, "input_identity": input_identity}
-            overlays = self._session_overlay(eff, run_id, operation + VIEW_VERSION + PROMPT_VERSION + CONTEXT_VERSION + eff["fingerprint"] + digest(self.config.load().sensitive_paths),
+            if scope is not None:
+                cache_invocation.update(workspace_view_root=str(workspace), workspace_view_manifest=workspace_view_manifest,
+                    artifact_projection_manifests={str(source): prepared_tree(source) for source, _ in readonly_overlays})
+            overlays = self._session_overlay(eff, run_id, presentation_owner + VIEW_VERSION + PROMPT_VERSION + CONTEXT_VERSION + eff["fingerprint"] + digest(self.config.load().sensitive_paths),
                                              cache_invocation=cache_invocation)
             secret_values = [v for k, v in env.items() if any(s in k.upper() for s in ("TOKEN", "SECRET", "API_KEY", "PASSWORD"))]
             self.store.event(run_id, "agent.started", {"attempt": aid, "operation": operation, "stage": stage,
@@ -513,9 +575,19 @@ class ProviderRouter:
                     del errors[:-100]
 
             try:
+                scope = current_call(self.store, run_id, stage, operation)
+                if scope is not None:
+                    from .output_limit_runtime import ManagedLaunch, prepare_launch, verify_prepared_launch
+                    launch = await prepare_launch(scope, self, stage, semantic_context, schema,
+                        semantic_workspace, eff, argv, env, delivery.text, material, reads, readonly_overlays, cache_invocation)
+                    verify_prepared_launch(scope.incident, launch, argv, env, delivery.text, cache_invocation)
+                    managed_launch = ManagedLaunch(scope, self, aid, input_identity, launch, argv, env, delivery.text,
+                        semantic_workspace, cache_invocation, [out], reads, overlays,
+                        [self.config.project, original_workspace], readonly_overlays)
                 process = await self.sandbox.spawn(argv, workspace, env, [out], reads, overlays,
                                                    hidden=[self.config.project, original_workspace],
-                                                   readonly_overlays=readonly_overlays)
+                                                   readonly_overlays=readonly_overlays,
+                                                   **({"_incident_launch": managed_launch} if scope is not None else {}))
                 self.store.event(run_id, "agent.spawned", {"attempt": aid, "pid": process.pid})
 
                 async def stdout():
@@ -555,7 +627,8 @@ class ProviderRouter:
                 if process.returncode != 0 or decoder.error or not decoder.finished:
                     message = decoder.error or getattr(decoder, "stream_error", "") or "".join(errors)
                     diagnostic = diagnostic_summary(message)
-                    raise ProviderError(diagnostic + f"；未取得完整结果（退出码 {process.returncode}）",
+                    summary = getattr(decoder, "failure_diagnostic", "") or diagnostic
+                    raise ProviderError(summary + f"；未取得完整结果（退出码 {process.returncode}）",
                         retryable=diagnostic not in {INPUT_LIMIT_DIAGNOSTIC, CONTEXT_LIMIT_DIAGNOSTIC, MODEL_UNAVAILABLE_DIAGNOSTIC, MOUNT_LIMIT_DIAGNOSTIC}
                         and any(t in message.lower() for t in
                             ("timeout", "timed out", "429", "503", "connection", "rate limit", "capacity", "overloaded")))
@@ -575,7 +648,8 @@ class ProviderRouter:
                 self.store.checkpoints(run_id, {
                     f"provider-result/{operation}": {"attempt": aid, "artifact": artifact, "usage": decoder.usage.model_dump()},
                     f"invocation/{operation}": {"attempt": aid, "identity": input_identity, "result": result.model_dump(mode="json"), "artifact": artifact,
-                                                "cleanup_record": str(process.record)},
+                                                "cleanup_record": str(process.record),
+                                                **({"incident_launch": launch} if scope is not None else {})},
                 }, usage=(eff["provider"], aid, decoder.usage.model_dump()))
                 outcome = "success"
                 return result
@@ -596,7 +670,8 @@ class ProviderRouter:
                     lambda: self.store.add_usage(run_id, eff["provider"], aid, "invocation", decoder.usage.model_dump()),
                     lambda: self.store.event(run_id, "agent.finished", {"attempt": aid, "complete": decoder.finished,
                         "outcome": outcome, "last_output": last_output,
-                        "diagnostic": diagnostic_summary(decoder.error or getattr(decoder, "stream_error", "") or "".join(errors)) if outcome == "error" else ""}))
+                        "diagnostic": (getattr(decoder, "failure_diagnostic", "") or
+                            diagnostic_summary(decoder.error or getattr(decoder, "stream_error", "") or "".join(errors))) if outcome == "error" else ""}))
                 if outcome == "success" and process is not None and cache_invocation.get("handle"):
                     from .native_cache import seal
                     seal(resource_manager, cache_invocation["handle"], process)
@@ -650,26 +725,37 @@ class ProviderRouter:
             return bool(value.get("screenshot")) or any(ProviderRouter._has_images(v) for v in value.values())
         return isinstance(value, list) and any(ProviderRouter._has_images(v) for v in value)
 
-    async def _ensure_material_read(self, eff, workspace, run_id, image_read):
-        process = await self.sandbox.spawn([eff["binary"], "--version"], workspace, eff["environment"], [],
-                                           hidden=[self.config.project])
-        try:
-            async with asyncio.timeout(30):
-                version, _ = await capture_output(process, machine_limit=65536)
-            if process.returncode:
-                raise ProviderError("Cannot establish native CLI material capability identity")
-        except TimeoutError as exc:
-            raise ProviderError("Provider capability probe timed out", retryable=True) from exc
-        finally:
-            await self.sandbox.stop(process)
+    async def _material_identity(self, eff, workspace, image_read=False):
+        from contextlib import nullcontext
+        resources = ResourceManager(self.store, self.config.load().cleanup)
+        directory = resources.temporary("incident-version") if CALL.get() is not None else nullcontext(workspace)
+        with directory as version_work:
+            process = await self.sandbox.spawn([eff["binary"], "--version"], version_work, eff["environment"], [],
+                                               hidden=[self.config.project])
+            try:
+                async with asyncio.timeout(30):
+                    version, _ = await capture_output(process, machine_limit=65536)
+                if process.returncode:
+                    raise ProviderError("Cannot establish native CLI material capability identity")
+            except TimeoutError as exc:
+                raise ProviderError("Provider capability probe timed out", retryable=True) from exc
+            finally:
+                await self.sandbox.stop(process)
         binary_hash = file_digest(Path(eff["binary"]))
         from .native_cache import observed_layout
         eff["native_cache_layout"] = observed_layout(self.transports[eff["kind"]], version, binary_hash)
         identity = digest([eff["fingerprint"], binary_hash, digest(version),
                            VIEW_VERSION, PROMPT_VERSION, self.config.load().sensitive_paths, image_read])
+        return {"key": identity, "binary": str(Path(eff["binary"]).resolve()),
+                "binary_hash": binary_hash, "version_hash": digest(version)}
+
+    async def _ensure_material_read(self, eff, workspace, run_id, image_read):
+        identity = (await self._material_identity(eff, workspace, image_read))["key"]
         key = "material-capability/" + identity
         if self.store.get(run_id, key, {}).get("status") == "observed_read":
             return
+        if CALL.get() is not None:
+            return await CALL.get().material_probe(self, eff, workspace, identity, image_read)
         resources = ResourceManager(self.store, self.config.load().cleanup)
         with resources.temporary("read-challenge") as directory:
             context, expected = await challenge_files(ArtifactStore(self.store.root), directory, image_read)
@@ -724,4 +810,8 @@ class ProviderRouter:
             except FileNotFoundError:
                 pass
         self.store.checkpoint(run_id, source_key, updated)
+        if cache_invocation is not None:
+            cache_invocation["native_projection_root"] = str(mirror)
+            cache_invocation["native_projection_hashes"] = {
+                relative: file_digest(mirror / relative) for relative in updated}
         return [(mirror, native)] if native.exists() else []

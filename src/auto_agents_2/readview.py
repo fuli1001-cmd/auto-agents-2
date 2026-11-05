@@ -54,7 +54,7 @@ def public_files(root: Path, extra=()):
     return candidates
 
 
-def create_view(workspace: Path, destination: Path, extra=()) -> Path:
+def create_view(workspace: Path, destination: Path, extra=(), *, maintenance=True) -> Path:
     destination.mkdir(parents=True, exist_ok=True)
     for path in public_files(workspace, extra):
         target = destination / path.relative_to(workspace)
@@ -63,9 +63,12 @@ def create_view(workspace: Path, destination: Path, extra=()) -> Path:
     # Independent object database: no remotes, alternates, hooks or original history.
     variables = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     variables.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
-    git(destination, "-c", "init.templateDir=", "init", "-q", env=variables)
-    git(destination, "add", "--all", "--force", env=variables)
-    git(destination, "-c", "user.name=aa2", "-c", "user.email=aa2@localhost",
+    # An incident freezes the complete delivered view, including its independent
+    # Git metadata. A detached maintenance worker must not mutate that snapshot.
+    controls = () if maintenance else ("-c", "maintenance.auto=false", "-c", "gc.auto=0")
+    git(destination, *controls, "-c", "init.templateDir=", "init", "-q", env=variables)
+    git(destination, *controls, "add", "--all", "--force", env=variables)
+    git(destination, *controls, "-c", "user.name=aa2", "-c", "user.email=aa2@localhost",
         "-c", "core.hooksPath=/dev/null", "commit", "--allow-empty", "-qm", "Filtered current execution snapshot", env=variables)
     return destination
 

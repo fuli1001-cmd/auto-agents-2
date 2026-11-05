@@ -121,11 +121,13 @@ async def finish_supervisor(process, record):
         raise PolicyViolation("Supervisor exited without cleanup confirmation; resources retained")
 
 
-async def spawn_managed(command, cwd, env, state_root, paths):
+async def spawn_managed(command, cwd, env, state_root, paths, *, _incident_launch=None):
     record = state_root / "processes" / (identifier("process") + ".json")
     write_json(record, {"version": 3, "status": "starting", "paths": [str(p) for p in paths], "cwd": str(cwd)})
     parent = child = process = managed = creation = None
     try:
+        if _incident_launch is not None:
+            _incident_launch.claim(command, cwd, env, record)
         parent, child = socket.socketpair()
         coroutine = asyncio.create_subprocess_exec(
             sys.executable, "-I", str(Path(__file__).with_name("process_supervisor.py")), str(child.fileno()), str(record), *command,

@@ -39,6 +39,7 @@ from .errors import (
     InvalidStructuredResponse,
     PatchRepairExhausted,
     PolicyViolation,
+    PostCommitError,
     ProtectedChange,
     PrototypeBrowserError,
     ProviderError,
@@ -253,6 +254,10 @@ class WorkflowEngine:
             try:
                 while True:
                     try:
+                        from .output_limit_recovery import Incident
+                        incident = Incident(self.store, rid)
+                        if incident.active():
+                            incident.reconcile(self.sandbox)
                         if not preflight_complete:
                             await self._storage_boundary(rid, "startup", force=True)
                             report = await self.toolchain.check()
@@ -277,8 +282,12 @@ class WorkflowEngine:
                                 await self._resume_replan(rid)
                         return await self._execute(rid)
                     except RecoveryNeeded as exc:
+                        if incident.active():
+                            return incident.pause("workflow_recovery_requested")
                         self.recovery.submit(rid, exc.failure)
                     except Replan as exc:
+                        if incident.active():
+                            return incident.pause("workflow_replan_requested")
                         self._controller_replan(rid, exc)
                     except RecoveryPathExhausted as exc:
                         self.store.checkpoint(rid, "recovery/path-exhausted",
@@ -287,11 +296,21 @@ class WorkflowEngine:
                         self.store.update(rid, status="PAUSED", pause_reason=str(exc), last_error=exc.code)
                         return self.store.run(rid)
                     except VisualBriefStale as exc:
+                        if incident.active():
+                            return incident.pause("workflow_visual_authority_changed")
                         # A product answer may arrive while a UI stage is already running.
                         self._controller_replan(rid, Replan("clarify", str(exc)))
                     except HumanIntervention as exc:
+                        if incident.active():
+                            return incident.pause("workflow_human_prerequisite_required")
                         await self._wait_prerequisite(rid, exc)
                     except Exception as exc:
+                        if incident.active():
+                            if isinstance(exc, PostCommitError):
+                                self.store.event(rid, "output_limit.reconciliation_pending", {"reason": exc.code})
+                                self.store.update(rid, status="PAUSED", last_error=exc.code)
+                                return self.store.run(rid)
+                            return incident.pause("workflow_failure_" + type(exc).__name__)
                         if isinstance(exc, ToolchainUnavailable):
                             self.store.checkpoint(rid, "environment/preflight-failure", exc.report or exc.record())
                         boundary = known_exception(exc, self.store.run(rid)["stage"])
@@ -913,6 +932,10 @@ class WorkflowEngine:
                 elapsed = 0
 
     async def _ask(self, rid, key, prompt, artifact_hash="", interaction=None) -> str:
+        from .output_limit_recovery import Incident
+        incident = Incident(self.store, rid)
+        if incident.active():
+            raise incident.stop("another_decision_required")
         if interaction is None and (key.startswith(("incident/", "provider/", "round-budget/"))
                                     or key in {"token-budget", "coverage-evidence", "disk-space"}):
             prompt = prompt.replace("回复 retry", "确认重试").replace("回复 continue", "确认继续")
@@ -1043,7 +1066,8 @@ class WorkflowEngine:
         if product_replan or owner != "prototype":
             raise Replan(owner, reason)
 
-    async def _invoke(self, stage, context, schema, workspace, rid, key, fresh=False, *, interactive_retry=True):
+    async def _invoke(self, stage, context, schema, workspace, rid, key, fresh=False, *, interactive_retry=True,
+                      _incident_acceptance=None):
         if stage == "provider_research":
             # Refresh only at a new logical call. ProposalRecovery keeps this input frozen.
             context = {**context, "submitted_answers": self.store.submitted_answers(rid),
@@ -1105,7 +1129,13 @@ class WorkflowEngine:
                     context = {**context, "prototype_approval": {
                         name: value for name, value in approval.items() if name != "browser_actions"}}
         context, schema = self.authority.prepare(rid, stage, context, schema, workspace, key)
-        if not interactive_retry or stage in {"decision", "recovery_diagnosis", "material_probe"} or context.get("patch_repair"):
+        from .output_limit_recovery import Incident
+        incident = Incident(self.store, rid)
+        if incident.active():
+            with incident.workflow_call(self, stage, context, schema, workspace, key, _incident_acceptance):
+                result = await self._invoke_once(stage, context, schema, workspace, rid, key, fresh,
+                                                interactive_retry=False)
+        elif not interactive_retry or stage in {"decision", "recovery_diagnosis", "material_probe"} or context.get("patch_repair"):
             result = await self._invoke_once(stage, context, schema, workspace, rid, key, fresh,
                                            interactive_retry=interactive_retry)
         else:
@@ -1119,6 +1149,12 @@ class WorkflowEngine:
         invocation_key = "invocation/" + key
         source_before = tree_hash(workspace)
         saved = self.store.get(rid, invocation_key, {})
+        from .output_limit_recovery import Incident
+        historical = Incident(self.store, rid).replay_call(stage, context, schema, workspace, key, self.sandbox)
+        if historical is not None:
+            result = self._validate_stage_response(historical, stage, context, rid)
+            self.authority.record(rid, result, context, logical_operation or key)
+            return result
         logical = None
         if stage in {"decision", "recovery_diagnosis"}:
             logical_key = "recovery/invocation-inputs/" + digest([stage, key])
@@ -1220,7 +1256,8 @@ class WorkflowEngine:
                 # Engine and transport bind different input presentations. Keep the
                 # exact durable transport receipt when publishing the Engine result.
                 record["provider_receipt"] = {"version": 1, **{
-                    field: completion[field] for field in ("attempt", "identity", "artifact", "cleanup_record")}}
+                    field: completion[field] for field in ("attempt", "identity", "artifact", "cleanup_record")},
+                    **({"incident_launch": completion["incident_launch"]} if "incident_launch" in completion else {})}
         updates = {invocation_key: record}
         if logical_operation and logical_operation != key:
             updates["invocation/" + logical_operation] = {**record, "recovered_from": key,
@@ -2180,8 +2217,13 @@ class WorkflowEngine:
             await self._storage_boundary(rid, "generation")
             base = git(integration, "rev-parse", "HEAD")
             from .task_repair_order import dispatched_repair
-            repair = dispatched_repair(self, rid, plan, done, base)
-            if repair:
+            from .output_limit_recovery import Incident
+            incident = Incident(self.store, rid)
+            priority = incident.priority(plan.tasks, done)
+            repair = None if priority else dispatched_repair(self, rid, plan, done, base)
+            if priority:
+                batch = priority
+            elif repair:
                 batch = [repair[0]]
                 self.store.event(rid, "task.repair_prioritized", repair[1])
             else:
@@ -2203,11 +2245,14 @@ class WorkflowEngine:
                 try:
                     self.workspaces.integrate(integration, outcome)
                 except AA2Error as exc:
+                    if incident.active():
+                        raise incident.stop("integration_failure_" + type(exc).__name__) from exc
                     raise RecoveryNeeded(FailureRecord.create(kind="integration", component="workspace", origin_id=task.origin_id or task.id,
                         task_id=task.id, step="integration", obligations=task.requirement_ids,
                         evidence_refs=["develop/task/" + task.id], evidence={"error": str(exc), "commit": outcome})) from exc
                 done.add(task.id)
                 self.store.checkpoint(rid, "develop/done", sorted(done))
+                incident.integrated(task.id)
                 self.store.event(rid, "task.integrated", {"task": task.id, "done": len(done), "total": len(plan.tasks)})
                 saved_task = self.store.get(rid, f"develop/task/{task.id}", {})
                 if saved_task.get("workspace") and saved_task.get("recovery_ref"):
@@ -2218,7 +2263,9 @@ class WorkflowEngine:
 
     async def _observed_task(self, rid, task, base, plan, context):
         try:
-            return await self._task(rid, task, base, plan, context)
+            from .output_limit_recovery import Incident
+            with Incident(self.store, rid).task(task.id, self.sandbox):
+                return await self._task(rid, task, base, plan, context)
         except EnvironmentCommandError as exc:
             # Persist every task before aggregation. The shared waiting consumer
             # may admit a fully bound unknown npm failure to read-only diagnosis.
@@ -2419,7 +2466,10 @@ class WorkflowEngine:
             from .recording_recovery import validate_prepared as validate_recording_prepared
             validate_recording_prepared(self, rid, saved, task, plan)
             self.authority.prepared_task(rid, saved, task)
+            from .output_limit_recovery import Incident
+            Incident(self.store, rid).prepared(task.id, work, saved["patch"])
             apply_prepared(work, saved["patch"])
+            Incident(self.store, rid).applied(task.id, work, saved["patch"])
             saved.update(phase="applied", source_hash=tree_hash(work))
             self.store.checkpoint(rid, key, saved)
         saved, work = refresh_task_baseline(self, rid, task, saved, work, base, state["revision"])
@@ -2509,8 +2559,13 @@ class WorkflowEngine:
                 try:
                     prepared = saved.get("patch")
                     if prepared is None:
-                        changes, _ = await self.patch_repair.prepare(rid, work, change.changes, task.allowed_paths,
-                            stage="implement", context=task_context, operation=f"{key}/r{counters['round']}")
+                        from .output_limit_recovery import Incident
+                        if Incident(self.store, rid).active():
+                            prepare_changes(work, change.changes, task.allowed_paths, protected=False)
+                            changes = change.changes
+                        else:
+                            changes, _ = await self.patch_repair.prepare(rid, work, change.changes, task.allowed_paths,
+                                stage="implement", context=task_context, operation=f"{key}/r{counters['round']}")
                         change = change.model_copy(update={"changes": changes})
                         saved["implementation"] = change.model_dump()
                         self.store.checkpoint(rid, key, saved)
@@ -2519,6 +2574,11 @@ class WorkflowEngine:
                             recording_recovery.check_changes(recording, preliminary)
                         prepared = prepare_changes(work, change.changes, task.allowed_paths)
                 except ProtectedChange:
+                    from .output_limit_recovery import Incident
+                    if Incident(self.store, rid).active():
+                        # The returned correction is already a historical proposal.
+                        # Bind the first review to that same view used after restart.
+                        task_context["source_history"] = SourceHistory(self).collect_task(rid, work, task)
                     review_context = {**task_context, "candidate_changes": change.model_dump(),
                         "review_kind": "test_changes", "purpose": "Authorize proposed protected test/config changes against requirements"}
                     recording_error = None
@@ -2532,7 +2592,7 @@ class WorkflowEngine:
                             'Do not approve an unactivated method change or override adopted design choices.')
                     result = await self._invoke("review", review_context,
                         recording_recovery.RecordingReview if recording else ReviewResult,
-                        work, rid, key + "/test-change-review", fresh=True)
+                        work, rid, key + "/test-change-review", fresh=True, _incident_acceptance="test_changes")
                     review = result.review if recording else result
                     if recording:
                         saved['recording_review'] = result.model_dump()
@@ -2559,7 +2619,10 @@ class WorkflowEngine:
                 self.store.checkpoint(rid, key, saved)
                 recording_recovery.validate_prepared(self, rid, saved, task, plan)
                 self.authority.prepared_task(rid, saved, task)
+                from .output_limit_recovery import Incident
+                Incident(self.store, rid).prepared(task.id, work, prepared)
                 apply_prepared(work, prepared)
+                Incident(self.store, rid).applied(task.id, work, prepared)
                 saved.update(phase="applied", source_hash=tree_hash(work))
                 self.store.checkpoint(rid, key, saved)
                 self.convergence.milestone(rid, task.origin_id or task.id, "candidate_applied",
@@ -2625,7 +2688,8 @@ class WorkflowEngine:
                 review = await self._invoke("review", {**task_context, "review_kind": "implementation", "implementation": change.model_dump(),
                                                        "project": self.contexts.build(work, scopes=task.allowed_paths),
                                                        "checks": [c.model_dump() for c in checks],
-                                                       "source_hash": saved["source_hash"]}, ReviewResult, work, rid, key + "/review", fresh=True)
+                                                       "source_hash": saved["source_hash"]}, ReviewResult, work, rid, key + "/review", fresh=True,
+                                                       _incident_acceptance="implementation")
                 saved["review"] = review.model_dump()
                 if review.approved:
                     self._task_approval_context(rid, work, context)

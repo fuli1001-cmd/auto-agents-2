@@ -141,7 +141,8 @@ class SandboxRunner:
         finally:
             shutil.rmtree(scratch)
 
-    async def spawn(self, argv, cwd, env, writable, readable=None, overlays=None, hidden=None, cache_writes=None, readonly_overlays=None):
+    async def spawn(self, argv, cwd, env, writable, readable=None, overlays=None, hidden=None, cache_writes=None,
+                    readonly_overlays=None, _incident_launch=None):
         executable = shutil.which(argv[0], path=env.get("PATH", os.defpath))
         if not executable:
             raise PolicyViolation(f"Executable unavailable in selected environment: {argv[0]}")
@@ -153,6 +154,8 @@ class SandboxRunner:
                  *(source for source, _ in readonly_overlays or [])]
         # Overlay destinations are virtual, not use of the complete host directory.
         # Keep the original readable leaf paths above for exact artifact GC pins.
+        if _incident_launch is not None:
+            return await spawn_managed(command, cwd, env, self.root, paths, _incident_launch=_incident_launch)
         return await spawn_managed(command, cwd, env, self.root, paths)
 
     async def stop(self, process):

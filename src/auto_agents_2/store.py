@@ -475,6 +475,311 @@ class Store:
                 self._put(db, rid, key, data)
                 self._event(db, rid, "checkpoint.saved", {"key": key})
 
+    def authorize_output_limit(self, request):
+        """Supersede exactly one unanswered gate and add separate one-use authority."""
+        from .output_limit_recovery import KEY, latest_failure, raw_hash
+        rid = request["run_id"]
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM checkpoints WHERE run_id=? AND key=?", (rid, KEY)).fetchone():
+                raise AA2Error("Output-limit authority already exists; it cannot be replenished")
+            run = db.execute("SELECT status,stage FROM runs WHERE id=?", (rid,)).fetchone()
+            if not run or tuple(run) != ("PAUSED", "implement"):
+                raise AA2Error("Stop the original controller normally before authorizing its correction")
+            if latest_failure(db, request) != {key: request[key] for key in ("started_seq", "started_sha256", "started_at")}:
+                raise AA2Error("Original provider attempt changed before authorization")
+            resource = db.execute("SELECT data FROM resources WHERE id=? AND run_id=?",
+                                  (request["resource_id"], rid)).fetchone()
+            finished = db.execute("SELECT data FROM events WHERE seq=? AND run_id=?", (request["finished_seq"], rid)).fetchone()
+            if (not resource or raw_hash(resource[0]) != request["resource_data_sha256"]
+                    or not finished or raw_hash(finished[0]) != request["finished_sha256"]):
+                raise AA2Error("Original native resource or terminal event changed before authorization")
+            for key, expected in request["guards"].items():
+                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                if (raw_hash(row[0]) if row else None) != expected:
+                    raise AA2Error("Correction checkpoint changed before authorization")
+            question = db.execute("SELECT id,key,artifact_hash,answer,superseded FROM questions WHERE id=? AND run_id=?",
+                                  (request["question_id"], rid)).fetchone()
+            if not question or dict(question) != request["question"] or question["answer"] is not None or question["superseded"]:
+                raise AA2Error("Correction question changed before authorization")
+            pending = db.execute("SELECT id FROM questions WHERE run_id=? AND answer IS NULL AND superseded=0", (rid,)).fetchall()
+            if [row[0] for row in pending] != [request["question_id"]]:
+                raise AA2Error("Another unanswered question requires its own decision")
+            from .output_limit_runtime import budget_for_request
+            state = {"state": "active", "request": request, "calls": {}, "authorized_at": now(),
+                     "limits": budget_for_request(request), "runtime_binding": {"state": "unbound"},
+                     "runtime_quotes": {}}
+            self._put(db, rid, KEY, state)
+            db.execute("UPDATE questions SET superseded=1 WHERE id=? AND run_id=? AND answer IS NULL AND superseded=0",
+                       (request["question_id"], rid))
+            self._event(db, rid, "output_limit.authorized", {"request_hash": digest(request),
+                "question": request["question_id"], "failed_attempt": request["failed_attempt"],
+                "authorization_reference": request["authorization_reference"], "correction_calls_max": 1,
+                "material_probe_authorization_reference": request.get("material_probe_authorization_reference"),
+                "limits": state["limits"], "runtime_state": "unbound"})
+
+    def update_output_limit(self, rid, request_hash, updates):
+        from .output_limit_recovery import KEY
+        if not set(updates) <= {"state", "stop_reason", "prepared_patch", "applied_source", "commit"}:
+            raise AA2Error("Unsupported output-limit transition fields")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, KEY)).fetchone()
+            state = json.loads(row[0]) if row else None
+            if not state or digest(state["request"]) != request_hash:
+                raise AA2Error("Output-limit request identity changed")
+            if state["state"] != "active" and any(state.get(key) != value for key, value in updates.items()):
+                raise AA2Error("A closed output-limit incident cannot be reopened")
+            for key in {"prepared_patch", "applied_source", "commit"} & updates.keys():
+                if state.get(key) not in {None, updates[key]}:
+                    raise AA2Error("Output-limit candidate identity changed")
+            state.update(updates)
+            self._put(db, rid, KEY, state)
+            self._event(db, rid, "output_limit.updated", {"request_hash": request_hash, **updates})
+
+    def _output_limit_row(self, db, rid, request_hash):
+        from .config import ConfigStore
+        from .output_limit_recovery import KEY, code_identity, raw_hash
+        from .output_limit_runtime import budget_for_request
+        row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, KEY)).fetchone()
+        state = json.loads(row[0]) if row else None
+        if (not state or digest(state["request"]) != request_hash or state["state"] != "active"
+                or state.get("limits") != budget_for_request(state["request"])
+                or any(role not in state["limits"] or not state["limits"][role] for role in state["calls"])):
+            raise AA2Error("Output-limit authority or fixed role limits changed")
+        request = state["request"]
+        if (request["code_identity"] != code_identity()
+                or request["config_hash"] != digest(ConfigStore(self.root.parent).load().model_dump(mode="json"))):
+            raise AA2Error("Incident code or configuration changed")
+        fixed = {request["infra_key"], "plan", "plan_revision/current", "recovery/active",
+                 "replanning/pending", "control/cancel"}
+        for name in fixed:
+            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, name)).fetchone()
+            if (raw_hash(row[0]) if row else None) != request["guards"][name]:
+                raise AA2Error("Original incident authority or budget changed")
+        rounds = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?",
+                            (rid, "rounds/" + request["origin_id"])).fetchone()
+        question = db.execute("SELECT answer,superseded,artifact_hash FROM questions WHERE id=? AND run_id=?",
+                              (request["question_id"], rid)).fetchone()
+        if (not rounds or json.loads(rounds[0]).get("round") != request["round"] or not question
+                or tuple(question) != (None, 1, request["question"]["artifact_hash"])):
+            raise AA2Error("Original incident round or question changed")
+        if db.execute("SELECT id FROM questions WHERE run_id=? AND answer IS NULL AND superseded=0 LIMIT 1", (rid,)).fetchone():
+            raise AA2Error("Another unanswered incident gate has priority")
+        return state
+
+    def quote_output_limit_runtime(self, rid, request_hash, quote, quote_sha256):
+        from .output_limit_recovery import KEY
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            state = self._output_limit_row(db, rid, request_hash)
+            if (quote["request_hash"] != request_hash or quote["run_id"] != rid
+                    or quote["budget_hash"] != digest(state["limits"])
+                    or quote["claims_hash"] != digest(state["calls"])
+                    or quote["nonce"] in state["runtime_quotes"]):
+                raise AA2Error("Runtime quote or call occupancy changed")
+            state["runtime_quotes"][quote["nonce"]] = {"quote": quote, "sha256": quote_sha256,
+                                                        "consumed": False, "revoked": False}
+            state["runtime_binding"] = {"state": "unbound", "nonce": quote["nonce"]}
+            self._put(db, rid, KEY, state)
+            self._event(db, rid, "output_limit.runtime_quoted", {"nonce": quote["nonce"], "sha256": quote_sha256})
+
+    def bind_output_limit_runtime(self, rid, request_hash, nonce, quote_sha256, message_sha256, controller):
+        from .output_limit_recovery import KEY
+        from .output_limit_runtime import controller_identity
+        if controller_identity(self.root) != controller:
+            raise AA2Error("Runtime activation must be consumed by the live lock owner")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            state = self._output_limit_row(db, rid, request_hash)
+            entry = state["runtime_quotes"].get(nonce)
+            if (not entry or entry["revoked"] or entry["consumed"] or entry["sha256"] != quote_sha256
+                    or state["runtime_binding"] != {"state": "unbound", "nonce": nonce}
+                    or entry["quote"]["controller"] != controller
+                    or entry["quote"]["claims_hash"] != digest(state["calls"])):
+                raise AA2Error("Runtime activation quote is stale or consumed")
+            request = state["request"]
+            question = db.execute("SELECT answer,superseded,artifact_hash FROM questions WHERE id=? AND run_id=?",
+                                  (request["question_id"], rid)).fetchone()
+            if not question or tuple(question) != (None, 1, request["question"]["artifact_hash"]):
+                raise AA2Error("Original incident question changed after authorization")
+            entry.update(consumed=True, message_sha256=message_sha256)
+            state["runtime_binding"] = {"state": "bound", "nonce": nonce, "runtime": entry["quote"]["runtime"]}
+            self._put(db, rid, KEY, state)
+            self._event(db, rid, "output_limit.runtime_bound", {"nonce": nonce, "quote_sha256": quote_sha256,
+                                                              "message_sha256": message_sha256})
+
+    def revoke_output_limit_quote(self, rid, request_hash, nonce):
+        from .output_limit_recovery import KEY
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, KEY)).fetchone()
+            state = json.loads(row[0]) if row else None
+            if not state or digest(state["request"]) != request_hash:
+                raise AA2Error("Runtime revocation request changed")
+            entry = state.get("runtime_quotes", {}).get(nonce)
+            if entry and not entry["consumed"]:
+                entry["revoked"] = True
+                self._put(db, rid, KEY, state)
+                self._event(db, rid, "output_limit.runtime_quote_revoked", {"nonce": nonce})
+
+    def claim_output_limit_call(self, rid, request_hash, role, operation, attempt, input_identity, launch,
+                                challenge=None):
+        from .output_limit_recovery import KEY
+        from .output_limit_runtime import BUSINESS_ROLES, PROBE_ROLES, controller_identity
+        owner = controller_identity(self.root)
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            state = self._output_limit_row(db, rid, request_hash)
+            bound = state.get("runtime_binding", {})
+            if (role not in state["limits"] or state["limits"][role] != 1 or role in state["calls"]
+                    or bound.get("state") != "bound" or bound["runtime"]["controller"] != owner
+                    or launch.get("controller") != owner or launch.get("runtime_nonce") != bound["nonce"]
+                    or launch.get("runtime_hash") != digest(bound["runtime"])
+                    or launch.get("role") != role or launch.get("operation") != operation
+                    or launch.get("execution_input") != input_identity):
+                raise AA2Error("Output-limit invocation is occupied, unbound or changed")
+            group = "implement" if role in {"correction", "material_probe_implement"} else "review"
+            profile = bound["runtime"]["profiles"][group]
+            if launch.get("profile") != profile:
+                raise AA2Error("Actual launch profile changed")
+            if role in PROBE_ROLES:
+                expected = "material-probe/" + profile["capability_key"]
+                if (not challenge or challenge["capability_key"] != profile["capability_key"]
+                        or challenge["parent_role"] not in ({"correction"} if group == "implement"
+                                                            else {"protected_review", "implementation_review"})):
+                    raise AA2Error("Material probe is not bound to its fixed parent/key")
+                if challenge["parent_role"] in state["calls"]:
+                    raise AA2Error("Material probe parent is already occupied")
+                if group == "review":
+                    correction = state["calls"].get("correction", {})
+                    task_row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?",
+                                          (rid, state["request"]["operation"])).fetchone()
+                    task = json.loads(task_row[0]) if task_row else {}
+                    expected_phase = "implementing" if challenge["parent_role"] == "protected_review" else "tested"
+                    if (correction.get("state") != "completed" or task.get("phase") != expected_phase
+                            or digest(task.get("implementation")) != correction.get("result_hash")):
+                        raise AA2Error("Review probe has no eligible existing acceptance parent")
+            else:
+                expected = state["request"]["operation"] + {
+                    "correction": "", "protected_review": "/test-change-review", "implementation_review": "/review"}[role]
+                if challenge is not None:
+                    raise AA2Error("Business call cannot replace material proof")
+            if operation != expected:
+                raise AA2Error("Output-limit invocation operation changed")
+            if role == "correction" and (launch.get("logical_input") != state["request"]["logical_input"]
+                    or launch.get("schema_hash") != state["request"]["schema_hash"]
+                    or launch.get("source_hash") != state["request"]["source_hash"]):
+                raise AA2Error("Original corrective business input changed before claim")
+            if (role in BUSINESS_ROLES and role != "correction"
+                    and state["calls"].get("correction", {}).get("state") != "completed"):
+                raise AA2Error("Acceptance cannot precede a complete correction response")
+            if role in {"protected_review", "implementation_review"}:
+                task_row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?",
+                                      (rid, state["request"]["operation"])).fetchone()
+                task = json.loads(task_row[0]) if task_row else {}
+                expected_source = state["request"]["source_hash"] if role == "protected_review" else state.get("applied_source")
+                if (task.get("phase") != ("implementing" if role == "protected_review" else "tested")
+                        or digest(task.get("implementation")) != state["calls"]["correction"]["result_hash"]
+                        or not expected_source or launch["source_hash"] != expected_source):
+                    raise AA2Error("Acceptance candidate/source changed before claim")
+            state["calls"][role] = {"state": "claimed", "operation": operation, "attempt": attempt,
+                "input_identity": input_identity, "claimed_at": now(), "launch": launch,
+                **({"challenge": challenge, "capability_key": profile["capability_key"]} if role in PROBE_ROLES else {})}
+            self._put(db, rid, KEY, state)
+            self._event(db, rid, "output_limit.call_claimed", {"request_hash": request_hash,
+                "role": role, "operation": operation, "attempt": attempt, "input_identity": input_identity})
+
+    def complete_output_limit_call(self, rid, request_hash, role, attempt, result_hash):
+        from .output_limit_recovery import KEY
+        from .output_limit_runtime import PROBE_ROLES
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            state = self._output_limit_row(db, rid, request_hash)
+            claim = state["calls"].get(role)
+            if (not claim or claim["attempt"] != attempt
+                    or claim.get("result_hash") not in {None, result_hash}):
+                raise AA2Error("Output-limit result does not belong to its occupied call")
+            if role in PROBE_ROLES:
+                if claim["state"] != "proof_confirmed":
+                    claim.update(state="native_result", result_hash=result_hash)
+            else:
+                claim.update(state="completed", result_hash=result_hash)
+            self._put(db, rid, KEY, state)
+            self._event(db, rid, "output_limit.call_completed", {"request_hash": request_hash,
+                "role": role, "attempt": attempt, "result_hash": result_hash, "state": claim["state"]})
+
+    def confirm_output_limit_probe(self, rid, request_hash, role, attempt, proof, expected):
+        from .output_limit_recovery import KEY, raw_hash
+        from .output_limit_runtime import PROBE_ROLES, verify_historical_launch
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            state = self._output_limit_row(db, rid, request_hash)
+            claim = state["calls"].get(role)
+            if (role not in PROBE_ROLES or not claim or claim["attempt"] != attempt
+                    or claim["state"] != "native_result"
+                    or proof != {"status": "observed_read", "challenge_identity": claim["challenge"]["expected_identity"]}):
+                raise AA2Error("Probe proof does not match its occupied native result")
+            verify_historical_launch(state, role, claim)
+            key = "material-capability/" + claim["capability_key"]
+            keys = {key, "invocation/" + claim["operation"], "provider-result/" + claim["operation"]}
+            if set(expected) != keys:
+                raise AA2Error("Probe proof publication needs exact receipt CAS")
+            for name, fingerprint in expected.items():
+                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, name)).fetchone()
+                if (raw_hash(row[0]) if row else None) != fingerprint:
+                    raise AA2Error("Probe result/capability changed before proof publication")
+                if name != key and (not row or fingerprint is None):
+                    raise AA2Error("Probe native result receipt is missing")
+            invocation = json.loads(db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?",
+                (rid, "invocation/" + claim["operation"])).fetchone()[0])
+            result = json.loads(db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?",
+                (rid, "provider-result/" + claim["operation"])).fetchone()[0])
+            if (invocation.get("attempt") != attempt or result.get("attempt") != attempt
+                    or not invocation.get("artifact") or invocation["artifact"] != result.get("artifact")
+                    or digest(invocation.get("result")) != claim["result_hash"]
+                    or invocation.get("incident_launch") != claim["launch"]):
+                raise AA2Error("Probe committed result differs from its occupied claim")
+            capability = {**proof, "capability": claim["capability_key"], "scope": "text read; not task correctness",
+                          "incident_request": request_hash, "role": role, "attempt": attempt}
+            claim.update(state="proof_confirmed", proof=proof, capability_record=capability)
+            self._put(db, rid, key, capability)
+            self._put(db, rid, KEY, state)
+            self._event(db, rid, "output_limit.material_proof_confirmed", {"role": role, "attempt": attempt,
+                "capability_key": claim["capability_key"], "challenge_identity": proof["challenge_identity"]})
+
+    def restore_output_limit_proposal(self, rid, request_hash, expected, proposal):
+        from .output_limit_recovery import KEY, raw_hash
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, KEY)).fetchone()
+            record = json.loads(row[0]) if row else None
+            if not record or record["state"] != "active" or digest(record["request"]) != request_hash:
+                raise AA2Error("Output-limit proposal authority changed")
+            request, claim = record["request"], record["calls"].get("correction", {})
+            operation = request["operation"]
+            if (set(expected) != {operation, "invocation/" + operation, "provider-result/" + operation}
+                    or claim.get("state") != "completed" or claim.get("operation") != operation
+                    or claim.get("input_identity") != claim.get("launch", {}).get("execution_input")
+                    or claim.get("result_hash") != digest(proposal)):
+                raise AA2Error("Output-limit proposal receipt changed")
+            values = {}
+            for key, fingerprint in expected.items():
+                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                if not row or raw_hash(row[0]) != fingerprint:
+                    raise AA2Error("Output-limit proposal publication lost its compare-and-set")
+                values[key] = json.loads(row[0])
+            task = values[operation]
+            if (task.get("phase") != "implementing" or task.get("implementation") or task.get("patch") is not None
+                    or task.get("commit") or task.get("workspace") != request["workspace"]
+                    or task.get("source_hash") != request["source_hash"]
+                    or values["invocation/" + operation].get("result") != proposal):
+                raise AA2Error("Output-limit pending task changed before proposal publication")
+            self._put(db, rid, operation, {**task, "implementation": proposal})
+            self._event(db, rid, "output_limit.proposal_restored", {"request_hash": request_hash,
+                "operation": operation, "attempt": claim["attempt"], "result_hash": claim["result_hash"],
+                "task_before_sha256": expected[operation]})
+
     def get(self, rid, key, default=None):
         with self.connect() as db:
             row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()

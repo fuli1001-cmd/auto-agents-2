@@ -7,7 +7,7 @@ from test_runtime import configured
 
 from auto_agents_2.errors import InvalidStructuredResponse, ProviderError
 from auto_agents_2.models import ReviewResult
-from auto_agents_2.providers import EventDecoder, ProviderRouter
+from auto_agents_2.providers import OUTPUT_LIMIT_DIAGNOSTIC, EventDecoder, ProviderRouter
 from auto_agents_2.sandbox import SandboxRunner
 from auto_agents_2.transports import AntigravityTransport
 from auto_agents_2.util import write_json
@@ -30,7 +30,7 @@ ERROR = {"type": "error", "message": "fixture stream error EXAMPLE_PLACEHOLDER"}
 FAILED = {"type": "turn.failed", "error": {"message": "context_window_exceeded EXAMPLE_PLACEHOLDER"}}
 
 
-def fixture_router(tmp_path, events, *, file_response=None, exit_code=0, kind="codex", retries=0):
+def fixture_router(tmp_path, events, *, file_response=None, exit_code=0, kind="codex", retries=0, stderr_text=""):
     project = tmp_path / "project"
     project.mkdir()
     config, store = configured(project)
@@ -38,7 +38,7 @@ def fixture_router(tmp_path, events, *, file_response=None, exit_code=0, kind="c
     native.mkdir()
     binary = tmp_path / "provider"
     binary.write_text(f"#!{sys.executable}\nEVENTS = {events!r}\n"
-                      f"FILE_RESPONSE = {file_response!r}\nEXIT_CODE = {exit_code!r}\n" + '''
+                      f"FILE_RESPONSE = {file_response!r}\nEXIT_CODE = {exit_code!r}\nSTDERR = {stderr_text!r}\n" + '''
 import json, pathlib, sys
 args = sys.argv[1:]
 sys.stdin.read()
@@ -46,6 +46,7 @@ if FILE_RESPONSE is not None:
     pathlib.Path(args[args.index("-o") + 1]).write_text(FILE_RESPONSE)
 for event in EVENTS:
     print(json.dumps(event), flush=True)
+sys.stderr.write(STDERR)
 sys.exit(EXIT_CODE)
 ''')
     binary.chmod(0o755)
@@ -208,3 +209,118 @@ def test_stream_error_without_text_is_still_a_known_error(event):
     assert decoder.stream_error and not decoder.finished
     decoder.feed(COMPLETE)
     assert decoder.finished and not decoder.error and decoder.stream_error
+
+
+OUTPUT_LIMIT_MESSAGE = "Incomplete response returned, reason: max_output_tokens"
+OUTPUT_LIMIT = {"type": "turn.failed", "error": {
+    "message": OUTPUT_LIMIT_MESSAGE, "codexErrorInfo": "other", "additionalDetails": None}}
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+@pytest.mark.parametrize("details,attempts", [
+    ("EXAMPLE_PRIVATE_DETAILS", 1),
+    ("connection timeout EXAMPLE_PRIVATE_DETAILS", 2),
+    ("context_window_exceeded connection EXAMPLE_PRIVATE_DETAILS", 1),
+])
+async def test_typed_output_limit_is_diagnostic_only_with_existing_retry_rules(tmp_path, exit_code, details, attempts):
+    failure = {**OUTPUT_LIMIT, "error": {**OUTPUT_LIMIT["error"], "additionalDetails": details}}
+    router, project, store, rid = fixture_router(
+        tmp_path, [START, TURN, failure], file_response=TEXT, exit_code=exit_code, retries=1)
+    with pytest.raises(ProviderError, match="max_output_tokens") as caught:
+        await router.invoke("review", {}, ReviewResult, project, rid, "review")
+    assert type(caught.value) is ProviderError
+    assert store.get(rid, "provider-result/review") is None
+    assert store.get(rid, "invocation/review") is None
+    state = store.get(rid, "infra/review/codex")
+    assert state["error_kind"] == "unavailable" and state["failures"] == attempts
+    assert state["grant"] == 0 and not state["pending"]
+    history = store.events(rid)
+    assert len([event for event in history if event["kind"] == "agent.started"]) == attempts
+    finished = [event["data"] for event in history if event["kind"] == "agent.finished"]
+    assert len(finished) == attempts
+    assert all(event["diagnostic"] == OUTPUT_LIMIT_DIAGNOSTIC and event["outcome"] == "error"
+               and not event["complete"] for event in finished)
+    assert "EXAMPLE_PRIVATE_DETAILS" not in str(caught.value) + json.dumps(history) + json.dumps(state)
+    assert not list((store.root / "processes").glob("*.json"))
+
+
+@pytest.mark.parametrize("error", [
+    OUTPUT_LIMIT_MESSAGE,
+    {"message": "prefix " + OUTPUT_LIMIT_MESSAGE},
+    {"message": OUTPUT_LIMIT_MESSAGE + " suffix"},
+    {"message": {"message": OUTPUT_LIMIT_MESSAGE}},
+    {"details": {"message": OUTPUT_LIMIT_MESSAGE}},
+])
+def test_output_limit_requires_exact_typed_terminal_message(error):
+    decoder = EventDecoder("codex")
+    for event in (START, TURN, {"type": "turn.failed", "error": error}):
+        decoder.feed(event)
+    assert decoder.error and not decoder.finished and not decoder.failure_diagnostic
+
+
+@pytest.mark.parametrize("events,stderr_text", [
+    ([START, TURN, {"type": "item.completed", "item": {
+        "type": "agent_message", "text": OUTPUT_LIMIT_MESSAGE}}], ""),
+    ([START, TURN], OUTPUT_LIMIT_MESSAGE),
+])
+async def test_output_limit_text_outside_typed_error_has_no_terminal_label(tmp_path, events, stderr_text):
+    router, project, store, rid = fixture_router(
+        tmp_path, events, file_response=TEXT, stderr_text=stderr_text)
+    with pytest.raises(ProviderError) as caught:
+        await router.invoke("review", {}, ReviewResult, project, rid, "review")
+    assert type(caught.value) is ProviderError and "max_output_tokens" not in str(caught.value)
+    assert store.get(rid, "provider-result/review") is None
+    finished = next(event["data"] for event in store.events(rid) if event["kind"] == "agent.finished")
+    assert finished["diagnostic"] != OUTPUT_LIMIT_DIAGNOSTIC
+
+
+async def test_output_limit_notification_can_complete_successfully(tmp_path):
+    notice = {"type": "error", "error": OUTPUT_LIMIT["error"]}
+    router, project, store, rid = fixture_router(tmp_path, [START, TURN, notice, MESSAGE, COMPLETE])
+    result = await router.invoke("review", {}, ReviewResult, project, rid, "review")
+    assert result.model_dump(mode="json") == REVIEW
+    assert store.get(rid, "infra/review/codex") == {"pending": False, "failures": 0, "grant": 0}
+    finished = next(event["data"] for event in store.events(rid) if event["kind"] == "agent.finished")
+    assert finished["outcome"] == "success" and finished["diagnostic"] == ""
+
+
+@pytest.mark.parametrize("events", [
+    [START, TURN, FAILED, OUTPUT_LIMIT],
+    [START, TURN, TURN, OUTPUT_LIMIT],
+    [START, TURN, OUTPUT_LIMIT, COMPLETE],
+    [START, TURN, MESSAGE, COMPLETE, OUTPUT_LIMIT],
+    [START, TURN, OUTPUT_LIMIT, ERROR],
+])
+async def test_output_limit_does_not_override_prior_or_contradictory_terminal_errors(tmp_path, events):
+    decoder = EventDecoder("codex")
+    for event in events:
+        decoder.feed(event)
+    assert decoder.error and not decoder.finished and not decoder.failure_diagnostic
+    if events[2] == FAILED:
+        assert "context_window_exceeded" in decoder.error
+    router, project, store, rid = fixture_router(tmp_path, events, file_response=TEXT)
+    with pytest.raises(ProviderError) as caught:
+        await router.invoke("review", {}, ReviewResult, project, rid, "review")
+    assert type(caught.value) is ProviderError
+    assert store.get(rid, "provider-result/review") is None
+    finished = next(event["data"] for event in store.events(rid) if event["kind"] == "agent.finished")
+    assert finished["diagnostic"] != OUTPUT_LIMIT_DIAGNOSTIC
+
+
+@pytest.mark.parametrize("legacy_checkpoint", [False, True])
+async def test_output_limit_diagnostic_does_not_rewrite_exhausted_checkpoint_on_restart(tmp_path, legacy_checkpoint):
+    router, project, store, rid = fixture_router(tmp_path, [START, TURN, OUTPUT_LIMIT], file_response=TEXT)
+    key = "infra/review/codex"
+    if legacy_checkpoint:
+        store.checkpoint(rid, key, {"failures": 2, "grant": 0, "pending": False,
+                                    "error_kind": "unavailable", "error_input": "legacy-input"})
+    else:
+        with pytest.raises(ProviderError, match="max_output_tokens"):
+            await router.invoke("review", {}, ReviewResult, project, rid, "review")
+    saved = store.get(rid, key)
+    restarted = ProviderRouter(router.config, store, router.sandbox)
+    with pytest.raises(ProviderError, match="persisted retry budget exhausted") as caught:
+        await restarted.invoke("review", {}, ReviewResult, project, rid, "review")
+    assert type(caught.value) is ProviderError and store.get(rid, key) == saved
+    assert len([event for event in store.events(rid) if event["kind"] == "agent.started"]) == (0 if legacy_checkpoint else 1)
+    assert store.get(rid, "provider-result/review") is None

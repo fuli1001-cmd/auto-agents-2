@@ -260,6 +260,38 @@ def resume(project: Project = Path("."), run_id: Annotated[str | None, typer.Opt
         console.print("已保存检查点。")
 
 
+@app.command("authorize-output-limit-correction")
+def authorize_output_limit_correction(
+    request: Annotated[Path, typer.Option("--request")],
+    sha256: Annotated[str, typer.Option("--sha256")],
+    project: Project = Path("."),
+    confirm_one_call: Annotated[bool, typer.Option("--confirm-one-call")] = False,
+    confirm_two_material_probes: Annotated[bool, typer.Option("--confirm-two-material-probes")] = False,
+):
+    """Authorize one reviewed incident correction after the controller has paused."""
+    from .output_limit_recovery import authorize
+    try:
+        console.print_json(data=authorize(project.resolve(), request, sha256, confirm_one_call=confirm_one_call,
+                                          confirm_two_material_probes=confirm_two_material_probes))
+    except AA2Error as exc:
+        fail(exc)
+
+
+@app.command("activate-output-limit-runtime")
+def activate_output_limit_runtime(
+    quote: Annotated[Path, typer.Option("--quote")],
+    sha256: Annotated[str, typer.Option("--sha256")],
+    authorization_reference: Annotated[str, typer.Option("--authorization-reference")],
+    project: Project = Path("."),
+):
+    """Submit the exact quote to its live controller; this command does not edit the database."""
+    from .output_limit_runtime import publish_activation
+    try:
+        console.print_json(data=publish_activation(project.resolve(), quote, sha256, authorization_reference))
+    except (AA2Error, OSError, ValueError) as exc:
+        fail(exc if isinstance(exc, AA2Error) else AA2Error("Invalid incident runtime activation file"))
+
+
 @app.command("reconcile-process-reboot")
 def reconcile_process_reboot(
     request: Annotated[Path, typer.Option("--request", help="已独立核对的单进程重启恢复请求")],

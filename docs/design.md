@@ -844,3 +844,67 @@ artifact-GC transaction/scheduling contract are unchanged. Existing whole-sessio
 cleanup after a terminal run remains governed by its original policy; this
 feature neither extends that deletion authority nor introduces permanent
 retention of all terminal native session bodies.
+
+### Explicit correction of one output-limit incident
+
+An exact typed Codex terminal output-limit error remains a failed provider call.
+Its safe diagnostic preserves the reason; it does not grant retries or accept a
+partial response. Ordinary provider retry accounting and human gates are unchanged.
+
+For an explicitly approved single incident, `output_limit_recovery.prepare`
+produces a bounded request binding the latest failed operation/attempt/native turn,
+the unanswered question, source, schema, profile, accumulated round, and original
+checkpoint bytes. Stop the existing controller normally before applying that
+reviewed request with `aa2 authorize-output-limit-correction --request ...
+--sha256 ... --confirm-one-call --project ...`. A separately approved expansion
+adds `material_probe_authorization_reference` and requires
+`--confirm-two-material-probes`; it does not rewrite the original correction
+authorization. The command acquires the controller
+lock and atomically supersedes only that question, leaving its answer null and
+its original infrastructure failures/grant intact. Replaying the request cannot
+replenish authority. Runtime starts unbound, blocking every model dispatch.
+The single ordinary resumed controller owns the lock and quotes its actual
+initialized profiles, native inputs, binary/version, capability keys and original
+business input. `aa2 activate-output-limit-runtime --quote ... --sha256 ...
+--authorization-reference ... --project ...` writes only a bounded, nonce-bound
+message. That same lock owner rechecks and CAS-consumes it. Another process cannot
+dispatch from the old quote; unused roles need a new quote without new authority.
+
+The extra authority permits at most one correction native CLI invocation, claimed
+durably immediately before model-process spawn. Unknown starts and confirmed
+cancellation retain occupancy; retry, fallback and hidden material probes cannot
+add another invocation. Without the separately approved expansion, an existing
+exact material-read capability is required. With the expansion there are two
+fixed, zero-or-one probe roles: implementation and shared review profile. Only
+an actual required cache miss can claim either. The unchanged random challenge
+must pass `confirm_read` before an atomic exact-key capability plus proof-confirmed
+completion; a schema-valid native result alone is not proof. Claims retain their
+challenge/result/proof/cleanup evidence and cannot change keys or refill after
+failure, cancellation or restart. An unclaimed role can bind its first key under
+a new actual quote. The correction uses the original model/effort and frozen
+logical input, with separate presentation/session evidence and a cue to produce
+complete compact JSON syntax while preserving whitespace inside code strings.
+
+The original task still requires its applicable protected-change review and its
+implementation review, with their original schemas, authority, profiles, checks
+and provider budgets. Those zero-or-one and one review invocations are accounted
+separately; they grant no review retries. Any proposal, material, apply, check,
+review, integration or recovery-request failure pauses this incident without
+redispatch. Durable successful provider results can only be reconciled/reused
+with matching historical receipt, artifact, business/authority and cleanup
+evidence for correction and both reviews, even when a new process has a different
+execution fingerprint. Probe reconciliation verifies the same original challenge
+without redispatch or moving proof to a new key. Actual public/material/native
+projection bytes are fixed separately from execution-source identity. Incident
+views disable automatic Git maintenance per command in each new temporary
+snapshot; ordinary views and user repository/global configuration are unchanged.
+The complete snapshot, including Git metadata, remains verified. A narrow
+managed-process guard verifies final command, transformed child environment and
+record identity, then durably claims before model supervisor/CLI creation. Git
+metadata checks may use ordinary non-model subprocesses. Generic sandbox
+security, supervision, cleanup and ordinary provider behavior remain unchanged.
+With both optional probes and both eligible reviews, this incident segment has
+at most five native model invocations; exact cache hits reduce it, and two probes
+are not guaranteed to suffice across runtime drift. Version checks are separate
+non-model processes. Normal subsequent work is
+released only after the original task is accepted and actually integrated.
