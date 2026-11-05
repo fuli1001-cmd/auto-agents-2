@@ -388,3 +388,50 @@ def test_workflow_selects_resolver_for_research_only(monkeypatch, enabled):
     monkeypatch.setattr(engine, "ResearchService", service)
     assert workflow._research_service() == "EXAMPLE_SERVICE"
     assert calls == [((workflow.artifacts,), {"resolver_config": selected.research_resolver} if enabled else {})]
+
+
+@pytest.mark.parametrize("provider", ["google", "cloudflare"])
+async def test_documented_json_accept_negotiates_both_provider_response_types(monkeypatch, provider):
+    selected = policy()
+    if provider == "google":
+        selected.endpoint = "https://dns.google/resolve"
+        response_type = "application/json"
+    else:
+        selected.endpoint = "https://cloudflare-dns.com/dns-query"
+        selected.bootstrap_ips = ["1.1.1.1", "1.0.0.1"]
+        response_type = "application/dns-json"
+    requests = []
+    def respond(request):
+        requests.append(request)
+        # The former compound Accept triggers400 in the observed CF profile.
+        if request.headers.get("accept") != "application/dns-json":
+            return httpx.Response(400, text="EXAMPLE_FORMAT_NEGOTIATION_FAILURE")
+        assert request.headers.get("accept-encoding") == "identity"
+        assert request.url.params["name"] == "example.com" and request.url.params["cd"] == "false"
+        kind = int(request.url.params["type"])
+        return httpx.Response(200, json=answer(kind, hostname="example.com"), headers={"content-type": response_type})
+    install_dns(monkeypatch, respond)
+    result = await HTTPSJSONResolver(selected, ProxySettings(False)).resolve("example.com", 443, 1)
+    assert len(requests) == 2 and {request.url.params["type"] for request in requests} == {"1", "28"}
+    assert result.addresses == ("93.184.216.34", "2606:4700:4700::1111")
+
+
+async def test_json_accept_does_not_turn_http400_into_a_partial_or_fallback_result(monkeypatch):
+    from auto_agents_2.errors import ResearchResolverUnavailable
+    from auto_agents_2.faults import known_exception
+
+    requests = []
+    def respond(request):
+        requests.append(request)
+        assert request.headers.get("accept") == "application/dns-json"
+        return httpx.Response(400, text="EXAMPLE_OTHER_BAD_QUERY")
+    install_dns(monkeypatch, respond)
+    backend = PublicNetworkBackend(resolver=HTTPSJSONResolver(policy(), ProxySettings(False)))
+    async def forbidden(*args, **kwargs):
+        pytest.fail("HTTP400 must not open a target or fall back to system DNS")
+    monkeypatch.setattr(backend.backend, "connect_tcp", forbidden)
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", forbidden)
+    with pytest.raises(ResearchResolverUnavailable) as observed:
+        await backend.connect_tcp("example.com", 443, 1)
+    assert requests and observed.value.evidence["http_status"] == 400
+    assert known_exception(observed.value, "provider_research").requirement.kind == "external_input"

@@ -137,7 +137,7 @@ class HTTPSJSONResolver:
             async with asyncio.timeout(timeout), httpx.AsyncClient(
                     transport=transport, trust_env=False, follow_redirects=False, timeout=timeout,
                     cookies=CookieJar(policy=NoResolverCookies()),
-                    headers={"Accept": "application/dns-json, application/json", "Accept-Encoding": "identity"}) as client:
+                    headers={"Accept": "application/dns-json", "Accept-Encoding": "identity"}) as client:
                 async def query(kind):
                     async with client.stream("GET", self.endpoint, params={"name": hostname, "type": str(kind), "cd": "false"}) as response:
                         if response.is_redirect:
