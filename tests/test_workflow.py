@@ -88,7 +88,14 @@ class CodingAgent:
         return authority_review(context, summary="verified")
 
 
-def engine(project, agent):
+def fixture_host_volume(distribution):
+    """Synthetic host fact only; the monitor still observes actual guest disk."""
+    return {"scope": "wsl_backing", "name": "fixture_host_volume",
+            "free": 1024 ** 4, "total": 2 * 1024 ** 4,
+            "fixture": True, "actual_native_storage": False}
+
+
+def engine(project, agent, *, storage=None):
     config = ConfigStore(project)
     config.initialize()
     body = config.load().model_dump(mode="json")
@@ -97,6 +104,11 @@ def engine(project, agent):
     WorkspaceManager(project).initialize()
     sandbox = SandboxRunner(project / ".aa2", _test_unconfined=True)
     result = WorkflowEngine(project, agent=agent, sandbox=sandbox)
+    # Only the external host query is isolated. Guest disk, monitor locking,
+    # cancellation and the existing unknown/low boundary stay in use.
+    from auto_agents_2.storage_space import StorageMonitor
+    result.storage = (StorageMonitor(result.store.root, backing_volume_reader=fixture_host_volume)
+                      if storage is None else storage)
 
     async def fixture_preflight():
         return {"version": 1, "ok": True, "checks": {}, "fixture": True}

@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -129,7 +131,61 @@ def windows_backing_volume(distribution):
     return {"scope": "wsl_backing", **row}
 
 
-def observe(path):
+def _query_diagnostic(path, error):
+    """Keep fixed-query stderr private; this is never an ArtifactStore object."""
+    stderr = error.stderr
+    representation = "bytes" if isinstance(stderr, bytes) else "exception_text_utf8_backslashreplace"
+    raw = stderr if isinstance(stderr, bytes) else (stderr or "").encode("utf-8", "backslashreplace")
+    retained = raw[:8192]
+    result = {"scope": "wsl_backing", "returncode": error.returncode,
+              "stderr_representation": representation, "stderr_bytes": len(raw),
+              "stderr_sha256": hashlib.sha256(raw).hexdigest(), "retained": False}
+    root = Path(path)
+    if root.name != ".aa2":
+        result["retention_error_type"] = "PrivateStateRootUnavailable"
+        return result
+    directory = root_fd = None
+    try:
+        if root.absolute() != root.resolve():
+            raise ValueError("Storage diagnostics require a local state root")
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        info = os.fstat(root_fd)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError("Storage diagnostic root is not owned")
+        try:
+            os.mkdir("storage-diagnostics", 0o700, dir_fd=root_fd)
+            os.fsync(root_fd)
+        except FileExistsError:
+            pass
+        directory = os.open("storage-diagnostics", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        info = os.fstat(directory)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ValueError("Storage diagnostic directory is not private and owned")
+        name = "query-" + os.urandom(16).hex() + ".stderr"
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+        with os.fdopen(fd, "wb") as stream:
+            info = os.fstat(stream.fileno())
+            if info.st_uid != os.getuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
+                raise ValueError("Storage diagnostic leaf is not private and owned")
+            stream.write(retained)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.fsync(directory)
+        result.update(retained=True, diagnostic_id=name, retained_bytes=len(retained),
+                      retained_sha256=hashlib.sha256(retained).hexdigest(), truncated=len(raw) > len(retained))
+    except (OSError, ValueError) as exc:
+        result["retention_error_type"] = type(exc).__name__
+    finally:
+        for fd in (directory, root_fd):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError as exc:
+                    result.update(retained=False, retention_error_type=type(exc).__name__)
+    return result
+
+
+def observe(path, *, backing_volume_reader=None):
     """No cache/native payload reads. Probe errors are facts, never a healthy result."""
     report = {"version": 1, "observed_at": time.time(), "platform": None,
               "volumes": [], "errors": []}
@@ -146,10 +202,14 @@ def observe(path):
         return report
     if is_wsl:
         try:
-            report["volumes"].append(windows_backing_volume(os.environ.get("WSL_DISTRO_NAME")))
+            reader = windows_backing_volume if backing_volume_reader is None else backing_volume_reader
+            report["volumes"].append(reader(os.environ.get("WSL_DISTRO_NAME")))
         except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError) as exc:
-            # Native stderr can contain host details; expose only an error category.
+            # Preserve the public safe category. Native error text stays outside
+            # artifacts/model material, in the already masked state directory.
             report["errors"].append({"scope": "wsl_backing", "error_type": type(exc).__name__})
+            if isinstance(exc, subprocess.CalledProcessError):
+                report["diagnostics"] = [_query_diagnostic(path, exc)]
     return report
 
 
@@ -173,8 +233,9 @@ def boundary(report, minimum, phase):
 class StorageMonitor:
     """One bounded local probe at a time; cancellation joins its worker."""
 
-    def __init__(self, path):
+    def __init__(self, path, *, backing_volume_reader=None):
         self.path = path
+        self._backing_volume_reader = backing_volume_reader
         self._lock = asyncio.Lock()
         self._report = None
         self._at = float("-inf")
@@ -185,6 +246,8 @@ class StorageMonitor:
                 return self._report
             # subprocess.run owns and waits for its bounded PowerShell process.
             # joined also waits through cancellation; no orphaned probe thread.
-            report = await joined(asyncio.create_task(asyncio.to_thread(observe, self.path)))
+            worker = (asyncio.to_thread(observe, self.path) if self._backing_volume_reader is None else
+                      asyncio.to_thread(observe, self.path, backing_volume_reader=self._backing_volume_reader))
+            report = await joined(asyncio.create_task(worker))
             self._report, self._at = report, time.monotonic()
             return report
