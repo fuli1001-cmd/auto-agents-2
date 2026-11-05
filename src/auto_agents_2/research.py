@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urldefrag, urljoin, urlsplit
 import httpx
 
 from .artifacts import ArtifactStore
-from .errors import AA2Error
+from .errors import AA2Error, DocumentAcquisitionUnavailable
 from .http_body import ACQUISITION_TIMEOUT, acquisition_deadline, read_body
 from .models import SourceEvidence
 from .network import PublicHTTPTransport, public_address
@@ -49,22 +49,26 @@ class ResearchService:
             proxy_settings = ProxySettings()
             resolver = HTTPSJSONResolver(self.resolver_config, proxy_settings)
             transport = PublicHTTPTransport(resolver=resolver, proxy_settings=proxy_settings)
-        async with acquisition_deadline(ACQUISITION_TIMEOUT, label, source_url=url), httpx.AsyncClient(
-                transport=transport, trust_env=False, follow_redirects=False, timeout=30,
-                headers={"Accept-Encoding": "gzip, deflate"}) as client:
-            final = url
-            for _ in range(6):
-                public_url(final)
-                async with client.stream("GET", final) as response:
-                    if response.is_redirect and "location" in response.headers:
-                        final = urljoin(final, response.headers["location"])
-                        continue
-                    response.raise_for_status()
-                    data = await read_body(response)
-                    mime = response.headers.get("content-type", "")
-                    break
-            else:
-                raise AA2Error("Research redirect limit exceeded")
+        final = attempted_url = url
+        try:
+            async with acquisition_deadline(ACQUISITION_TIMEOUT, label, source_url=url), httpx.AsyncClient(
+                    transport=transport, trust_env=False, follow_redirects=False, timeout=30,
+                    headers={"Accept-Encoding": "gzip, deflate"}) as client:
+                for _ in range(6):
+                    public_url(final)
+                    attempted_url = final
+                    async with client.stream("GET", final) as response:
+                        if response.is_redirect and "location" in response.headers:
+                            final = urljoin(final, response.headers["location"])
+                            continue
+                        response.raise_for_status()
+                        data = await read_body(response)
+                        mime = response.headers.get("content-type", "")
+                        break
+                else:
+                    raise AA2Error("Research redirect limit exceeded")
+        except httpx.HTTPError as error:
+            raise DocumentAcquisitionUnavailable(attempted_url, error) from None
         import base64
 
         from .collection import run_collection
