@@ -55,25 +55,33 @@ def public_address(value: str) -> bool:
 
 
 class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
-    def __init__(self, proxy=None):
+    def __init__(self, proxy=None, *, resolver=None):
         self.backend = httpcore.AnyIOBackend()
-        self.proxy = proxy
+        self.proxy, self.resolver = proxy, resolver
 
     async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
         async with asyncio.timeout(timeout):
-            addresses = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
-            targets = list(dict.fromkeys(row[4][0] for row in addresses))
+            resolution = None
+            if self.resolver is None:
+                addresses = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+                targets = list(dict.fromkeys(row[4][0] for row in addresses))
+            else:
+                resolution = await self.resolver.resolve(host, port, timeout)
+                targets = list(dict.fromkeys(resolution.addresses))
             if not targets or not all(public_address(ip) for ip in targets):
                 raise ResearchDestinationRejected(host, empty_resolution=not targets)
             error = None
             for ip in targets:
                 try:
                     if self.proxy is not None:
-                        return await open_proxy_tunnel(self.backend, self.proxy, ip, port,
-                                                       timeout, local_address, socket_options)
-                    # Only the numeric validated address is dialled. The pool retains
-                    # the original hostname for Host, TLS SNI and certificate checks.
-                    return await self.backend.connect_tcp(ip, port, timeout, local_address, socket_options)
+                        stream = await open_proxy_tunnel(self.backend, self.proxy, ip, port,
+                                                         timeout, local_address, socket_options)
+                    else:
+                        # Preserve origin Host/TLS while dialling only the validated number.
+                        stream = await self.backend.connect_tcp(ip, port, timeout, local_address, socket_options)
+                    if resolution is not None:
+                        self.resolver.connected(resolution, ip, port)
+                    return stream
                 except (OSError, httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
                     error = exc
             if isinstance(error, (httpcore.ConnectTimeout, httpcore.ConnectError)):
@@ -85,15 +93,16 @@ class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
 
 
 class PublicConnectionPool(httpcore.AsyncConnectionPool):
-    def __init__(self, trust_env=True):
-        super().__init__(network_backend=PublicNetworkBackend())
-        self.proxy_settings = ProxySettings(trust_env)
+    def __init__(self, trust_env=True, *, resolver=None, proxy_settings=None):
+        super().__init__(network_backend=PublicNetworkBackend(resolver=resolver))
+        self.resolver = resolver
+        self.proxy_settings = proxy_settings if proxy_settings is not None else ProxySettings(trust_env)
 
     def create_connection(self, origin):
         proxy = self.proxy_settings.for_origin(origin)
         if proxy is None:
             return super().create_connection(origin)
-        return httpcore.AsyncHTTPConnection(origin=origin, network_backend=PublicNetworkBackend(proxy))
+        return httpcore.AsyncHTTPConnection(origin=origin, network_backend=PublicNetworkBackend(proxy, resolver=self.resolver))
 
 
 class ResponseStream(httpx.AsyncByteStream):
@@ -111,8 +120,8 @@ class ResponseStream(httpx.AsyncByteStream):
 
 
 class PublicHTTPTransport(httpx.AsyncBaseTransport):
-    def __init__(self, *, trust_env=True):
-        self.pool = PublicConnectionPool(trust_env)
+    def __init__(self, *, trust_env=True, resolver=None, proxy_settings=None):
+        self.pool = PublicConnectionPool(trust_env, resolver=resolver, proxy_settings=proxy_settings)
 
     async def handle_async_request(self, request):
         incoming = httpcore.Request(method=request.method,

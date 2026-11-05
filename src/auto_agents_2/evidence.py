@@ -191,6 +191,8 @@ def invocation_identity(stage, context, schema, workspace, config, source_hash=N
     from .prompts import INVOCATION_CONTRACT_VERSION
     from .readview import VIEW_VERSION
     settings = config.model_dump(mode="json")
+    # Acquisition routing is bound to new retrievals, not Native logical inputs.
+    settings.pop("research_resolver", None)
     if not settings.get("shared_cache", {}).get("enabled", False):
         settings.pop("shared_cache", None)
     if stage not in {"decision", "recovery_diagnosis"}:

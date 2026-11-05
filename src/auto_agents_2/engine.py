@@ -1367,7 +1367,7 @@ class WorkflowEngine:
                     or {row["url"] for row in selections} != {row.url for row in selected}):
                 raise Replan("prototype", "Explain each selected design reference's product fit and adaptations in design_selection")
             fresh_sources = [row for row in selected if row.url not in prior_sources]
-            acquired = await ResearchService(self.artifacts).verify(fresh_sources) if fresh_sources else []
+            acquired = await self._research_service().verify(fresh_sources) if fresh_sources else []
             by_url = {**prior_sources, **{row["url"]: row for row in acquired}}
             retrieved = ([{**by_url[row.url], **row.model_dump()} for row in selected]
                          if selected else list(prior_sources.values()))
@@ -1743,7 +1743,7 @@ class WorkflowEngine:
                 review = None
                 if (document.sources or self.authority.author_scope(rid, stage)["correction"]
                         or PlanReviewRecovery(self).requires_research_review(rid)):
-                    retrieved = await ResearchService(self.artifacts).verify(document.sources)
+                    retrieved = await self._research_service().verify(document.sources)
                     review = await self._review_research(rid, work, document.model_dump(), retrieved)
             if stage == "plan":
                 self._replan_contract(rid, "plan", False)
@@ -3053,6 +3053,12 @@ class WorkflowEngine:
             raise StateConflict(f"Final delivery evidence is unavailable or no longer matches: {exc}",
                                 phase="delivery", evidence_refs=tuple(snapshot)) from exc
         return snapshot
+
+    def _research_service(self):
+        resolver = self.config.load().research_resolver
+        if resolver is None:
+            return ResearchService(self.artifacts)
+        return ResearchService(self.artifacts, resolver_config=resolver)
 
     async def _review_research(self, rid, work, document, retrieved):
         review = await self._invoke("review", {"review_kind": "research", "research": document,

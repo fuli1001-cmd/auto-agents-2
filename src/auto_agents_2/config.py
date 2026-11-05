@@ -7,7 +7,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, ValidationError, model_serializer, model_validator
 
 from .errors import ConfigurationError
 from .models import Command, Record
@@ -95,6 +95,35 @@ class AttachmentCapture(Record):
     timeout_seconds: float = Field(default=120, gt=0)
 
 
+class ResearchResolverConfig(Record):
+    mode: Literal["https_json"]
+    endpoint: str
+    bootstrap_ips: list[str] = Field(min_length=1, max_length=16)
+
+    @model_validator(mode="after")
+    def validate_endpoint(self):
+        import ipaddress
+
+        import httpx
+
+        from .network import public_address
+        try:
+            endpoint = httpx.URL(self.endpoint)
+            if (endpoint.scheme != "https" or not endpoint.host or endpoint.username or endpoint.password
+                    or endpoint.query or endpoint.fragment or endpoint.port == 0):
+                raise ValueError
+            if any("%" in value for value in self.bootstrap_ips):
+                raise ValueError
+            addresses = [str(ipaddress.ip_address(value)) for value in self.bootstrap_ips]
+            if not all(public_address(value) for value in addresses):
+                raise ValueError
+        except (ValueError, httpx.InvalidURL):
+            raise ValueError("Research resolver requires an HTTPS endpoint and approved public bootstrap IPs") from None
+        self.endpoint = str(endpoint)
+        self.bootstrap_ips = list(dict.fromkeys(addresses))
+        return self
+
+
 class Config(Record):
     schema_version: Literal[1] = 1
     config_revision: int = 0
@@ -113,6 +142,14 @@ class Config(Record):
     sandbox_binary: str = "bwrap"
     sensitive_paths: list[str] = []
     prompting: dict[str, str] = {"model_adaptation": "auto"}
+    research_resolver: ResearchResolverConfig | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_disabled_research_resolver(self, handler):
+        value = handler(self)
+        if self.research_resolver is None:
+            value.pop("research_resolver", None)
+        return value
 
     @model_validator(mode="before")
     @classmethod

@@ -33,14 +33,24 @@ def public_url(value: str):
 class ResearchService:
     """Preserve the response and provenance; acquisition is not proof of a claim."""
 
-    def __init__(self, artifacts: ArtifactStore):
+    def __init__(self, artifacts: ArtifactStore, *, resolver_config=None):
         self.artifacts = artifacts
+        self.resolver_config = resolver_config.model_copy(deep=True) if resolver_config is not None else None
 
     async def capture(self, url: str) -> dict:
         public_url(url)
         label = f"Research document download for {urlsplit(url).hostname}"
+        resolver = None
+        if self.resolver_config is None:
+            transport = PublicHTTPTransport()
+        else:
+            from .network_proxy import ProxySettings
+            from .research_dns import HTTPSJSONResolver
+            proxy_settings = ProxySettings()
+            resolver = HTTPSJSONResolver(self.resolver_config, proxy_settings)
+            transport = PublicHTTPTransport(resolver=resolver, proxy_settings=proxy_settings)
         async with acquisition_deadline(ACQUISITION_TIMEOUT, label, source_url=url), httpx.AsyncClient(
-                transport=PublicHTTPTransport(), trust_env=False, follow_redirects=False, timeout=30,
+                transport=transport, trust_env=False, follow_redirects=False, timeout=30,
                 headers={"Accept-Encoding": "gzip, deflate"}) as client:
             final = url
             for _ in range(6):
@@ -58,8 +68,11 @@ class ResearchService:
         import base64
 
         from .collection import run_collection
-        return await run_collection(self.artifacts.store.root, {"action": "research", "source": url,
+        result = await run_collection(self.artifacts.store.root, {"action": "research", "source": url,
             "final_url": final, "mime": mime, "raw": base64.b64encode(data).decode()}, timeout=ACQUISITION_TIMEOUT)
+        if resolver is not None:
+            return {**result, "network_policy": resolver.evidence()}
+        return result
 
     async def verify(self, sources: list[SourceEvidence]) -> list[dict]:
         semaphore = asyncio.Semaphore(4)
