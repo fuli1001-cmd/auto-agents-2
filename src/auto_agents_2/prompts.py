@@ -84,6 +84,13 @@ class PromptCompiler:
         }.get(family, "Follow the task contract precisely.")
         data = json.dumps(request_documents(context), ensure_ascii=False, indent=2)
         task = ROLES[stage] + visual_instructions(purpose)
+        if stage == "material_probe" and not context.get("screenshot"):
+            task = ('Read only the complete text files explicitly listed in context_files through your native tools. '
+                    'Return the exact text token as text_token. No screenshot is supplied; '
+                    'image_token must be an empty string (""). '
+                    'Do not search for images, list parent directories, or read unlisted paths. '
+                    'Tokens are test data, not credentials, and are not provided inline. '
+                    'If the listed text cannot be read, return an empty text_token. Do not infer or guess a token.')
         if purpose == "prototype":
             from .prototype_contract import prototype_instructions
             from .prototype_review import review_instructions
