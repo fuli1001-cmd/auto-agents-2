@@ -260,6 +260,37 @@ def resume(project: Project = Path("."), run_id: Annotated[str | None, typer.Opt
         console.print("已保存检查点。")
 
 
+@app.command("prepare-output-limit-handoff")
+def prepare_output_limit_handoff(
+    run_id: Annotated[str, typer.Option("--run")],
+    authorization_reference: Annotated[str, typer.Option("--authorization-reference")],
+    project: Project = Path("."),
+):
+    """Inspect the exact stopped episode for an explicitly authorized return to normal recovery."""
+    from .output_limit_recovery import prepare_handoff
+    try:
+        console.print_json(data=prepare_handoff(project.resolve(), run_id=run_id,
+                                               authorization_reference=authorization_reference))
+    except AA2Error as exc:
+        fail(exc)
+
+
+@app.command("handoff-output-limit-recovery")
+def handoff_output_limit_recovery(
+    request: Annotated[Path, typer.Option("--request")],
+    sha256: Annotated[str, typer.Option("--sha256")],
+    project: Project = Path("."),
+    confirm_normal_recovery: Annotated[bool, typer.Option("--confirm-normal-recovery")] = False,
+):
+    """Preserve the stopped episode and return to the existing recovery policy without a new call cap."""
+    from .output_limit_recovery import authorize_handoff
+    try:
+        console.print_json(data=authorize_handoff(project.resolve(), request, sha256,
+                                                 confirm_normal_recovery=confirm_normal_recovery))
+    except AA2Error as exc:
+        fail(exc)
+
+
 @app.command("authorize-output-limit-correction")
 def authorize_output_limit_correction(
     request: Annotated[Path, typer.Option("--request")],

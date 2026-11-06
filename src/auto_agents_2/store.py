@@ -234,6 +234,11 @@ class Store:
             self._event(db, rid, "recovery.dispatched", {"pending_issues_retained": True})
 
     def _put(self, db, rid, key, value):
+        if key == "recovery/output-limit-handoff" or key.startswith("recovery/gate-history/output-limit-handoff/"):
+            from .faults import StateConflict
+            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+            if row is not None and json.loads(row[0]) != value:
+                raise StateConflict("Normal recovery handoff records are immutable")
         if key.startswith("recovery/contract-reentry/") and key.endswith(("/base", "/accepted", "/closed")):
             from .faults import StateConflict
             row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
@@ -517,6 +522,59 @@ class Store:
                 "authorization_reference": request["authorization_reference"], "correction_calls_max": 1,
                 "material_probe_authorization_reference": request.get("material_probe_authorization_reference"),
                 "limits": state["limits"], "runtime_state": "unbound"})
+
+    def handoff_output_limit(self, request, source_history):
+        """Archive, then release only the old execution boundary in one CAS transaction.
+
+        The normal engine records the next failure observation and action permit.
+        This operation does not dispatch, accept a candidate or change any counter.
+        """
+        from .config import ConfigStore
+        from .output_limit_recovery import (HANDOFF_HISTORY, HANDOFF_KEY, HANDOFF_VERSION, KEY,
+                                            _handoff_pending, _handoff_processes, code_identity, raw_hash)
+        from .workspace import tree_hash
+        rid, request_hash = request["run_id"], digest(request)
+        archive_key = HANDOFF_HISTORY + request_hash
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM checkpoints WHERE run_id=? AND key IN (?,?)",
+                          (rid, HANDOFF_KEY, archive_key)).fetchone():
+                raise AA2Error("A normal recovery handoff already exists; read its original receipt")
+            run = db.execute("SELECT status,stage,data FROM runs WHERE id=?", (rid,)).fetchone()
+            if (not run or {"status": run[0], "stage": run[1], "data_sha256": raw_hash(run[2])} != request["run"]
+                    or run[0] != "PAUSED" or request["version"] != HANDOFF_VERSION
+                    or not request["authorization_reference"].strip()
+                    or code_identity() != request["code_identity"]
+                    or digest(ConfigStore(self.root.parent).load().model_dump(mode="json")) != request["config_hash"]):
+                raise AA2Error("Handoff run, configuration or code changed before publication")
+            archived = {}
+            for key, expected in request["guards"].items():
+                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                if (raw_hash(row[0]) if row else None) != expected:
+                    raise AA2Error("Handoff checkpoint changed before publication: " + key)
+                if row:
+                    archived[key] = json.loads(row[0])
+            incident = archived.get(KEY, {})
+            if (incident.get("state") != "stopped" or digest(incident.get("request")) != request["incident_request_hash"]
+                    or digest(self._submitted_answers(db, rid)) != request["answers_hash"]
+                    or db.execute("SELECT 1 FROM questions WHERE run_id=? AND answer IS NULL AND superseded=0", (rid,)).fetchone()
+                    or _handoff_pending(self, rid, db) != request["accounted_pending"]
+                    or _handoff_processes(self) != request["process_records"]
+                    or tree_hash(Path(request["workspace"])) != request["source_hash"]
+                    or source_history.get("source_hash") != request["source_hash"]
+                    or not source_history.get("artifact")):
+                raise AA2Error("Handoff evidence, answers or candidate changed before publication")
+            archive = {"version": HANDOFF_VERSION, "request_hash": request_hash,
+                       "checkpoints": archived, "source_history": source_history,
+                       "meaning": "Retained rejected candidate and historical observations; no acceptance or new execution authority."}
+            self._put(db, rid, archive_key, archive)
+            receipt = {"version": HANDOFF_VERSION, "mode": "normal_recovery", "request": request,
+                       "request_hash": request_hash, "archive_key": archive_key,
+                       "archive_sha256": raw_hash(json.dumps(archive, ensure_ascii=True)), "authorized_at": now()}
+            self._put(db, rid, HANDOFF_KEY, receipt)
+            self._event(db, rid, "output_limit.handed_off", {"request_hash": request_hash,
+                "archive": archive_key, "authorization_reference": request["authorization_reference"],
+                "execution_policy": "normal_recovery", "fixed_call_limits": False})
 
     def update_output_limit(self, rid, request_hash, updates):
         from .output_limit_recovery import KEY
