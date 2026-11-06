@@ -207,10 +207,33 @@ def observe(path, *, backing_volume_reader=None):
         except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError) as exc:
             # Preserve the public safe category. Native error text stays outside
             # artifacts/model material, in the already masked state directory.
-            report["errors"].append({"scope": "wsl_backing", "error_type": type(exc).__name__})
+            failure = {"scope": "wsl_backing", "error_type": type(exc).__name__}
+            if interop_timeout(exc):
+                failure["reason_code"] = "wsl_interop_timeout"
+            report["errors"].append(failure)
             if isinstance(exc, subprocess.CalledProcessError):
                 report["diagnostics"] = [_query_diagnostic(path, exc)]
     return report
+
+
+def interop_timeout(error):
+    """The fixed system query observed one explicit WSL interop timeout line."""
+    if (not isinstance(error, subprocess.CalledProcessError) or type(error.returncode) is not int
+            or error.returncode != 1 or error.stdout not in ("", b"")):
+        return False
+    raw = error.stderr
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8", "backslashreplace")
+    return (isinstance(raw, bytes) and len(raw) <= 8192 and re.fullmatch(
+        rb"<3>WSL \([0-9]+ - [^()\r\n]*\) ERROR: UtilAcceptVsock:[0-9]+: accept4 failed 110\r?\n?", raw) is not None)
+
+
+def recheck_interop(report, minimum):
+    """Unknown capacity remains blocked; only a positively identified transient can recheck."""
+    return (report["platform"] == "wsl" and report["errors"] == [{"scope": "wsl_backing",
+        "error_type": "CalledProcessError", "reason_code": "wsl_interop_timeout"}]
+        and any(row["scope"] == "filesystem" for row in report["volumes"])
+        and all(row["free"] >= minimum for row in report["volumes"]))
 
 
 def boundary(report, minimum, phase):
@@ -240,8 +263,13 @@ class StorageMonitor:
         self._report = None
         self._at = float("-inf")
 
-    async def sample(self, *, force=False):
+    async def sample(self, *, force=False, previous=None):
         async with self._lock:
+            if (previous is not None and self._report is not None and self._report is not previous
+                    and time.monotonic() - self._at <= 5):
+                # A concurrent boundary or periodic observer already produced a
+                # newer observation. Reuse that result, including any failure.
+                return self._report
             if not force and self._report is not None and time.monotonic() - self._at <= 5:
                 return self._report
             # subprocess.run owns and waits for its bounded PowerShell process.

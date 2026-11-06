@@ -915,6 +915,19 @@ work is released only after the original task is accepted and actually integrate
 An explicit normal-recovery handoff may instead retire the restriction while retaining
 the stopped incident and rejected candidate, as specified above.
 
+## WSL storage observation recovery
+
+Storage prerequisites preserve positively identified WSL interop timeouts from the
+fixed local Windows volume query as unknown capacity. At a natural dispatch boundary,
+one new read-only observation may follow a complete, durably recorded timeout with
+explicitly empty stdout; other errors and already-low known volumes do not gain this
+recheck. Only a fresh successful observation of all applicable actual volumes above
+the current configured floor may release the gate. Concurrent callers share a later observation
+only within the existing five-second freshness window; cancellation joins its worker.
+Both observations remain recorded. An unchanged timeout is reported as no progress;
+unknown, denied, invalid or insufficient results retain the original blocking behavior.
+No system settings, permissions, probe timeouts or user approval semantics change.
+
 ## Research acquisition recovery
 
 Initial provider research records each document's acquisition outcome and the exact

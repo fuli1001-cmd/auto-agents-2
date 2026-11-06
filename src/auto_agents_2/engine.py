@@ -882,9 +882,9 @@ class WorkflowEngine:
             return True
         return False
 
-    async def _storage_observation(self, rid, *, force=False):
+    async def _storage_observation(self, rid, *, force=False, previous=None):
         from .storage_space import boundary
-        report = await self.storage.sample(force=force)
+        report = await self.storage.sample(force=force, **({"previous": previous} if previous is not None else {}))
         minimum = self.config.load().cleanup.min_free_bytes
         self.store.checkpoint(rid, "resources/storage", {"minimum_free_bytes": minimum, **report})
         error = boundary(report, minimum, "storage")
@@ -897,9 +897,29 @@ class WorkflowEngine:
         return report
 
     async def _storage_boundary(self, rid, phase, *, force=True):
-        from .storage_space import boundary
+        from .storage_space import boundary, recheck_interop
         report = await self._storage_observation(rid, force=force)
-        error = boundary(report, self.config.load().cleanup.min_free_bytes, phase)
+        minimum = self.config.load().cleanup.min_free_bytes
+        error = boundary(report, minimum, phase)
+        if error and recheck_interop(report, minimum):
+            # Preserve the exact failed observation before another OS call.
+            # This is a read-only recheck, never capacity proof or user consent.
+            initial = {"phase": phase, "minimum_free_bytes": minimum, "observation": report}
+            key = "resources/storage-rechecks/" + digest(initial)
+            self.store.checkpoint(rid, key, initial)
+            self.store.event(rid, "resources.interop_recheck", {"checkpoint": key, **initial})
+            report = await self._storage_observation(rid, force=True, previous=report)
+            minimum = self.config.load().cleanup.min_free_bytes
+            error = boundary(report, minimum, phase)
+            no_progress = bool(error and recheck_interop(report, minimum))
+            result = {"phase": phase,
+                "minimum_free_bytes": minimum, "observation": report,
+                "outcome": "blocked" if error else "ready", "no_progress": no_progress}
+            self.store.checkpoint(rid, key + "/result", result)
+            self.store.event(rid, "resources.interop_recheck_finished", {"checkpoint": key + "/result", **result})
+            if no_progress:
+                error.requirement.reason += "（WSL 与 Windows 通信超时，自动重新核验后仍无进展）"
+                error.requirement.action = "核查 WSL 与 Windows 的互操作连接；保留当前迭代和两次查询证据。未知容量不能视为充足。"
         if error and not report["errors"]:
             # Preserve the existing attempt to reclaim registered disposable
             # resources before pausing. Host queries never run under gc/DB locks.
