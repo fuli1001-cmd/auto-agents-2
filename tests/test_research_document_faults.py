@@ -76,7 +76,7 @@ async def test_document_http_errors_are_safe_prerequisites(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("cause_kind", ["errno", "ssl"])
-async def test_real_transport_mapping_reports_unknown_when_pool_clears_explicit_causes(tmp_path, monkeypatch, cause_kind):
+async def test_real_transport_mapping_preserves_numeric_causes_before_pool_clears_them(tmp_path, monkeypatch, cause_kind):
     from auto_agents_2.network import PublicHTTPTransport
 
     class FailingTLSStream(httpcore.AsyncMockStream):
@@ -106,9 +106,14 @@ async def test_real_transport_mapping_reports_unknown_when_pool_clears_explicit_
     evidence = observed.value.evidence
     assert stream.started is (cause_kind == "ssl")
     assert evidence["error_type"] == "ConnectError" and evidence["category"] == "network"
-    # httpcore1.0.9 connection_pool.py256 re-raises the same error from None.
-    # These leaf objects were explicit causes, so their numeric fields are now unknown.
-    assert "os_errno" not in evidence and "ssl_verify_code" not in evidence
+    # httpcore1.0.9 re-raises the same error from None. Its trace has already
+    # snapshotted these exact explicit causes, without retaining error text.
+    assert evidence["os_errno"] == (1 if cause_kind == "ssl" else errno.ECONNREFUSED)
+    assert evidence["connection_phase"] == ("origin_tls" if cause_kind == "ssl" else "public_connect")
+    if cause_kind == "ssl":
+        assert evidence["ssl_verify_code"] == 20
+    else:
+        assert "ssl_verify_code" not in evidence
     assert known_exception(observed.value, "provider_research").requirement.kind == "external_input"
     assert "EXAMPLE_" not in json.dumps(evidence) + str(observed.value)
 

@@ -944,6 +944,26 @@ public-address, security or unknown failure preserves the original boundary; a f
 404 cannot mask it. DNS, proxy, TLS, size and redirect checks are unchanged, with no
 new transport retry policy or single-site exception.
 
+The public transport snapshots only numeric explicit causes and a finite connection
+phase on the exact exception at httpcore's connection-failure trace, before pool
+remapping can clear its cause. Public-connect includes resolution and proxy tunnelling;
+it does not prove that an origin TCP connection was reached. Origin-TLS identifies
+the origin handshake boundary. Each request keeps its own trace and preserves any
+existing trace callback. No trace arguments, exception text, credentials or request
+contents enter diagnostics. Unknown causes remain unknown, and phase alone cannot
+authorize automatic recovery. Historical errors are never retroactively enriched.
+If every validated address fails, retain their finite failure observations and
+rethrow an original security/permission or unknown exception ahead of a final
+transient error. The existing positive classification rules are shared with research
+recovery; dial order, connection attempts and successful acquisition are unchanged.
+The diagnostic summary contains at most 16 finite rows, the total failure count and
+actual attempt ordinals, retaining the selected boundary and final attempt. Boundary
+selection checks all failures, even when their diagnostic summary is shortened.
+An implicit exception context that differs from the explicit cause is only an
+uncertainty signal: it is never traversed or used to infer a cause. It prevents a
+later cleanup timeout or network error from authorizing recovery over a possible
+earlier refusal. The signal is frozen before pool remapping, like the numeric facts.
+
 The research author receives the failed claims and actual attempts, evaluates their
 necessity against the original goals, and proposes a full replacement source set.
 Every original row needs an explicit supported/not_required/blocked disposition.

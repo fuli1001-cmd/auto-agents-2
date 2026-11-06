@@ -63,25 +63,44 @@ class DocumentAcquisitionTimeout(AA2Error, TimeoutError):
                          "HTTP_PROXY/HTTPS_PROXY in the aa2 process environment")
 
 
-def http_failure_details(error):
-    """Finite HTTPX types and numeric causes only; never retain arbitrary error text."""
+_HTTP_FAILURE_NAMES = ("HTTPStatusError", "ProxyError", "ConnectTimeout", "ReadTimeout", "WriteTimeout",
+                      "PoolTimeout", "ConnectError", "ReadError", "WriteError", "CloseError",
+                      "LocalProtocolError", "RemoteProtocolError", "UnsupportedProtocol", "DecodingError",
+                      "TooManyRedirects", "TimeoutException", "NetworkError", "ProtocolError", "TransportError",
+                      "RequestError", "HTTPError")
+
+
+def _safe_connection_failure(row):
+    if (type(row) is not dict or type(row.get("category")) is not str
+            or row["category"] not in {"http_status", "proxy", "timeout", "network", "protocol", "http"}
+            or type(row.get("error_type")) is not str or row["error_type"] not in _HTTP_FAILURE_NAMES):
+        return None
+    result = {key: row[key] for key in ("category", "error_type")}
+    for key, lower in (("os_errno", -(2**31)), ("ssl_verify_code", 0)):
+        value = row.get(key)
+        if type(value) is int and lower <= value < 2**31:
+            result[key] = value
+    if row.get("connection_context_uncertain") is True:
+        result["connection_context_uncertain"] = True
+    if type(row.get("attempt")) is int and 0 < row["attempt"] < 2**31:
+        result["attempt"] = row["attempt"]
+    return result
+
+
+class _HTTPConnectionFailure:
+    """A controller observation bound to the exact exception before pool remapping."""
+
+    __slots__ = ("attempts", "count", "error_id", "numeric", "phase", "uncertain")
+
+    def __init__(self, error, phase, numeric, attempts, count, uncertain):
+        self.error_id, self.phase, self.numeric = id(error), phase, numeric
+        self.attempts, self.count, self.uncertain = attempts, count, uncertain
+
+
+def _http_cause_details(error):
     import ssl
 
-    import httpx
-
-    category = next(label for kind, label in (
-        (httpx.HTTPStatusError, "http_status"), (httpx.ProxyError, "proxy"),
-        (httpx.TimeoutException, "timeout"), (httpx.NetworkError, "network"),
-        (httpx.ProtocolError, "protocol"), (httpx.HTTPError, "http")) if isinstance(error, kind))
-    names = ("HTTPStatusError", "ProxyError", "ConnectTimeout", "ReadTimeout", "WriteTimeout",
-             "PoolTimeout", "ConnectError", "ReadError", "WriteError", "CloseError",
-             "LocalProtocolError", "RemoteProtocolError", "UnsupportedProtocol", "DecodingError",
-             "TooManyRedirects", "TimeoutException", "NetworkError", "ProtocolError", "TransportError",
-             "RequestError", "HTTPError")
-    details = {"category": category, "error_type": next(name for name in names if isinstance(error, getattr(httpx, name)))}
-    status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
-    if type(status) is int and 100 <= status <= 599:
-        details["status_code"] = status
+    details = {}
     cause, seen = error, set()
     while isinstance(cause, BaseException) and id(cause) not in seen and len(seen) < 8:
         seen.add(id(cause))
@@ -91,8 +110,86 @@ def http_failure_details(error):
             code = getattr(cause, "verify_code", None)
             if type(code) is int and 0 <= code < 2**31:
                 details.setdefault("ssl_verify_code", code)
+        snapshot = getattr(cause, "_aa2_http_connection_failure", None)
+        valid = (isinstance(snapshot, _HTTPConnectionFailure) and snapshot.error_id == id(cause)
+                 and type(snapshot.phase) is str and snapshot.phase in {"public_connect", "origin_tls"}
+                 and type(snapshot.numeric) is dict and type(snapshot.uncertain) is bool)
+        if valid:
+            details.setdefault("connection_phase", snapshot.phase)
+            for key, lower in (("os_errno", -(2**31)), ("ssl_verify_code", 0)):
+                value = snapshot.numeric.get(key)
+                if type(value) is int and lower <= value < 2**31:
+                    details.setdefault(key, value)
+            if type(snapshot.attempts) is tuple and snapshot.attempts:
+                details.setdefault("connection_failures", [safe for row in snapshot.attempts[:16]
+                                                            if (safe := _safe_connection_failure(row)) is not None])
+            if type(snapshot.count) is int and 0 < snapshot.count < 2**31:
+                details.setdefault("connection_failure_count", snapshot.count)
+                if snapshot.count > len(details.get("connection_failures", [])):
+                    details["connection_failures_truncated"] = True
+            if snapshot.uncertain is True:
+                details["connection_context_uncertain"] = True
+        elif cause.__context__ is not None and cause.__context__ is not cause.__cause__:
+            # Do not traverse implicit context or treat it as evidence of a
+            # particular cause. A cleanup failure may have covered an unknown
+            # earlier error; numeric facts alone cannot rule that out.
+            details["connection_context_uncertain"] = True
         cause = cause.__cause__  # Explicit causes only, not unrelated implicit context.
     return details
+
+
+def preserve_http_connection_failure(error, phase, *, attempts=None, attempt_count=None):
+    """Snapshot finite facts at httpcore's connection trace, before it clears causes."""
+    if isinstance(error, Exception) and phase in {"public_connect", "origin_tls"}:
+        details = _http_cause_details(error)
+        numeric = {key: value for key, value in details.items()
+                   if key in {"os_errno", "ssl_verify_code"}}
+        rows = details.get("connection_failures", []) if attempts is None else attempts
+        # Callers supply only the finite http_failure_details projection. Never
+        # keep request/trace arguments or arbitrary exception fields here.
+        rows = rows[:16] if type(rows) in (list, tuple) else ()
+        rows = tuple(safe for row in rows if (safe := _safe_connection_failure(row)) is not None)
+        count = details.get("connection_failure_count", len(rows)) if attempt_count is None else attempt_count
+        error._aa2_http_connection_failure = _HTTPConnectionFailure(
+            error, phase, numeric, rows, count, details.get("connection_context_uncertain") is True)
+
+
+def http_failure_details(error):
+    """Finite HTTPX types and numeric causes only; never retain arbitrary error text."""
+    import httpx
+
+    category = next(label for kind, label in (
+        (httpx.HTTPStatusError, "http_status"), (httpx.ProxyError, "proxy"),
+        (httpx.TimeoutException, "timeout"), (httpx.NetworkError, "network"),
+        (httpx.ProtocolError, "protocol"), (httpx.HTTPError, "http")) if isinstance(error, kind))
+    details = {"category": category, "error_type": next(name for name in _HTTP_FAILURE_NAMES if isinstance(error, getattr(httpx, name)))}
+    status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+    if type(status) is int and 100 <= status <= 599:
+        details["status_code"] = status
+    return {**details, **_http_cause_details(error)}
+
+
+def http_failure_classification(evidence, *, document=False):
+    """Shared positive HTTP failure rules; a missing cause never grants recovery."""
+    import errno
+
+    status = evidence.get("http_status")
+    if ("ssl_verify_code" in evidence or evidence.get("os_errno") in {errno.EACCES, errno.EPERM}
+            or status in {401, 403, 407, 451}):
+        return ("security" if "ssl_verify_code" in evidence else "permission"), False
+    if evidence.get("connection_context_uncertain") is True:
+        return "unknown", False
+    if evidence.get("category") == "timeout":
+        return "network", True
+    if document and status in {404, 410}:
+        return "unavailable", True
+    if status in {408, 429, 500, 502, 503, 504}:
+        return "network", True
+    if evidence.get("category") == "network" and evidence.get("os_errno") in {
+            errno.ECONNREFUSED, errno.ECONNRESET, errno.ETIMEDOUT, errno.ENETUNREACH,
+            errno.EHOSTUNREACH, errno.ENETDOWN, errno.EPIPE}:
+        return "network", True
+    return "unknown", False
 
 
 class DocumentAcquisitionUnavailable(AA2Error):
@@ -118,7 +215,9 @@ class ResearchResolverUnavailable(AA2Error):
     """An observed resolver HTTP failure, not a retry or network-policy permit."""
     code = "RESEARCH_RESOLVER_UNAVAILABLE"
 
-    def __init__(self, *, category, error_type, endpoint_origin, endpoint_url_hash, status_code=None, os_errno=None, ssl_verify_code=None):
+    def __init__(self, *, category, error_type, endpoint_origin, endpoint_url_hash, status_code=None, os_errno=None,
+                 ssl_verify_code=None, connection_phase=None, connection_failures=None, connection_failure_count=None,
+                 connection_context_uncertain=False, connection_failures_truncated=False):
         self.evidence = {"operation": "research_resolver", "category": category,
                          "error_type": error_type, "endpoint_origin": endpoint_origin,
                          "endpoint_url_hash": endpoint_url_hash}
@@ -127,6 +226,16 @@ class ResearchResolverUnavailable(AA2Error):
         for key, value in (("os_errno", os_errno), ("ssl_verify_code", ssl_verify_code)):
             if value is not None:
                 self.evidence[key] = value
+        if connection_phase in {"public_connect", "origin_tls"}:
+            self.evidence["connection_phase"] = connection_phase
+        if connection_failures:
+            self.evidence["connection_failures"] = connection_failures
+        if connection_failure_count is not None:
+            self.evidence["connection_failure_count"] = connection_failure_count
+        if connection_context_uncertain is True:
+            self.evidence["connection_context_uncertain"] = True
+        if connection_failures_truncated is True:
+            self.evidence["connection_failures_truncated"] = True
         status = f", HTTP {status_code}" if status_code is not None else ""
         super().__init__(f"Research HTTPS DNS JSON request failed ({category}, {error_type}{status}); "
                          "check the configured resolver and aa2 process proxy route")

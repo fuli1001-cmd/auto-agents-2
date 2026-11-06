@@ -1,7 +1,6 @@
 """Research-source recovery evidence; transport and stage authorization stay separate."""
 from __future__ import annotations
 
-import errno
 from typing import Literal
 from urllib.parse import urldefrag, urlsplit
 
@@ -13,6 +12,7 @@ from .errors import (
     InvalidStructuredResponse,
     ResearchDestinationRejected,
     ResearchResolverUnavailable,
+    http_failure_classification,
 )
 from .faults import HumanIntervention, HumanRequirement, StateConflict
 from .models import DocumentResult, Record
@@ -48,22 +48,12 @@ def failure_observation(error):
                                ResearchResolverUnavailable, ResearchDestinationRejected))
     evidence = dict(error.evidence) if known else {}
     category, automatic = "unknown", False
-    status = evidence.get("http_status")
     if isinstance(error, ResearchDestinationRejected):
         category = "security"
-    elif known and ("ssl_verify_code" in evidence or evidence.get("os_errno") in {errno.EACCES, errno.EPERM}
-                    or status in {401, 403, 407, 451}):
-        category = "security" if "ssl_verify_code" in evidence else "permission"
-    elif isinstance(error, DocumentAcquisitionTimeout) or known and evidence.get("category") == "timeout":
+    elif isinstance(error, DocumentAcquisitionTimeout):
         category, automatic = "network", True
-    elif isinstance(error, DocumentAcquisitionUnavailable) and status in {404, 410}:
-        category, automatic = "unavailable", True
-    elif known and status in {408, 429, 500, 502, 503, 504}:
-        category, automatic = "network", True
-    elif known and evidence.get("category") == "network" and evidence.get("os_errno") in {
-            errno.ECONNREFUSED, errno.ECONNRESET, errno.ETIMEDOUT, errno.ENETUNREACH,
-            errno.EHOSTUNREACH, errno.ENETDOWN, errno.EPIPE}:
-        category, automatic = "network", True
+    elif known:
+        category, automatic = http_failure_classification(evidence, document=isinstance(error, DocumentAcquisitionUnavailable))
     return {"code": error.code if known else "UNCLASSIFIED_ACQUISITION_ERROR",
             "classification": category, "automatic": automatic, "diagnostic": evidence}
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import ipaddress
 import socket
 from contextlib import contextmanager
@@ -11,7 +12,12 @@ from urllib.parse import urlsplit, urlunsplit
 import httpcore
 import httpx
 
-from .errors import ResearchDestinationRejected
+from .errors import (
+    ResearchDestinationRejected,
+    http_failure_classification,
+    http_failure_details,
+    preserve_http_connection_failure,
+)
 from .network_proxy import ProxySettings, open_proxy_tunnel
 from .process_ownership import PreviewOwnershipError, verify_connection
 from .util import digest
@@ -70,7 +76,7 @@ class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
                 targets = list(dict.fromkeys(resolution.addresses))
             if not targets or not all(public_address(ip) for ip in targets):
                 raise ResearchDestinationRejected(host, empty_resolution=not targets)
-            error = None
+            failures = []
             for ip in targets:
                 try:
                     if self.proxy is not None:
@@ -83,7 +89,24 @@ class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
                         self.resolver.connected(resolution, ip, port)
                     return stream
                 except (OSError, httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
-                    error = exc
+                    failures.append(exc)
+            observed = []
+            for failure in failures:
+                try:
+                    with http_errors():
+                        raise failure
+                except httpx.HTTPError as mapped:
+                    details = http_failure_details(mapped)
+                observed.append((failure, details, http_failure_classification(details)))
+            # Dial order and success are unchanged. When all addresses failed,
+            # an earlier certificate/permission/unknown error must not be hidden
+            # by the final transient error and authorize recovery.
+            selected = next((i for i, row in enumerate(observed) if row[2][0] in {"security", "permission"}),
+                            next((i for i, row in enumerate(observed) if not row[2][1]), len(observed) - 1))
+            error = observed[selected][0]
+            indexes = sorted({*range(min(14, len(observed))), selected, len(observed) - 1})
+            summary = [{**observed[i][1], "attempt": i + 1} for i in indexes]
+            preserve_http_connection_failure(error, "public_connect", attempts=summary, attempt_count=len(observed))
             if isinstance(error, (httpcore.ConnectTimeout, httpcore.ConnectError)):
                 raise error
             raise httpcore.ConnectError("Public research connection failed") from error
@@ -124,10 +147,23 @@ class PublicHTTPTransport(httpx.AsyncBaseTransport):
         self.pool = PublicConnectionPool(trust_env, resolver=resolver, proxy_settings=proxy_settings)
 
     async def handle_async_request(self, request):
+        previous_trace = request.extensions.get("trace")
+
+        async def trace(name, info):
+            phase = {"connection.connect_tcp.failed": "public_connect",
+                     "connection.start_tls.failed": "origin_tls"}.get(name)
+            if phase is not None:
+                preserve_http_connection_failure(info.get("exception"), phase)
+            if previous_trace is not None:
+                coroutine = previous_trace(name, info)
+                if not inspect.iscoroutine(coroutine):
+                    raise TypeError("The asynchronous trace callback must return a coroutine")
+                await coroutine
+
         incoming = httpcore.Request(method=request.method,
             url=httpcore.URL(scheme=request.url.raw_scheme, host=request.url.raw_host,
                              port=request.url.port, target=request.url.raw_path),
-            headers=request.headers.raw, content=request.stream, extensions=request.extensions)
+            headers=request.headers.raw, content=request.stream, extensions={**request.extensions, "trace": trace})
         try:
             with http_errors(request):
                 response = await self.pool.handle_async_request(incoming)
