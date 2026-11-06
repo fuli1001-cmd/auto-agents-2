@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urldefrag, urljoin, urlsplit
 import httpx
 
 from .artifacts import ArtifactStore
-from .errors import AA2Error
+from .errors import AA2Error, DocumentAcquisitionUnavailable
 from .http_body import ACQUISITION_TIMEOUT, acquisition_deadline, read_body
 from .models import SourceEvidence
 from .network import PublicHTTPTransport, public_address
@@ -33,33 +33,50 @@ def public_url(value: str):
 class ResearchService:
     """Preserve the response and provenance; acquisition is not proof of a claim."""
 
-    def __init__(self, artifacts: ArtifactStore):
+    def __init__(self, artifacts: ArtifactStore, *, resolver_config=None):
         self.artifacts = artifacts
+        self.resolver_config = resolver_config.model_copy(deep=True) if resolver_config is not None else None
 
     async def capture(self, url: str) -> dict:
         public_url(url)
         label = f"Research document download for {urlsplit(url).hostname}"
-        async with acquisition_deadline(ACQUISITION_TIMEOUT, label, source_url=url), httpx.AsyncClient(
-                transport=PublicHTTPTransport(), trust_env=False, follow_redirects=False, timeout=30,
-                headers={"Accept-Encoding": "gzip, deflate"}) as client:
-            final = url
-            for _ in range(6):
-                public_url(final)
-                async with client.stream("GET", final) as response:
-                    if response.is_redirect and "location" in response.headers:
-                        final = urljoin(final, response.headers["location"])
-                        continue
-                    response.raise_for_status()
-                    data = await read_body(response)
-                    mime = response.headers.get("content-type", "")
-                    break
-            else:
-                raise AA2Error("Research redirect limit exceeded")
+        resolver = None
+        if self.resolver_config is None:
+            transport = PublicHTTPTransport()
+        else:
+            from .network_proxy import ProxySettings
+            from .research_dns import HTTPSJSONResolver
+            proxy_settings = ProxySettings()
+            resolver = HTTPSJSONResolver(self.resolver_config, proxy_settings)
+            transport = PublicHTTPTransport(resolver=resolver, proxy_settings=proxy_settings)
+        final = attempted_url = url
+        try:
+            async with acquisition_deadline(ACQUISITION_TIMEOUT, label, source_url=url), httpx.AsyncClient(
+                    transport=transport, trust_env=False, follow_redirects=False, timeout=30,
+                    headers={"Accept-Encoding": "gzip, deflate"}) as client:
+                for _ in range(6):
+                    public_url(final)
+                    attempted_url = final
+                    async with client.stream("GET", final) as response:
+                        if response.is_redirect and "location" in response.headers:
+                            final = urljoin(final, response.headers["location"])
+                            continue
+                        response.raise_for_status()
+                        data = await read_body(response)
+                        mime = response.headers.get("content-type", "")
+                        break
+                else:
+                    raise AA2Error("Research redirect limit exceeded")
+        except httpx.HTTPError as error:
+            raise DocumentAcquisitionUnavailable(attempted_url, error) from None
         import base64
 
         from .collection import run_collection
-        return await run_collection(self.artifacts.store.root, {"action": "research", "source": url,
+        result = await run_collection(self.artifacts.store.root, {"action": "research", "source": url,
             "final_url": final, "mime": mime, "raw": base64.b64encode(data).decode()}, timeout=ACQUISITION_TIMEOUT)
+        if resolver is not None:
+            return {**result, "network_policy": resolver.evidence()}
+        return result
 
     async def verify(self, sources: list[SourceEvidence]) -> list[dict]:
         semaphore = asyncio.Semaphore(4)

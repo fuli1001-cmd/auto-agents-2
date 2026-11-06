@@ -63,6 +63,75 @@ class DocumentAcquisitionTimeout(AA2Error, TimeoutError):
                          "HTTP_PROXY/HTTPS_PROXY in the aa2 process environment")
 
 
+def http_failure_details(error):
+    """Finite HTTPX types and numeric causes only; never retain arbitrary error text."""
+    import ssl
+
+    import httpx
+
+    category = next(label for kind, label in (
+        (httpx.HTTPStatusError, "http_status"), (httpx.ProxyError, "proxy"),
+        (httpx.TimeoutException, "timeout"), (httpx.NetworkError, "network"),
+        (httpx.ProtocolError, "protocol"), (httpx.HTTPError, "http")) if isinstance(error, kind))
+    names = ("HTTPStatusError", "ProxyError", "ConnectTimeout", "ReadTimeout", "WriteTimeout",
+             "PoolTimeout", "ConnectError", "ReadError", "WriteError", "CloseError",
+             "LocalProtocolError", "RemoteProtocolError", "UnsupportedProtocol", "DecodingError",
+             "TooManyRedirects", "TimeoutException", "NetworkError", "ProtocolError", "TransportError",
+             "RequestError", "HTTPError")
+    details = {"category": category, "error_type": next(name for name in names if isinstance(error, getattr(httpx, name)))}
+    status = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+    if type(status) is int and 100 <= status <= 599:
+        details["status_code"] = status
+    cause, seen = error, set()
+    while isinstance(cause, BaseException) and id(cause) not in seen and len(seen) < 8:
+        seen.add(id(cause))
+        if isinstance(cause, OSError) and type(cause.errno) is int and -(2**31) <= cause.errno < 2**31:
+            details.setdefault("os_errno", cause.errno)
+        if isinstance(cause, ssl.SSLCertVerificationError):
+            code = getattr(cause, "verify_code", None)
+            if type(code) is int and 0 <= code < 2**31:
+                details.setdefault("ssl_verify_code", code)
+        cause = cause.__cause__  # Explicit causes only, not unrelated implicit context.
+    return details
+
+
+class DocumentAcquisitionUnavailable(AA2Error):
+    """An observed document HTTP failure, distinct from resolver/policy/collection errors."""
+    code = "DOCUMENT_ACQUISITION_UNAVAILABLE"
+
+    def __init__(self, source_url, error):
+        import httpx
+
+        from .util import digest
+        details = http_failure_details(error)
+        status = details.pop("status_code", None)
+        self.evidence = {"operation": "research_document", "source_origin": str(httpx.URL(source_url).copy_with(
+            username="", password="", path="/", query=None, fragment=None)), "source_url_hash": digest(source_url), **details}
+        if status is not None:
+            self.evidence["http_status"] = status
+        suffix = f", HTTP {status}" if status is not None else ""
+        super().__init__(f"Research document acquisition failed ({details['category']}, {details['error_type']}{suffix}); "
+                         "check the source service and aa2 process network/proxy route")
+
+
+class ResearchResolverUnavailable(AA2Error):
+    """An observed resolver HTTP failure, not a retry or network-policy permit."""
+    code = "RESEARCH_RESOLVER_UNAVAILABLE"
+
+    def __init__(self, *, category, error_type, endpoint_origin, endpoint_url_hash, status_code=None, os_errno=None, ssl_verify_code=None):
+        self.evidence = {"operation": "research_resolver", "category": category,
+                         "error_type": error_type, "endpoint_origin": endpoint_origin,
+                         "endpoint_url_hash": endpoint_url_hash}
+        if status_code is not None:
+            self.evidence["http_status"] = status_code
+        for key, value in (("os_errno", os_errno), ("ssl_verify_code", ssl_verify_code)):
+            if value is not None:
+                self.evidence[key] = value
+        status = f", HTTP {status_code}" if status_code is not None else ""
+        super().__init__(f"Research HTTPS DNS JSON request failed ({category}, {error_type}{status}); "
+                         "check the configured resolver and aa2 process proxy route")
+
+
 class ResearchDestinationRejected(AA2Error):
     """The public research TCP boundary observed empty or non-public DNS results."""
 

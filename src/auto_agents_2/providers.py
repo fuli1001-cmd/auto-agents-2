@@ -702,6 +702,9 @@ class ProviderRouter:
                 # A pending call can use the new view of its frozen controller
                 # input. Keep the old presentation, completed results, permits
                 # and counters; rendering is not a new logical invocation.
+                # v7 requested discovery even when its complete source snapshot
+                # was supplied. v8 corrects that instruction and uses its own
+                # Native session namespace; the old frozen view stays intact.
                 key += "/" + CONTEXT_VERSION
                 saved = self.store.get(run_id, key)
                 record = artifacts.json(saved["artifact"]) if saved else None

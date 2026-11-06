@@ -58,6 +58,8 @@ Agent 接口接收阶段、上下文、输出 schema、工作区和操作身份�
 
 支持环境变量及 argv 数组 extra_args；null 移除继承变量。模型与推理参数属于用户配置。aa2 不做自动追新，模型 prompt profile 的自动识别只调整文本表达。
 
+Antigravity 会话计费设置由现有 `extra_args` 表达：`--settings` 的完整 JSON 对象只能包含唯一的 `useG1Credits` 布尔值。校验按 provider kind 限定，拒绝文件路径、未知字段、非布尔值及重复参数/键；统一 profile 与实例参数后再校验，并纳入执行身份。未配置时保留原生继承行为；aa2 不为该字段填默认值或改写原生设置，权限与输出协议仍受原有约束。
+
 切换只能发生在配置实例集合中，成功后保存 active provider。已经派发的调用保持原配置；后续调用采用新配置。成功故障切换不自动跳回旧 provider。用量保留所有失败调用。
 
 Prompt 分为通用任务语义、阶段角色、模型适配、工具调用适配。参考 GPT-6、Gemini、Claude 官方指导，版本化维护并回归测试。模型不得通过原始文档、AGENTS.md 或自评扩大硬权限。
@@ -908,5 +910,17 @@ security, supervision, cleanup and ordinary provider behavior remain unchanged.
 With both optional probes and both eligible reviews, this incident segment has
 at most five native model invocations; exact cache hits reduce it, and two probes
 are not guaranteed to suffice across runtime drift. Version checks are separate
-non-model processes. Normal subsequent work is
-released only after the original task is accepted and actually integrated.
+non-model processes. While this restricted segment remains active, normal subsequent
+work is released only after the original task is accepted and actually integrated.
+An explicit normal-recovery handoff may instead retire the restriction while retaining
+the stopped incident and rejected candidate, as specified above.
+
+## 公共研究资料的可选 HTTPS DNS JSON
+
+`research_resolver` 缺省或 null 时沿用原 system resolver，序列化不新增该默认键。显式 `https_json` 配置只进入 Workflow 的 research 采集服务，不进入 provider transport、需求 URL 下载或 PreviewProxy，不改原生配置或整机 DNS。该采集路由不进入 Native invocation identity；实际配置修订和内容变更仍遵循原有身份规则。已经保存的采集证据不回填新策略，只有新成功采集附带非秘密 policy/hash 和 TCP 绑定记录，不将其当作 DNSSEC 或资料声明正确性的证明。
+
+解析器使用有文档的 Google-compatible JSON GET profile（不是通用 RFC 8484 wire），HTTPS endpoint 和全部 bootstrap 公网 IP 必须显式提供，无系统解析 fallback。bootstrap 连接同样通过全部地址公网门禁并固定 numeric IP，TLS/SNI 与 Host 保持 endpoint 原域名，禁止解析服务重定向、凭据与 cookie。端点 URL 仅允许无 query/fragment 的配置；证据保存 origin 与完整 URL hash，不保存端点路径或代理凭据。
+
+A/AAAA 并行且全部成功才交付结果，NOERROR 且匹配 Question 的 NODATA 可为空，失败或截断不能视为空；严格核 JSON 重复键、记录类型、地址字符串、问题身份及有界 CNAME owner 链。任一 IPv4/IPv6 地址不公开则整体拒绝；实际连接只能拨整个已校验集合中的 numeric 地址，代理 CONNECT 同样固定 numeric，原域名 TLS 和 Host 不变。每次采集冻结解析策略与现有 proxy snapshot，使用独立 pool；同 origin 已绑定 socket 可复用，新增 origin/连接继续解析检验，不跨策略复用 pool。
+
+解析响应原始/解压后各最多 64 KiB、最多 256 Answer 与 8 CNAME，保留正文原始/解压后各 4 MiB、最多 5 次重定向及共享 30 秒 HTTP acquisition deadline；解析、bootstrap、代理 CONNECT、TLS 与资料正文都消耗同一 deadline，不逐层刷新总预算。任何失败取消并排空同轮 A/AAAA 任务，不发布部分采集。配置改变前须由操作者确认解析器信任、域名隐私和网络可达性；不得用该路由绕过明确的资源拒绝。

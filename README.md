@@ -42,9 +42,23 @@ aa2 logs --project ./demo
 
 恢复请求的完整引用目录在校验时生成，不重复塞入候选动作和历史许可。旧的大目录、逐用例进度明细和历史观察按需读取，当前故障、审查缺项、允许范围与验收要求完整保留。升级保留原始材料、已完成决策和累计次数；若旧决策已经转人工，续跑仍需回答原有恢复确认，输入优化不会替用户批准。
 
-外部研究支持控制器进程环境中的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和 `NO_PROXY`，兼容小写变量（小写优先）；代理地址须使用 HTTP(S)，并支持向目标端口建立 CONNECT 隧道。研究资料域名必须解析为真实公网 IP，代理连接固定到已验证的 IP。使用 Clash/Mihomo 的 Fake-IP DNS 时，请改用 `redir-host` 或对资料域名设置 Fake-IP 排除规则。出现 `Research destination must resolve exclusively to public addresses` 时，检查运行 aa2 的环境中的 DNS 结果；仅恢复浏览器上网或反复输入 `y` 不会解除地址限制。
+外部研究支持控制器进程环境中的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和 `NO_PROXY`，兼容小写变量（小写优先）；代理地址须使用 HTTP(S)，并支持向目标端口建立 CONNECT 隧道。研究资料域名的全部解析地址必须为公网 IP，代理连接固定到已验证的 IP。默认使用系统解析；若系统返回 Fake-IP，可显式为研究资料配置下面的 HTTPS DNS JSON 解析器，不修改整机 DNS、代理模式或 provider 网络。出现 `Research destination must resolve exclusively to public addresses` 时，检查运行 aa2 的环境中的 DNS 结果；仅恢复浏览器上网或反复输入 `y` 不会解除地址限制。
 
 代理变量必须存在于启动 aa2 的终端环境中；其它终端、工具进程或 provider 的环境配置不能替代控制器环境。可使用 `conda env config vars set --prefix ./.conda-env` 将代理变量保存在项目 Conda 环境，随后重新激活环境。修改变量或升级 aa2 后，先输入 `n` 暂停，再用不带 `--requirements` 的 `aa2 run` 续跑。下载超过总时限时，错误包含操作、域名、时限和代理环境检查提示；其它无文字异常至少显示异常类型。
+
+在项目 `.aa2/config.json` 顶层显式添加 `research_resolver` 可启用独立解析。下面仅为配置格式示例，启用前须自行选择、核对并批准解析服务与全部 bootstrap 公网地址；aa2 不自动添加配置：
+
+```json
+"research_resolver": {
+  "mode": "https_json",
+  "endpoint": "https://dns.google/resolve",
+  "bootstrap_ips": ["8.8.8.8", "8.8.4.4"]
+}
+```
+
+该接口使用有文档的 [Google-compatible DNS JSON](https://developers.google.com/speed/public-dns/docs/doh/json)，不是 RFC 8484 DNS wire API。endpoint 必须为无凭据、query 和 fragment 的 HTTPS URL；全部 bootstrap 必须是显式公网 IP。解析器自身固定连接这些地址，仍以 endpoint 原域名校验证书与 SNI；A 和 AAAA 必须都成功完成，任一地址非公网即整体拒绝，不回退到系统 DNS。解析响应禁止跳转，原资料的每个新连接与重定向继续受原公网地址门禁、TLS、30 秒下载总时限及正文大小限制约束。
+
+省略或设为 `null` 保留原系统解析行为。配置仅作用于控制器的公共 research 资料下载，不改变原生模型工具、需求 URL 下载、浏览器预览或它们的权限。原有代理环境仍适用，CONNECT 目标固定为已校验 IP。解析服务会获知查询域名及连接来源；经配置代理时代理也可观察连接元数据。此配置不证明服务在当前网络可达，不自动批准资料来源或解除已有访问拒绝。新采集附带解析策略指纹和 TCP 地址绑定证据；旧采集保留原证据，不追补为新路由验证成功。修改后需重启 aa2 加载新代码与配置，保留原迭代和待答问题。
 
 模型补丁中的替换文本匹配不到、为空或出现多次时，aa2 会向模型提供失败位置和当前公开文件，最多自动纠正两次，并重新校验整批补丁。原型、文档、任务实现和交付修复均使用此流程；纠错不修改文件范围、验收条件或审批，也不放宽精确匹配。原候选和纠错响应保留，重启继续已有记录。一次纠错耗尽后，任务实现会把保留的失败候选交给恢复决策，决定是否生成新的候选；同一候选的纠错次数不会因重试清零。文件不可读取、provider 无法使用或源码在纠错期间改变时保留现场并等待核对。正在等待旧匹配错误的进程需先输入 `n`，再重新运行 aa2 加载新代码，保留本轮进度。
 
@@ -112,6 +126,8 @@ Codex 字符串 profile 使用 `$CODEX_HOME/<name>.config.toml`。其他 provide
 故障独立诊断使用 `efforts.recovery_diagnosis`，默认映射到 `max`；决策代理使用 `efforts.decision`，默认映射到 `deep`。具体模型和实际思考深度以对应用户 profile 为准。普通审查仍用 `review`。缺少所选 profile 时报告配置错误，不回退到普通审查深度。
 
 `environment` 中 `null` 移除继承变量，空字符串保留。`extra_args` 是 argv 数组，支持模型、effort 和兼容的模型配置覆盖；输出协议和权限参数受保护。
+
+`antigravity` 的 `extra_args` 还支持会话级计费开关，例如 `["--settings", "{\"useG1Credits\":false}"]`（也支持 `--settings=...`）。只允许这个键和严格 JSON 布尔值，拒绝文件路径、重复键、重复 `--settings` 及其他设置；provider 和 profile 合并后统一检查。省略时沿用原生 CLI 行为，不把缺省值视为 `false`。显式设置随执行指纹绑定，通过 argv 传给 CLI，不改写原生配置或工具权限。
 
 ```bash
 aa2 run --project ./demo --provider antigravity

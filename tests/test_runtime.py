@@ -111,6 +111,7 @@ else:
     assert "--json-schema" in args and "--input-format" in args
     assert args[args.index("--model")+1] == "test"
     assert args[args.index("--effort")+1] == "low"
+    assert json.loads(args[args.index("--settings")+1]) == {"useG1Credits": False}
     assert json.loads(sys.stdin.readline())["event"] == "user"
     print(json.dumps({"event":"result","result":{"status":"SUCCESS","conversation_id":"fixture-session","structured_output":result,"usage":{"input_tokens":11,"output_tokens":3,"total_tokens":14}}}))
 ''')
@@ -123,7 +124,8 @@ else:
     body["providers"][kind].update(binary=str(binary), environment={"CODEX_HOME": str(native)})
     body["providers"][kind]["profile_map"]["balanced"]["effort"] = "high"
     body["providers"][kind]["extra_args"] = (
-        ["-c", "model_reasoning_effort=low"] if kind == "codex" else ["--effort", "low"]
+        ["-c", "model_reasoning_effort=low"] if kind == "codex"
+        else ["--effort", "low", "--settings", '{"useG1Credits":false}']
     )
     write_json(config.path, body)
     rid = store.admit("idea", {})["id"]
