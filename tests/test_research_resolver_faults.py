@@ -74,21 +74,32 @@ async def test_http_failure_cancels_the_other_family_before_any_target_connect(m
     assert sibling_drained.is_set()
 
 
-async def test_resolver_http_failure_is_a_retained_engine_prerequisite(tmp_path, monkeypatch):
-    from test_workflow import CodingAgent, engine
+@pytest.mark.parametrize("status", [403, 503])
+async def test_resolver_failure_preserves_refusal_or_returns_to_research(tmp_path, monkeypatch, status):
+    from test_decisions import ApprovingAgent
+    from test_workflow import engine
 
     from auto_agents_2.models import DocumentResult, SourceEvidence
+    from auto_agents_2.research_acquisition import CURRENT, ResearchRecoveryDocument
 
-    class ResearchAgent(CodingAgent):
+    class ResearchAgent(ApprovingAgent):
         async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
             if stage == "provider_research":
                 self.calls.append((stage, fresh))
+                if status == 503 and "controller_research_acquisition" in context:
+                    recovery = context["controller_research_acquisition"]
+                    return ResearchRecoveryDocument(summary="Resolver still unavailable", document="Preserve requirements and original claims.",
+                        sources=[], acquisition_resolution={"episode_id": recovery["episode_id"], "status": "blocked",
+                            "claims": [{"claim_id": row["id"], "disposition": "blocked", "source_indexes": [],
+                                "requirement_ids": ["R1"], "reason": "The necessary fact has no acquired authoritative evidence"}
+                                for row in recovery["claims"]],
+                            "missing_information": ["Working approved resolver route or supplied authoritative material"]})
                 return DocumentResult(summary="research", document="# Research\nRetain candidate.",
                     sources=[SourceEvidence(url="https://docs.example/reference", claim="fixture")])
             return await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
 
     monkeypatch.setattr("auto_agents_2.network.PublicHTTPTransport", lambda **kwargs: httpx.MockTransport(
-        lambda request: httpx.Response(503, text="EXAMPLE_NOT_A_SUCCESS")))
+        lambda request: httpx.Response(status, text="EXAMPLE_NOT_A_SUCCESS")))
     async def forbidden(*args, **kwargs):
         pytest.fail("The failing resolver must not dial a target")
     monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", forbidden)
@@ -111,9 +122,19 @@ async def test_resolver_http_failure_is_a_retained_engine_prerequisite(tmp_path,
         await workflow.start(str(request))
     rid = workflow.store.current()["id"]
     fault = workflow.store.get(rid, "recovery/current-fault")
-    assert fault["route"] == "human" and fault["reason_code"] == "RESEARCH_RESOLVER_UNAVAILABLE"
-    assert fault["human_requirement"]["evidence"]["http_status"] == 503
+    assert fault["route"] == "human"
     assert workflow.store.get(rid, "candidate/provider_research")
     assert workflow.store.get(rid, "provider_research") is None
-    assert [stage for stage, _ in agent.calls].count("provider_research") == 1
+    authors = [stage for stage, _ in agent.calls].count("provider_research")
+    if status == 403:
+        assert fault["reason_code"] == "RESEARCH_RESOLVER_UNAVAILABLE"
+        assert fault["human_requirement"]["evidence"]["http_status"] == 403 and authors == 1
+        assert not workflow.store.get(rid, CURRENT)
+    else:
+        assert fault["reason_code"] == "research_acquisition_blocked" and authors == 2
+        record = workflow.store.get(rid, workflow.store.get(rid, CURRENT)["key"])
+        failure = record["attempts"][0]["observations"][0]["failure"]
+        assert failure["code"] == "RESEARCH_RESOLVER_UNAVAILABLE" and failure["diagnostic"]["http_status"] == 503
+        assert not record.get("completed") and workflow.store.get(rid, "recovery/gate-history/0")
+        assert "supplied authoritative material" in questions[-1]["prompt"]
     assert len(questions) == 1

@@ -114,6 +114,8 @@ from .requirements import (
     validate_requirements_text,
 )
 from .research import ResearchService
+from .research_acquisition import CONTEXT as RESEARCH_ACQUISITION_CONTEXT
+from .research_acquisition import ResearchAcquisitionRecovery, ResearchRecoveryDocument
 from .research_contract import research_output_contract, validate_research_output
 from .resources import ResourceManager
 from .review_authority import InvalidAuthorityReview
@@ -610,7 +612,9 @@ class WorkflowEngine:
         archived = self.archive_workers(rid, pending["generation"])
         self.store.supersede_questions(rid, f"replan-stalled/{pending['evaluation']}")
         PlanReviewRecovery(self).prepare_completion(rid, pending, work, archived)
-        self.store.complete_replan(rid, STAGES[STAGES.index(pending["stage"]):], archived)
+        atomic_permit = ResearchAcquisitionRecovery(self).active(rid) if pending["stage"] == "provider_research" else None
+        self.store.complete_replan(rid, STAGES[STAGES.index(pending["stage"]):], archived,
+                                   **({"complete_permit": True} if atomic_permit else {}))
         self.recovery_policy.complete(rid, pending.get("permit"), {"status": "gate_reset", "stage": pending["stage"]})
 
     def _legacy_recovery(self, rid):
@@ -1029,6 +1033,7 @@ class WorkflowEngine:
     def _validate_stage_response(self, result, stage, context, rid):
         if stage == "provider_research" and isinstance(result, DocumentResult):
             validate_research_output(result.model_dump())
+            ResearchAcquisitionRecovery(self).validate(rid, result)
         if stage == "clarify" and isinstance(result, IntakeResult):
             validate_brief(result.model_dump(), context.get("raw_requirements", ""),
                            context.get("submitted_answers", []), required=not result.questions)
@@ -1072,6 +1077,9 @@ class WorkflowEngine:
             # Refresh only at a new logical call. ProposalRecovery keeps this input frozen.
             context = {**context, "submitted_answers": self.store.submitted_answers(rid),
                        "controller_research_output": research_output_contract()}
+            acquisition = ResearchAcquisitionRecovery(self).context(rid)
+            if acquisition:
+                context[RESEARCH_ACQUISITION_CONTEXT] = acquisition
         elif stage == "review" and context.get("review_kind") == "research":
             context = {**context, "controller_research_output": research_output_contract()}
         purpose = context.get("review_kind", "implementation") if stage == "review" else stage
@@ -1817,6 +1825,8 @@ class WorkflowEngine:
         for stage in ("provider_research", "prototype", "design", "plan"):
             if stage == "prototype" and not result.frontend:
                 continue
+            if stage == "provider_research":
+                ResearchAcquisitionRecovery(self).prepare(rid)
             cached = self.store.get(rid, stage)
             if cached:
                 if stage == "provider_research":
@@ -1881,7 +1891,9 @@ class WorkflowEngine:
                     self.store.checkpoint(rid, stage, reused)
                     context[stage] = reused
                     continue
-            schema = PlanResult if stage == "plan" else DocumentResult
+            schema = (PlanResult if stage == "plan" else ResearchRecoveryDocument
+                      if stage == "provider_research" and ResearchAcquisitionRecovery(self).active(rid)
+                      else DocumentResult)
             if stage == "plan":
                 PlanReviewRecovery(self).recover(rid, work)
                 origin_state = self.store.task_origin_state(rid)
@@ -1936,9 +1948,17 @@ class WorkflowEngine:
                 context["design_review"] = DesignDocuments(self).context(rid, work)
             if stage == "provider_research":
                 review = None
+                acquisition = ResearchAcquisitionRecovery(self)
+                acquisition.validate(rid, document)
+                if getattr(document, "acquisition_resolution", None) and document.acquisition_resolution.status == "blocked":
+                    acquisition.block(rid, "Research could not find a useful permitted continuation.", document.model_dump())
                 if (document.sources or self.authority.author_scope(rid, stage)["correction"]
-                        or PlanReviewRecovery(self).requires_research_review(rid)):
-                    retrieved = await self._research_service().verify(document.sources)
+                        or PlanReviewRecovery(self).requires_research_review(rid) or acquisition.active(rid)):
+                    try:
+                        retrieved = await self._research_service().verify(document.sources)
+                    except Exception as exc:
+                        acquisition.observe(rid, document, exc)
+                        raise
                     review = await self._review_research(rid, work, document.model_dump(), retrieved)
             if stage == "plan":
                 self._replan_contract(rid, "plan", False)
@@ -2019,6 +2039,9 @@ class WorkflowEngine:
                 updates.update(self.authority.acceptance(rid, stage, stage_data, review))
             elif stage == "provider_research" and review is not None:
                 updates.update(PlanReviewRecovery(self).accept_research(rid, stage_data, review))
+                # Receipt binds the author's proposal; verified_sources is only
+                # controller metadata appended after independent review.
+                updates.update(ResearchAcquisitionRecovery(self).acceptance(rid, document.model_dump(), review))
             if stage == "plan" and rebuilding:
                 self.authority.commit(rid, stage, stage_data, review, updates, work)
                 atomic_write(work / "docs/aa2" / f"{stage}.md", document.document)
@@ -3309,10 +3332,15 @@ class WorkflowEngine:
         return ResearchService(self.artifacts, resolver_config=resolver)
 
     async def _review_research(self, rid, work, document, retrieved):
+        recovery = ResearchAcquisitionRecovery(self)
+        recovery.validate_retrieved(rid, document, retrieved)
+        acquisition = recovery.context(rid)
         review = await self._invoke("review", {"review_kind": "research", "research": document,
-                                             "retrieved_sources": retrieved}, ReviewResult,
+            "retrieved_sources": retrieved,
+            **({RESEARCH_ACQUISITION_CONTEXT: acquisition} if acquisition else {})}, ReviewResult,
                                     work, rid, PlanReviewRecovery(self).research_operation(rid), fresh=True)
         if not review.approved:
+            recovery.reject_review(rid, document, retrieved, review)
             raise Replan("provider_research", review.summary)
         return review
 

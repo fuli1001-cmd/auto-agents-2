@@ -932,7 +932,7 @@ class Store:
         self._event(db, rid, "replan.assessed", {"stage": stage, **decision})
         return pending
 
-    def complete_replan(self, rid, stages, recovery_refs):
+    def complete_replan(self, rid, stages, recovery_refs, *, complete_permit=False):
         """Finish a journalled rollback atomically; crash recovery cannot double count."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -941,6 +941,7 @@ class Store:
                 return
             pending = json.loads(row[0])
             body = json.loads(db.execute("SELECT data FROM runs WHERE id=?", (rid,)).fetchone()[0])
+            prior_generation = body.get("replans", 0)
             body["replans"] = pending["generation"] + 1
             records = {r["key"]: json.loads(r["data"]) for r in db.execute(
                 "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
@@ -949,6 +950,32 @@ class Store:
                 from .stage_responsibilities import validate_correction_request
                 validate_correction_request(request, records.get, action=(
                     "plan_patch" if pending["stage"] == "plan" else pending["stage"]))
+            if complete_permit:
+                # New callers may commit the already started permit's result in
+                # this same transaction, eliminating the post-reset crash gap.
+                from .faults import StateConflict
+                key = pending.get("permit")
+                permit = records.get(key, {})
+                outcome = {"status": "gate_reset", "stage": pending["stage"]}
+                action = "plan_patch" if pending["stage"] == "plan" else pending["stage"]
+                if (prior_generation != pending["generation"] or not pending.get("granted")
+                        or not request or request.get("permit") != key
+                        or permit.get("phase") not in {"started", "completed"}
+                        or permit.get("action", {}).get("action") != action
+                        or permit.get("source_hash") != pending.get("correction_source", {}).get("hash")
+                        or permit.get("plan_hash") != digest(records.get("plan"))
+                        or permit.get("outcome") not in ({}, outcome)
+                        or permit.get("phase") == "completed" and permit.get("outcome_hash") != digest(outcome)):
+                    raise StateConflict("Gate reset cannot complete an unrelated or unstarted permit")
+                self._put(db, rid, key, {**permit, "phase": "completed", "outcome": outcome,
+                                         "outcome_hash": digest(outcome)})
+                cycle_key = "recovery/cycles/" + permit["cycle_id"]
+                cycle = records.get(cycle_key)
+                if (not cycle or key not in cycle.get("permits", []) or cycle.get("owner") != permit.get("owner")
+                        or cycle.get("id") != permit.get("cycle_id")
+                        or cycle.get("failure_id") != permit.get("action", {}).get("failure_id")):
+                    raise StateConflict("Gate reset lost its original authorization cycle")
+                self._put(db, rid, cycle_key, {**cycle, "phase": "completed", "outcomes": outcome})
             removed = {key: value for key, value in records.items() if any(
                 key == prefix + stage or key.startswith(prefix + stage + "/")
                 for stage in stages for prefix in ("", "candidate/", "invocation/", "provider-result/"))}

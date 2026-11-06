@@ -915,6 +915,42 @@ work is released only after the original task is accepted and actually integrate
 An explicit normal-recovery handoff may instead retire the restriction while retaining
 the stopped incident and rejected candidate, as specified above.
 
+## Research acquisition recovery
+
+Initial provider research records each document's acquisition outcome and the exact
+original candidate and claim rows before requesting normal research re-entry.
+Document transfer still deduplicates fragments; claim identity includes the original
+candidate, row index, URL, claim, version and validation. Successful sibling retrievals
+remain unapproved observations. Cancellation retains cancellation semantics.
+
+Only positively classified document deadlines, transport timeouts, temporary service
+responses, unavailable documents (404/410), or explicit ordinary network causes may
+request the existing Replan/RecoveryPolicy path. An unknown ConnectError can conceal
+a certificate error and cannot authorize it. Any observed permission, certificate,
+public-address, security or unknown failure preserves the original boundary; a faster
+404 cannot mask it. DNS, proxy, TLS, size and redirect checks are unchanged, with no
+new transport retry policy or single-site exception.
+
+The research author receives the failed claims and actual attempts, evaluates their
+necessity against the original goals, and proposes a full replacement source set.
+Every original row needs an explicit supported/not_required/blocked disposition.
+Necessary facts map to newly acquired authoritative sources with equivalent coverage;
+not_required needs a grounded explanation and cannot remove explicit user constraints.
+Empty replacement sources still require independent review. The existing research
+authority review binds these dispositions and the full acquisition observations and
+assesses every original row without converting a proposal into a product requirement.
+Acceptance and completion of the acquisition obligation are one checkpoint batch.
+
+Re-entry uses existing authorization, counters, candidate archival and stage ownership.
+The source-recovery caller completes its exact started permit and cycle in the same
+transaction as the gate reset, never issuing a new grant or replaying a rejected response.
+The existing default for other callers and historical records remains unchanged. Repeated identical
+acquisition facts or ordinary independent-review rejections without new evidence stop automatically; counters, rewording and
+fragment changes do not create progress. There is no added model-call or correction
+ceiling. Missing necessary information or no useful permitted path produces an explicit
+user prerequisite listing claims, actual attempts and the remaining gap. Blocked
+proposals never advance the research gate or replace human prototype approval.
+
 ## 公共研究资料的可选 HTTPS DNS JSON
 
 `research_resolver` 缺省或 null 时沿用原 system resolver，序列化不新增该默认键。显式 `https_json` 配置只进入 Workflow 的 research 采集服务，不进入 provider transport、需求 URL 下载或 PreviewProxy，不改原生配置或整机 DNS。该采集路由不进入 Native invocation identity；实际配置修订和内容变更仍遵循原有身份规则。已经保存的采集证据不回填新策略，只有新成功采集附带非秘密 policy/hash 和 TCP 绑定记录，不将其当作 DNSSEC 或资料声明正确性的证明。

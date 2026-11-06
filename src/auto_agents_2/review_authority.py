@@ -328,6 +328,9 @@ def make_basis(kind, context, *, original, specification, accepted_design=None,
             "capability_hash": (context.get("controller_evidence_capabilities") or {}).get("hash"),
             "correction": correction if correction and correction.get("owner") == owner else None,
             "meaning": "References establish identity, not entailment, successful execution or permission."}
+    if kind == "research":
+        from .research_acquisition import extend_basis
+        extend_basis(body, context)
     from .contract_reentry import extend_basis
     extend_basis(body, revision)
     body["response_contract"] = response_contract(criteria, sources, observations, body["unsupported"])
