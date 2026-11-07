@@ -246,17 +246,50 @@ def small_metadata_residue(fd):
     return size <= 256 * 1024
 
 
+def reject_disposable_ancestors(path):
+    """Read only parent markers, fd-relative; never enumerate payload."""
+    parent = path.parent
+    fd = os.open(parent.anchor, DIRECTORY)
+    try:
+        for component in (None, *parent.parts[1:]):
+            if component is not None:
+                child = os.open(component, DIRECTORY, dir_fd=fd)
+                os.close(fd)
+                fd = child
+            try:
+                marker = read_json(fd, "store.json")
+            except FileNotFoundError:
+                continue
+            if not isinstance(marker, dict):
+                raise CleanupError("Cannot safely identify ancestor store marker")
+            if marker.get("kind") == "aa2-pytest" and marker.get("retention_mode") != "all":
+                raise CleanupError("Retain-all root cannot be nested inside a disposable aa2 pytest store")
+    finally:
+        os.close(fd)
+
+
 class Store:
-    def __init__(self, path, repo, keep=3, days=7):
+    def __init__(self, path, repo, keep=3, days=7, *, retain_all=False):
         self.path, self.repo = Path(path).absolute(), str(Path(repo).resolve())
         self.keep, self.days = keep, days
+        self.retain_all = retain_all
         self.fd = self.lock = self.run_fd = self.run_lock = None
         self.lock_depth = 0
         self.messages = []
         self.identity = {"kind": "aa2-pytest", "version": 1, "repo": self.repo}
+        if retain_all:
+            self.identity.update(
+                retention_mode="all",
+                retention_notice={"cleanup": "not_attempted", "process_mount_references": "not_checked",
+                                  "size_bytes": None, "size_status": "not_measured",
+                                  "responsibility": "operator_after_separate_verification_and_authorization"},
+            )
         if self.path.parent != self.path.parent.resolve(strict=True):
             raise CleanupError("Managed pytest store parent must not traverse symlinks")
-        self.path.mkdir(mode=0o700, exist_ok=True)
+        if retain_all:
+            reject_disposable_ancestors(self.path)
+        # A retained store is never adopted, even when empty or previously ours.
+        self.path.mkdir(mode=0o700, exist_ok=not retain_all)
         if self.path != self.path.resolve():
             raise CleanupError("Managed pytest store must not traverse symlinks")
         info = self.path.lstat()
@@ -328,6 +361,22 @@ class Store:
                 "plugin_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 "counts": {}, "failures": [], "current": None,
             }
+            if self.retain_all:
+                self.record.update(
+                    tests_exitstatus=None, exitstatus=None,
+                    cleanup={"status": "not_attempted", "process_mount_references": "not_checked",
+                             "safe_to_delete": None},
+                    retention={"mode": "all", "count": None, "days": None, "automatic_cleanup": False,
+                               "cleanup_responsibility": "operator_after_separate_verification_and_authorization"},
+                    inventory={
+                        "store": str(self.path), "run": str(self.path / self.name),
+                        "work": str(self.path / self.name / "work"),
+                        "scope": "entire store tree, including unenumerated payload",
+                        "enumeration": "up to 128 factory allocations relative to work; not a recursive inventory",
+                        "allocated_directories": [], "unlisted_allocations": 0,
+                        "size_bytes": None, "size_status": "not_measured",
+                    },
+                )
             write_json(self.run_fd, "run.json", self.record)
             self.save(self.record)
             os.mkdir("work", 0o700, dir_fd=self.run_fd)
@@ -339,6 +388,8 @@ class Store:
         self.save(self.record)
 
     def remove(self, name, expected=None, ignored_fds=()):
+        if self.retain_all:
+            raise CleanupError("Explicit retain-all mode forbids removal; deletion safety was not verified")
         with self.exclusive():
             if expected is None:
                 if name != self.name:
@@ -368,6 +419,8 @@ class Store:
 
     def prune(self):
         """Only idle, owned run roots, with bounded separate result summaries."""
+        if self.retain_all:
+            return  # Do not inspect, rewrite, prune or reference-scan retained runs/reports.
         with self.exclusive():
             idle = []
             try:
@@ -445,6 +498,14 @@ class Store:
                     os.close(run_fd)
 
     def finish(self, status):
+        if self.retain_all:
+            outcomes = {0: "passed", 1: "failed", 2: "interrupted", 3: "internal_error",
+                        4: "usage_error", 5: "no_tests_collected"}
+            self.record.update(state="retained", tests_exitstatus=int(status), exitstatus=int(status),
+                               test_outcome=outcomes.get(int(status), "unknown"), ended=time.time())
+            self.checkpoint()
+            fcntl.flock(self.run_lock, fcntl.LOCK_UN)
+            return
         state = "cleaning" if status == 0 else "interrupted" if status == 2 else "failed"
         self.record.update(state=state, exitstatus=None if status == 0 else int(status),
                            tests_exitstatus=int(status), ended=time.time())
@@ -458,6 +519,15 @@ class Store:
             self.save(self.record)
 
     def close(self):
+        if (self.retain_all and self.run_fd is not None
+                and getattr(self, "record", {}).get("state") == "running"):
+            # Config cleanup can run without sessionfinish. Do not invent an exit
+            # status or overwrite a finished result. Hard exit keeps "running".
+            self.record.update(state="retained_unfinished", test_outcome="unfinished", ended=time.time())
+            try:
+                self.checkpoint()
+            except (OSError, CleanupError) as exc:
+                print(f"aa2 pytest retention metadata incomplete: {self.path}: {exc}", file=sys.stderr)
         for attr in ("run_lock", "run_fd", "lock", "fd"):
             fd = getattr(self, attr, None)
             if fd is not None:
@@ -467,6 +537,8 @@ class Store:
 
 def pytest_addoption(parser):
     group = parser.getgroup("aa2 pytest copies")
+    group.addoption("--aa2-temp-retain-all", action="store_true",
+                    help="Use a fresh private store; retain all copies/reports without cleanup or reference checks")
     group.addoption("--aa2-temp-keep", type=int, default=3, help="Retain this many failed/interrupted run copies")
     group.addoption("--aa2-temp-days", type=float, default=7, help="Maximum idle failed-copy age in days")
     group.addoption("--aa2-min-guest-gib", type=float, default=5, help="Required guest free space (GiB)")
@@ -485,12 +557,15 @@ def pytest_configure(config):
     # --rootdir is a collection setting, not authority to adopt another checkout.
     repo = Path(__file__).resolve().parent
     tag = hashlib.sha256(str(repo).encode()).hexdigest()[:12]
+    retain_all = config.option.aa2_temp_retain_all
+    default_name = (f"aa2-pytest-retained-{os.getuid()}-{tag}-{uuid.uuid4().hex}" if retain_all
+                    else f"aa2-pytest-{os.getuid()}-{tag}")
     root = config.option.basetemp or (
-        Path(os.environ.get("PYTEST_DEBUG_TEMPROOT", tempfile.gettempdir())) / f"aa2-pytest-{os.getuid()}-{tag}"
+        Path(os.environ.get("PYTEST_DEBUG_TEMPROOT", tempfile.gettempdir())) / default_name
     )
     store = None
     try:
-        store = Store(root, repo, config.option.aa2_temp_keep, config.option.aa2_temp_days)
+        store = Store(root, repo, config.option.aa2_temp_keep, config.option.aa2_temp_days, retain_all=retain_all)
         config.add_cleanup(store.close)
         store.prune()
         space = check_space(root, config.option.aa2_min_guest_gib, config.option.aa2_min_host_gib,
@@ -499,13 +574,15 @@ def pytest_configure(config):
         store.record["space"] = space
         store.record["invocation_root"] = str(config.rootpath)
         store.record["host_drives"] = config.option.aa2_host_drives or "auto"
-        store.record["retention"] = {"count": store.keep, "days": store.days}
+        if not retain_all:
+            store.record["retention"] = {"count": store.keep, "days": store.days}
         revision = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
                                   capture_output=True, text=True, timeout=10)
         store.record["git_head"] = revision.stdout.strip() if revision.returncode == 0 else None
         store.record["source_sha256"] = {
             name: hashlib.sha256((repo / name).read_bytes()).hexdigest()
-            for name in ("conftest.py", "pytest_support.py", "pyproject.toml", "tests/test_pytest_cleanup.py")
+            for name in ("conftest.py", "pytest_support.py", "pyproject.toml",
+                         "tests/test_pytest_cleanup.py", "tests/test_pytest_retention.py")
             if (repo / name).is_file()
         }
         store.checkpoint()
@@ -515,7 +592,9 @@ def pytest_configure(config):
     except (CleanupError, OSError, ValueError, KeyError) as exc:
         if store:
             store.close()
-        raise pytest.UsageError(f"aa2 pytest preflight: {exc}") from exc
+        residue = (f"; retain-all preflight_failed: retained root {Path(root).absolute()} was not removed; "
+                   "cleanup NOT ATTEMPTED; existence/size and deletion safety are not verified" if retain_all else "")
+        raise pytest.UsageError(f"aa2 pytest preflight: {exc}{residue}") from exc
 
 
 @pytest.fixture
@@ -529,12 +608,55 @@ def tmp_path(request, tmp_path_factory):
     return path
 
 
+class RetainedPathFactory:
+    """Public mktemp/getbasetemp facade without numbered-dir symlink deletion."""
+
+    def __init__(self, store):
+        self.store = store
+        work = store.path / store.name / "work"
+        self.factory = pytest.TempPathFactory(
+            given_basetemp=work, basetemp=work, retention_count=0, retention_policy="all",
+            trace=lambda *args, **kwargs: None, _ispytest=True,
+        )
+
+    def getbasetemp(self):
+        return self.factory.getbasetemp()
+
+    def mktemp(self, basename, numbered=True):
+        self.store.check_identity()
+        basename = os.path.normpath(basename)
+        if (self.getbasetemp() / basename).resolve().parent != self.getbasetemp():
+            raise ValueError(f"{basename} is not a normalized and relative path")
+        number = 0
+        while True:
+            try:
+                # Public numbered=False creates only: no unlink-current, cleanup
+                # locks, cleanup_dead_symlinks or atexit cleanup registration.
+                path = self.factory.mktemp(f"{basename}{number}" if numbered else basename, numbered=False)
+            except FileExistsError:
+                if not numbered:
+                    raise
+                number += 1
+            else:
+                break
+        inventory = self.store.record["inventory"]
+        if len(inventory["allocated_directories"]) < 128:
+            inventory["allocated_directories"].append(path.name)
+        else:
+            inventory["unlisted_allocations"] += 1
+        self.store.checkpoint()
+        return path
+
+
 @pytest.fixture(scope="session")
 def tmp_path_factory(request):
     # Own a separate public factory. The builtin tmpdir plugin's unused factory
     # has no basetemp, so its sessionfinish hook cannot follow a replaced work
     # path or silently attempt its own permission recovery.
-    work = request.config.stash[STATE].path / request.config.stash[STATE].name / "work"
+    store = request.config.stash[STATE]
+    if store.retain_all:
+        return RetainedPathFactory(store)
+    work = store.path / store.name / "work"
     return pytest.TempPathFactory(
         given_basetemp=work, basetemp=work, retention_count=0, retention_policy="all",
         trace=lambda *args, **kwargs: None, _ispytest=True,
@@ -583,7 +705,7 @@ class FinalReports:
         case = item.stash.get(CASE, None)
         if case is not None:
             case["failed"] |= report.failed
-            if report.when == "teardown" and not case["failed"]:
+            if report.when == "teardown" and not case["failed"] and not store.retain_all:
                 try:
                     store.check_identity()
                     blocked = references(case["path"])
@@ -607,14 +729,17 @@ class FinalReports:
 
 def pytest_report_header(config):
     store = config.stash[STATE]
-    return [f"aa2 private copies: {store.path}", *store.messages,
+    retention = (["aa2 RETAIN ALL: cleanup NOT ATTEMPTED; process/mount references NOT CHECKED; "
+                  "size UNKNOWN; operator must separately verify/authorize cleanup"] if store.retain_all else [])
+    return [f"aa2 private copies: {store.path}", *retention, *store.messages,
             "aa2 space: " + ", ".join(f"{r['name']}={r['free'] / GIB:.3f} GiB" for r in store.record["space"])]
 
 
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session, exitstatus):
     store = session.config.stash[STATE]
-    errors = store.record.get("cleanup_errors", [])
+    error_key = "retention_errors" if store.retain_all else "cleanup_errors"
+    errors = store.record.get(error_key, [])
     if errors and session.exitstatus == 0:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
     try:
@@ -623,7 +748,8 @@ def pytest_sessionfinish(session, exitstatus):
         errors.append(str(exc))
         if session.exitstatus == 0:
             session.exitstatus = pytest.ExitCode.TESTS_FAILED
-        store.record.update(state="cleanup_failed", cleanup_errors=errors, exitstatus=int(session.exitstatus))
+        store.record.update(state="retention_failed" if store.retain_all else "cleanup_failed",
+                            **{error_key: errors}, exitstatus=int(session.exitstatus))
         with contextlib.suppress(OSError, CleanupError):
             write_json(store.run_fd, "run.json", store.record)
         with contextlib.suppress(OSError, CleanupError):
@@ -632,6 +758,12 @@ def pytest_sessionfinish(session, exitstatus):
             store.save(store.record)
     reporter = session.config.pluginmanager.get_plugin("terminalreporter")
     if reporter:
+        label = "retention" if store.retain_all else "cleanup"
         for message in [*store.messages, *errors]:
-            reporter.write_line(f"aa2 pytest cleanup: {message}", red=bool(errors))
+            reporter.write_line(f"aa2 pytest {label}: {message}", red=bool(errors))
+        if store.retain_all:
+            reporter.write_line(
+                f"aa2 RETAIN ALL: {store.path}; cleanup NOT ATTEMPTED; references NOT CHECKED; "
+                "size UNKNOWN; retained payload is NOT verified safe to delete"
+            )
         reporter.write_line(f"aa2 pytest result: {store.path / 'reports' / (store.name + '.json')}")
