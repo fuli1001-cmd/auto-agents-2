@@ -464,7 +464,7 @@ class Store:
     def checkpoint(self, rid, key, data):
         self.checkpoints(rid, {key: data})
 
-    def checkpoints(self, rid, values, *, usage=None):
+    def checkpoints(self, rid, values, *, usage=None, event=None):
         """Publish related phases, round counters and evidence references atomically."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -479,6 +479,46 @@ class Store:
                         data = {**data, "round": max(data.get("round", 0), json.loads(existing[0]).get("round", 0))}
                 self._put(db, rid, key, data)
                 self._event(db, rid, "checkpoint.saved", {"key": key})
+            if event is not None:
+                kind, data = event
+                self._event(db, rid, kind, data)
+
+    def consume_research_prerequisite(self, rid, wait_key, hard_key, receipt_key, expected, question_id):
+        """Consume the exact research-source answer and wait in one transaction."""
+        from .faults import StateConflict
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            def get(key, default=None):
+                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                return json.loads(row[0]) if row else default
+            stamp = expected["dispatch"]
+            body = json.loads(db.execute("SELECT data FROM runs WHERE id=?", (rid,)).fetchone()[0])
+            candidate = (get("candidate/provider_research") or {}).get("document")
+            identity = digest([expected["reason_code"], expected["phase"], expected["requirement"]])
+            counter = "prerequisite/" + identity
+            key = counter + "/" + str(expected["attempt"])
+            question = db.execute("SELECT * FROM questions WHERE id=? AND run_id=?", (question_id, rid)).fetchone()
+            valid_answer = False
+            if question:
+                interaction = json.loads(question["interaction"])
+                valid_answer = any(option["key"] == question["answer"] and option["value"] == "retry"
+                                   for option in interaction.get("options", []))
+            if (expected.get("kind") != "source_wait" or get(wait_key) != expected or get(hard_key) is not None
+                    or stamp.get("run_id") != rid or body.get("replans", 0) != stamp["generation"]
+                    or {name: digest(get(name)) for name in ("capture", "clarify")} != stamp["binding"]
+                    or candidate is None or digest(candidate) != stamp["candidate_hash"]
+                    or digest(candidate.get("sources", [])) != stamp["sources_hash"]
+                    or get(counter, 0) != expected["attempt"] or identity != expected["identity"]
+                    or not question or question["superseded"] or question["key"] != key
+                    or question["artifact_hash"] != identity or not valid_answer):
+                raise StateConflict("Research prerequisite source, state or actual answer changed")
+            self._put(db, rid, counter, expected["attempt"] + 1)
+            self._put(db, rid, wait_key, None)
+            self._put(db, rid, receipt_key, {"dispatch": stamp, "acquisition_id": expected["acquisition_id"],
+                                           "question_id": question_id, "identity": identity})
+            self._event(db, rid, "research.prerequisite_consumed",
+                        {"wait_id": expected["id"], "question_id": question_id,
+                         "candidate_hash": stamp["candidate_hash"]})
 
     def authorize_output_limit(self, request):
         """Supersede exactly one unanswered gate and add separate one-use authority."""
@@ -1316,6 +1356,11 @@ class Store:
             if started - recorded:
                 result["complete"] = False
         return result
+
+    def has_event(self, rid, kind):
+        """Read an event marker without materializing historical event bodies."""
+        with self.connect() as db:
+            return db.execute("SELECT 1 FROM events WHERE run_id=? AND kind=? LIMIT 1", (rid, kind)).fetchone() is not None
 
     def events(self, rid=None, after=0):
         with self.connect() as db:

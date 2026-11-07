@@ -139,7 +139,7 @@ class ResearchService:
                 # HTTP status/security/unknown processing failures were observed
                 # before __aexit__. A cleanup timeout must not turn them into a
                 # transient retry. Cancellation remains a BaseException above.
-                if isinstance(observed, (DocumentAcquisitionUnavailable, ResearchResolverUnavailable)) and error is not observed:
+                if isinstance(observed, (DocumentAcquisitionUnavailable, ResearchResolverUnavailable)) and error is not observed_error:
                     observed.evidence["cleanup_failure"] = (
                         {"code": error.code, "diagnostic": error.evidence}
                         if isinstance(error, DocumentAcquisitionTimeout) else
@@ -233,12 +233,18 @@ class ResearchService:
                        if isinstance(task.exception(), ResearchRequestNotExecuted)]
             if blocked:
                 raise blocked[0]
-        except BaseException as error:
+        except BaseException as original:
+            outcome = original
             async def cancel_documents():
                 for task in documents.values():
                     task.cancel()
                 await asyncio.gather(*documents.values(), return_exceptions=True)
-            await joined(asyncio.create_task(cancel_documents()))
+            try:
+                await joined(asyncio.create_task(cancel_documents()))
+            except BaseException as delayed:
+                # joined has drained every child but must still propagate a
+                # later caller cancellation. Publish owned facts before doing so.
+                outcome = delayed
             # Control errors retain their type. The controller records these
             # facts with automatic recovery explicitly disabled.
             rows = []
@@ -258,9 +264,9 @@ class ResearchService:
                 if history is not None and history.failures:
                     row["observed_failures"] = history.observations()
                 rows.append(row)
-            error.acquisition_observations = rows
-            error.acquisition_id = identifier("research-acquisition")
-            raise
+            outcome.acquisition_observations = rows
+            outcome.acquisition_id = identifier("research-acquisition")
+            raise outcome
         results = []
         for source in sources:
             evidence = documents[urldefrag(source.url)[0]].result()

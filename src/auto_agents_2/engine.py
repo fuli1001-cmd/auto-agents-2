@@ -305,6 +305,9 @@ class WorkflowEngine:
                     except HumanIntervention as exc:
                         if incident.active():
                             return incident.pause("workflow_human_prerequisite_required")
+                        recording = getattr(exc, "acquisition_recording_failure", None)
+                        if recording is not None and not recording["audit_recorded"]:
+                            raise self._internal_error(rid, exc) from None
                         await self._wait_prerequisite(rid, exc)
                     except Exception as exc:
                         if incident.active():
@@ -315,6 +318,11 @@ class WorkflowEngine:
                             return incident.pause("workflow_failure_" + type(exc).__name__)
                         if isinstance(exc, ToolchainUnavailable):
                             self.store.checkpoint(rid, "environment/preflight-failure", exc.report or exc.record())
+                        recording = getattr(exc, "acquisition_recording_failure", None)
+                        if recording is not None and not recording["audit_recorded"]:
+                            # Neither research write established a durable boundary.
+                            # Stop this invocation rather than offer a network retry.
+                            raise self._internal_error(rid, exc) from None
                         boundary = known_exception(exc, self.store.run(rid)["stage"])
                         if boundary:
                             await self._wait_prerequisite(rid, boundary)
@@ -408,6 +416,17 @@ class WorkflowEngine:
             await self._wait_prerequisite(rid, self._environment_boundary(next(iter(pending.values()))))
 
     async def _wait_prerequisite(self, rid, error):
+        research = ResearchAcquisitionRecovery(self)
+        source_wait = None
+        hard = research.hard_error(rid) if error.phase == "provider_research" else None
+        if hard is not None:
+            error = hard
+        elif error.phase == "provider_research" and error.reason_code in {
+                "DOCUMENT_ACQUISITION_UNAVAILABLE", "RESEARCH_RESOLVER_UNAVAILABLE",
+                "RESEARCH_DESTINATION_REJECTED"}:
+            source_wait = research.waiting(rid)
+            if source_wait is not None:
+                error = research.wait_error(source_wait)
         requirement = error.requirement.model_dump()
         identity = digest([error.reason_code, error.phase, requirement])
         # A recorded external failure must await its original answer before a
@@ -432,6 +451,14 @@ class WorkflowEngine:
         interaction = choice_spec(["已处理，重新核对", "暂停，稍后续跑"], ["retry", "pause"], yes_no=True)
         interaction["pause_on"] = "n"
         await self._ask(rid, f"{key}/{attempt}", error.requirement.prompt(), identity, interaction)
+        if source_wait is not None:
+            questions = self.store.decision_questions(rid, [f"{key}/{attempt}"])
+            matching = [question for question in questions
+                        if question["artifact_hash"] == identity and question["answer"] is not None]
+            if len(matching) != 1:
+                raise StateConflict("Research prerequisite lost its exact submitted answer")
+            research.consume_wait(rid, source_wait, matching[0]["id"])
+            return
         updates = {key: attempt + 1}
         if observed_environment:
             queued = self._environment_waits(rid)
@@ -449,6 +476,9 @@ class WorkflowEngine:
                   for frame in traceback.extract_tb(error.__traceback__)]
         record = {"route": "internal_error", "reason_code": "unclassified_exception", "incident_id": incident,
                   "exception_type": type(error).__name__, "frames": frames}
+        recording = getattr(error, "acquisition_recording_failure", None)
+        if recording is not None:
+            record["research_recording_failure"] = recording
         try:
             record["phase"] = self.store.run(rid)["stage"]
             self.store.record_fault(rid, record, pause=True)
@@ -1974,9 +2004,12 @@ class WorkflowEngine:
                     acquisition.block(rid, "Research could not find a useful permitted continuation.", document.model_dump())
                 if (document.sources or self.authority.author_scope(rid, stage)["correction"]
                         or PlanReviewRecovery(self).requires_research_review(rid) or acquisition.active(rid)):
+                    service = self._research_service()
+                    dispatch = acquisition.dispatch_binding(rid, document)
                     try:
-                        retrieved = await self._research_service().verify(document.sources)
+                        retrieved = await service.verify(document.sources)
                     except BaseException as exc:
+                        exc.acquisition_dispatch = dispatch
                         try:
                             acquisition.observe(rid, document, exc, control=not isinstance(exc, Exception))
                         except (Replan, HumanIntervention) as observation_error:

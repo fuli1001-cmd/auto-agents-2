@@ -21,6 +21,10 @@ from .util import digest
 CURRENT = "recovery/research-acquisition/current"
 PREFIX = "recovery/research-acquisition/episodes/"
 CONTEXT = "controller_research_acquisition"
+WAIT = "recovery/research-acquisition/prerequisite-wait"
+HARD = "recovery/research-acquisition/recording-error"
+CONSUMED = "recovery/research-acquisition/prerequisite-consumed/"
+SOURCE_CODES = {"DOCUMENT_ACQUISITION_UNAVAILABLE", "RESEARCH_RESOLVER_UNAVAILABLE", "RESEARCH_DESTINATION_REJECTED"}
 
 
 class ClaimDisposition(Record):
@@ -102,6 +106,163 @@ class ResearchAcquisitionRecovery:
     def binding(self, rid):
         return {name: digest(self.store.get(rid, name)) for name in ("capture", "clarify")}
 
+    def dispatch_binding(self, rid, document):
+        raw = document.model_dump() if hasattr(document, "model_dump") else document
+        candidate = self.store.get(rid, "candidate/provider_research", {}).get("document")
+        if candidate != raw:
+            raise StateConflict("Research dispatch lost its exact controller candidate", phase="provider_research")
+        return {"version": 1, "run_id": rid, "generation": self.store.run(rid)["data"].get("replans", 0),
+                "binding": self.binding(rid), "candidate_hash": digest(raw),
+                "sources_hash": digest(raw.get("sources", [])),
+                "source_urls": sorted({urldefrag(row["url"])[0] for row in raw.get("sources", [])})}
+
+    @staticmethod
+    def refusals(report):
+        result = []
+        for row in report:
+            facts = ([row["failure"]] if row["status"] == "failed" else []) + row.get("observed_failures", [])
+            selected = []
+            for failure in facts:
+                if (failure["code"] in SOURCE_CODES and not failure["automatic"]
+                        and failure not in selected):
+                    selected.append(failure)
+            if selected:
+                result.append({"url": row["url"], "failures": selected})
+        return result
+
+    def validate_dispatch(self, rid, stamp):
+        candidate = self.store.get(rid, "candidate/provider_research", {}).get("document")
+        if (not isinstance(stamp, dict) or stamp.get("version") != 1 or candidate is None
+                or type(stamp.get("generation")) is not int or stamp["generation"] < 0):
+            raise StateConflict("Research wait has no verifiable original dispatch binding", phase="provider_research")
+        if stamp != self.dispatch_binding(rid, candidate):
+            raise StateConflict("Research wait candidate, requirements or generation changed", phase="provider_research")
+
+    @staticmethod
+    def hard_record(rid, original, error, operation):
+        stamp = getattr(original, "acquisition_dispatch", None)
+        return {"version": 1, "kind": "recording_error", "run_id": rid, "operation": operation,
+                "binding_status": "original_frozen" if isinstance(stamp, dict) else "unverifiable",
+                "dispatch": stamp,
+                "acquisition_id": getattr(original, "acquisition_id", None),
+                "error_type": type(error).__name__, "original_error_type": type(original).__name__,
+                "observations": getattr(original, "acquisition_observations", [])}
+
+    @staticmethod
+    def source_representative(own):
+        failures = [failure for row in own for failure in row["failures"]]
+        return next((failure for failure in failures if failure["classification"] in {"security", "permission"}),
+                    failures[0])
+
+    def source_wait(self, rid, stamp, acquisition_id, report):
+        own = self.refusals(report)
+        if not own:
+            return None
+        identity = digest([stamp, acquisition_id, own])
+        representative = self.source_representative(own)
+        requirement = HumanRequirement(kind="external_input",
+            reason="Research acquisition observed an unresolved source boundary: " + "; ".join(
+                row["url"] + " (" + ", ".join(failure["classification"] for failure in row["failures"]) + ")"
+                for row in own),
+            action="Provide new relevant authoritative material or verify the original source/network prerequisite is fixed; "
+                   "do not waive permission, certificate, public-address or unknown failures.",
+            resume_condition="A matching reply permits only the original bounded read-only reacquisition. All original "
+                             "public-address, TLS, source review, counters and human prototype gates still apply.",
+            evidence_refs=[WAIT],
+            evidence={**representative["diagnostic"], "authority": "research_source_observation", "wait_id": identity,
+                      "dispatch": stamp, "observations": own})
+        reason_code, phase = representative["code"], "provider_research"
+        body = requirement.model_dump()
+        question_identity = digest([reason_code, phase, body])
+        return {"version": 1, "kind": "source_wait", "id": identity, "dispatch": stamp,
+                "acquisition_id": acquisition_id, "observations": own,
+                "reason_code": reason_code, "phase": phase, "requirement": body,
+                "identity": question_identity, "attempt": self.store.get(rid, "prerequisite/" + question_identity, 0)}
+
+    def waiting(self, rid):
+        wait = self.store.get(rid, WAIT)
+        if wait is None:
+            return None
+        if (wait.get("kind") != "source_wait" or wait.get("version") != 1
+                or type(wait.get("attempt")) is not int or wait["attempt"] < 0):
+            raise StateConflict("Research wait kind/version is not a source confirmation", phase="provider_research")
+        self.validate_dispatch(rid, wait.get("dispatch"))
+        evidence = wait["requirement"].get("evidence", {})
+        if (wait["reason_code"] not in SOURCE_CODES or wait["phase"] != "provider_research"
+                or not wait["observations"] or wait["reason_code"] != self.source_representative(wait["observations"])["code"]
+                or wait["requirement"].get("kind") != "external_input"
+                or evidence.get("authority") != "research_source_observation"
+                or evidence.get("wait_id") != wait["id"] or evidence.get("dispatch") != wait["dispatch"]
+                or evidence.get("observations") != wait["observations"]
+                or self.store.get(rid, "prerequisite/" + wait["identity"], 0) != wait["attempt"]
+                or wait["id"] != digest([wait["dispatch"], wait["acquisition_id"], wait["observations"]])
+                or wait["identity"] != digest([wait["reason_code"], wait["phase"], wait["requirement"]])
+                or {row["url"] for row in wait["observations"]} - set(wait["dispatch"]["source_urls"])):
+            raise StateConflict("Research wait lost its exact source/question identity", phase="provider_research")
+        return wait
+
+    @staticmethod
+    def wait_error(wait):
+        return HumanIntervention(HumanRequirement.model_validate(wait["requirement"]),
+                                 reason_code=wait["reason_code"], phase=wait["phase"])
+
+    def consume_wait(self, rid, wait, question_id):
+        self.validate_dispatch(rid, wait["dispatch"])
+        self.store.consume_research_prerequisite(rid, WAIT, HARD, CONSUMED + wait["id"], wait, question_id)
+
+    def hard_error(self, rid):
+        hard = self.store.get(rid, HARD)
+        if hard is None:
+            return None
+        return StateConflict("Research recording/internal state remains unverified (" + hard.get("operation", "unknown") +
+                             ", " + hard.get("error_type", "unknown") + "); a network confirmation cannot clear "
+                             "this hard boundary. Restore and verify the original owner state first.",
+                             phase="provider_research", evidence_refs=[HARD])
+
+    def prepare_wait(self, rid):
+        hard = self.hard_error(rid)
+        if hard is not None:
+            raise hard
+        if self.store.has_event(rid, "research.acquisition_recording_failed"):
+            raise StateConflict("Historical research recording audit has no verified hard-hold resolution; "
+                                "preserve its original state and verify the owner repair before any new request.",
+                                phase="provider_research")
+        wait = self.waiting(rid)
+        if wait is not None:
+            raise self.wait_error(wait)
+        # Do not invent a wait for historical refusals. Old records without the
+        # new original stamp/consumption receipt must be checked by their owner.
+        candidate = self.store.get(rid, "candidate/provider_research", {}).get("document")
+        if candidate is None or self.store.get(rid, "provider_research"):
+            return
+        record = self.active(rid)
+        if record is None:
+            key = PREFIX + digest([rid, self.store.run(rid)["data"].get("replans", 0), self.binding(rid), candidate])
+            record = self.store.get(rid, key)
+        for attempt in (record or {}).get("attempts", []):
+            own = self.refusals(attempt["observations"])
+            if not own:
+                continue
+            stamp = attempt.get("dispatch")
+            identity = digest([stamp, attempt["id"], own]) if stamp is not None else None
+            receipt = self.store.get(rid, CONSUMED + identity) if identity else None
+            if (not receipt or receipt.get("dispatch") != stamp
+                    or receipt.get("acquisition_id") != attempt["id"]):
+                raise StateConflict("Historical research refusal has no verified dispatch wait/consumption binding; "
+                                    "preserve its original question and observations before any new request.",
+                                    phase="provider_research", evidence_refs=[CURRENT])
+        fault = self.store.get(rid, "recovery/current-fault", {})
+        if fault.get("route") == "human" and fault.get("phase") == "provider_research" and fault.get("reason_code") in SOURCE_CODES:
+            requirement = fault.get("human_requirement", {})
+            category, automatic = http_failure_classification(
+                requirement.get("evidence", {}), document=fault["reason_code"] == "DOCUMENT_ACQUISITION_UNAVAILABLE")
+            identity = digest([fault["reason_code"], fault["phase"], requirement])
+            key = "prerequisite/" + identity + "/" + str(self.store.get(rid, "prerequisite/" + identity, 0))
+            if not automatic and self.store.decision_questions(rid, [key]):
+                raise StateConflict("Legacy source prerequisite lacks a verified new dispatch binding; keep the "
+                                    "original question and obtain an owner-verified bridge before reacquisition.",
+                                    phase="provider_research")
+
     def active(self, rid):
         pointer = self.store.get(rid, CURRENT)
         if not pointer:
@@ -135,6 +296,7 @@ class ResearchAcquisitionRecovery:
                     "missing information; do not silently remove necessary facts or change the requirements."}
 
     def prepare(self, rid):
+        self.prepare_wait(rid)
         record = self.active(rid)
         if not record:
             return
@@ -162,15 +324,21 @@ class ResearchAcquisitionRecovery:
 
     def recording_failed(self, rid, document, original, error):
         raw = document.model_dump() if hasattr(document, "model_dump") else document
+        stamp = getattr(original, "acquisition_dispatch", None)
         details = {"error_type": type(error).__name__, "original_error_type": type(original).__name__,
-                   "candidate_hash": digest(raw), "acquisition_id": getattr(original, "acquisition_id", None)}
+                   "candidate_hash": stamp.get("candidate_hash") if isinstance(stamp, dict) else None,
+                   "reported_candidate_hash": digest(raw), "acquisition_id": getattr(original, "acquisition_id", None),
+                   "dispatch": stamp}
         original.acquisition_recording_failure = {**details, "audit_recorded": False}
         original.add_note("Research observation recording failed: " + details["error_type"])
         if isinstance(getattr(original, "evidence", None), dict):
             original.evidence["recording_failure"] = original.acquisition_recording_failure
         try:
-            self.store.event(rid, "research.acquisition_recording_failed",
-                {**details, "observations": getattr(original, "acquisition_observations", [])})
+            hard = self.store.get(rid, HARD)
+            updates = {} if hard is not None else {HARD: self.hard_record(
+                rid, original, error, "research.acquisition.observe")}
+            self.store.checkpoints(rid, updates, event=("research.acquisition_recording_failed",
+                {**details, "observations": getattr(original, "acquisition_observations", [])}))
         except Exception as audit_error:
             original.acquisition_recording_failure["audit_error_type"] = type(audit_error).__name__
             original.add_note("Research observation audit also failed: " + type(audit_error).__name__)
@@ -187,6 +355,11 @@ class ResearchAcquisitionRecovery:
         if ({row["url"] for row in report} != {urldefrag(row["url"])[0] for row in raw.get("sources", [])}
                 or len({row["url"] for row in report}) != len(report)):
             raise StateConflict("Research acquisition observations do not bind the exact candidate source set")
+        stamp = getattr(error, "acquisition_dispatch", None)
+        if stamp is not None:
+            self.validate_dispatch(rid, stamp)
+            if stamp["candidate_hash"] != digest(raw):
+                raise StateConflict("Research observation no longer matches its original dispatch candidate")
         generation = self.store.run(rid)["data"].get("replans", 0)
         record = self.active(rid)
         had_active = record is not None
@@ -196,7 +369,7 @@ class ResearchAcquisitionRecovery:
                 "original_candidate": self.engine.artifacts.put(raw, "research-acquisition-candidate"),
                 "claims": claim_rows(raw), "attempts": []}
         attempt = {"id": error.acquisition_id, "generation": generation, "candidate_hash": digest(raw), "sources": raw["sources"],
-                   "observations": report}
+                   "observations": report, **({"dispatch": stamp} if stamp is not None else {})}
         # Exclude prose, fragment differences and attempt counters from this
         # no-progress comparison. New actual outcomes may reopen a useful path.
         def supplemental(row):
@@ -237,12 +410,25 @@ class ResearchAcquisitionRecovery:
         else:
             updated.pop("pending", None)
         updates = {PREFIX + record["id"]: updated}
+        own = self.refusals(report)
+        source_error = isinstance(error, (DocumentAcquisitionTimeout, DocumentAcquisitionUnavailable,
+                                         ResearchResolverUnavailable, ResearchDestinationRejected))
+        if not control and not source_error:
+            updates[HARD] = self.hard_record(rid, error, error, "research.capture.internal")
+        elif own:
+            if stamp is None:
+                updates[HARD] = self.hard_record(rid, error, error, "research.dispatch.unverifiable")
+            else:
+                wait = self.source_wait(rid, stamp, error.acquisition_id, report)
+                previous = self.store.get(rid, WAIT)
+                if previous is not None and previous != wait:
+                    raise StateConflict("Another exact research source wait must be resolved first")
+                updates[WAIT] = wait
         if automatic or had_active:
             updates[CURRENT] = {"id": record["id"], "key": PREFIX + record["id"]}
-        self.store.checkpoints(rid, updates)
-        self.store.event(rid, "research.acquisition_failed", {"episode_id": record["id"],
+        self.store.checkpoints(rid, updates, event=("research.acquisition_failed", {"episode_id": record["id"],
             "attempt": len(attempts), "automatic": automatic and not duplicate,
-            "no_progress": duplicate, "observations": report})
+            "no_progress": duplicate, "observations": report}))
         if not automatic:
             return  # The original exception retains its original human/security boundary.
         if duplicate:

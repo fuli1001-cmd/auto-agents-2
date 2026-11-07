@@ -411,20 +411,20 @@ async def test_engine_cancel_records_refusal_without_replan_or_retry(tmp_path, m
 
     monkeypatch.setattr(ResearchBatch, "observe_resolver", observe)
     original_record = ResearchAcquisitionRecovery.observe
-    original_event = workflow.store.event
+    original_event = workflow.store._event
 
     def record(self, rid, document, error, *, control=False):
         if control and recording_failure != "none":
             raise OSError("EXAMPLE_RECORDING_SECRET")
         return original_record(self, rid, document, error, control=control)
 
-    def event(rid, kind, data):
+    def event(db, rid, kind, data):
         if kind == "research.acquisition_recording_failed" and recording_failure == "audit":
             raise ValueError("EXAMPLE_AUDIT_SECRET")
-        return original_event(rid, kind, data)
+        return original_event(db, rid, kind, data)
 
     monkeypatch.setattr(ResearchAcquisitionRecovery, "observe", record)
-    monkeypatch.setattr(workflow.store, "event", event)
+    monkeypatch.setattr(workflow.store, "_event", event)
     before = asyncio.all_tasks()
     task = asyncio.create_task(workflow.start(str(request)))
     try:

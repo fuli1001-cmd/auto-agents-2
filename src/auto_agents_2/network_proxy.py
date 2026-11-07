@@ -44,14 +44,22 @@ async def open_proxy_tunnel(backend, proxy, ip, port, timeout, local_address, so
     The returned stream belongs to the origin connection, which performs its own
     TLS handshake with the original hostname and normal certificate validation.
     """
+    from .research_batch import ResearchRequestNotExecuted, current_batch
+    batch = current_batch.get()
     url = httpcore.URL(scheme=proxy.url.raw_scheme, host=proxy.url.raw_host,
                        port=proxy.url.port, target=b"/")
     stream = await backend.connect_tcp(url.host.decode("ascii"), url.origin.port,
                                       timeout, local_address, socket_options)
     try:
+        if batch is not None:
+            batch.before_connect(proxy)
         if url.scheme == b"https":
             stream = await stream.start_tls(ssl_context=ssl.create_default_context(),
                                             server_hostname=url.host.decode("ascii"), timeout=timeout)
+        # TCP and proxy TLS may have awaited while a sibling froze this route.
+        # CONNECT is a new request and must be checked at its actual handoff.
+        if batch is not None:
+            batch.before_connect(proxy)
         target = (f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}").encode("ascii")
         headers = [(b"Host", target)]
         if proxy.raw_auth is not None:
@@ -71,7 +79,14 @@ async def open_proxy_tunnel(backend, proxy, ip, port, timeout, local_address, so
                      else False)
         try:
             await stream.aclose()
-        except Exception:
+        except Exception as cleanup_error:
+            network_cleanup = isinstance(cleanup_error, (
+                OSError, httpcore.NetworkError, httpcore.TimeoutException, httpcore.ProxyError, httpx.HTTPError))
+            if not network_cleanup:
+                raise  # Real internal/state cleanup faults stay global.
+            if isinstance(error, ResearchRequestNotExecuted):
+                error.evidence["cleanup_failure"] = {"error_type": type(cleanup_error).__name__}
+                raise error
             if protected:
                 raise error
             raise

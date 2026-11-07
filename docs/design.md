@@ -954,6 +954,8 @@ be shared. Phase alone never proves a per-source cause or authorizes recovery.
 Existing finite diagnostics do not identify every CONNECT status or prove proxy
 authentication failure. Already dispatched requests finish under their own limits.
 Capture admission is checked before dispatch and DNS admission before each query;
+proxy routes are checked again after TCP and proxy TLS, immediately before CONNECT,
+closing an already opened socket when that not-yet-dispatched request is blocked;
 new connections also check the exact proxy route. Redirects requiring new DNS
 cannot cross the stop, but established sockets are not retroactively invalidated.
 The observation status not_executed identifies its unit: capture_started=false
@@ -984,8 +986,41 @@ in refusal retention and no-progress comparison; cancellation does not erase a
 403 or grant a retry. An actual recording failure retains the original failure or
 control type, adds finite error metadata and attempts one audit event. Failed audit
 is explicitly marked not durable with both finite error notes; it is never called
-successful recording. A known recording failure disables automatic source recovery,
+successful recording. Acquisition checkpoints, their pending re-entry and the
+required failure event commit in one Store transaction, so a failed event cannot
+leave behind newly authorized pending work. A known recording failure disables automatic source recovery,
 while normal intentional Replan/HumanIntervention behavior is unchanged.
+
+Before dispatch the controller freezes the original run, generation, candidate,
+source set and capture/clarify bindings. An actual nonautomatic source observation,
+including one observed before a real caller cancellation, atomically records a
+source_wait checkpoint with the acquisition ledger and required event. Pure
+cancellation, ordinary transient failures and another source's blocked_by reason
+do not create this wait. Restart checks it before authoring or verify and raises
+the existing HumanIntervention boundary without new network work. Its original
+question identity and attempt stay bound to that exact observation. Only a
+matching, actually submitted retry answer consumes the wait, increments the
+existing prerequisite counter and saves its receipt in one CAS transaction;
+pause, superseded questions, changed bindings and old answers do not consume it.
+That answer permits the original resumable read-only recheck, not a waiver of
+public-address, TLS, refusal, source review or prototype gates. A new observed
+refusal creates a new wait even when the same source fails again.
+
+An internal/state fault or failed observation recording has a separate
+recording_error hard hold. One audit and that hold must commit together in the
+original Store, retaining the pre-dispatch binding and actual observations.
+Missing original proof remains unverifiable; reading current state after a
+conflict does not supply authority. Ordinary source/network confirmation cannot
+clear a hard hold or replay its failed write. There is no new automated owner
+repair or hard-hold release operation. An unavailable Store may prevent even
+this audit: both failures remain visible on the original exception, no durable
+protection is claimed and execution stops. Historical recording audits and
+source refusals/questions lacking a verified dispatch/consumption binding hard
+stop before network work; this change does not migrate, retag, clear or fabricate
+old refusals. Any owner-verified historical bridge requires separate review.
+These additions use existing checkpoints/questions/events, with no schema
+migration, new recovery permit, budget reset or automatic journal replay.
+
 Each HTTP download retains its own 30-second total deadline; semaphore waiting
 precedes it, so there is no new 30-second batch wall-clock limit. The separately
 bounded collection helper is unchanged. No transport retry or single-site exception

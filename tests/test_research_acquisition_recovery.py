@@ -327,13 +327,13 @@ def test_historical_claim_is_not_a_current_source_dispute_target():
 async def test_acceptance_and_episode_completion_are_atomic_on_resume(tmp_path, monkeypatch, window):
     workflow, agent, request = scenario(tmp_path, monkeypatch)
     checkpoints = workflow.store.checkpoints
-    def interrupt(rid, updates):
+    def interrupt(rid, updates, **kwargs):
         if "provider_research" in updates and any(value.get("completed") for key, value in updates.items()
                                                   if key.startswith(PREFIX)):
             if window == "after":
-                checkpoints(rid, updates)
+                checkpoints(rid, updates, **kwargs)
             raise asyncio.CancelledError()
-        return checkpoints(rid, updates)
+        return checkpoints(rid, updates, **kwargs)
     monkeypatch.setattr(workflow.store, "checkpoints", interrupt)
     with pytest.raises(asyncio.CancelledError):
         await workflow.start(str(request))
