@@ -20,7 +20,7 @@ from .errors import (
 )
 from .network_proxy import ProxySettings, open_proxy_tunnel
 from .process_ownership import PreviewOwnershipError, verify_connection
-from .research_batch import current_batch
+from .research_batch import ResearchRequestNotExecuted, current_batch, current_http_failure
 from .util import digest
 
 preview_owner = ContextVar("preview_owner", default=None)
@@ -68,6 +68,9 @@ class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
 
     async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
         async with asyncio.timeout(timeout):
+            batch = current_batch.get()
+            if batch is not None:
+                batch.before_connect(self.proxy)
             resolution = None
             if self.resolver is None:
                 addresses = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
@@ -77,38 +80,69 @@ class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
                 targets = list(dict.fromkeys(resolution.addresses))
             if not targets or not all(public_address(ip) for ip in targets):
                 raise ResearchDestinationRejected(host, empty_resolution=not targets)
-            failures = []
+            observed = []
+
+            def observe(failure):
+                previous = next((row for row in observed if row[0] is failure), None)
+                if previous is not None:
+                    return not previous[2][1]
+                try:
+                    with http_errors():
+                        raise failure
+                except httpx.HTTPError as mapped:
+                    details = http_failure_details(mapped)
+                classification = http_failure_classification(details)
+                observed.append((failure, details, classification))
+                if batch is not None and not classification[1]:
+                    # Freeze in the failing attempt, before proxy cleanup or
+                    # semaphore release can dispatch another connection.
+                    indexes = sorted({*range(min(14, len(observed))), len(observed) - 1})
+                    summary = [{**observed[i][1], "attempt": i + 1} for i in indexes]
+                    preserve_http_connection_failure(failure, "public_connect",
+                                                     attempts=summary, attempt_count=len(observed))
+                    try:
+                        with http_errors():
+                            raise failure
+                    except httpx.HTTPError as mapped:
+                        handler = current_http_failure.get()
+                        owned = handler(mapped) if handler is not None else None
+                    batch.freeze_connect(self.proxy, host, port, details, owned)
+                return not classification[1]
+
             for ip in targets:
+                if batch is not None:
+                    try:
+                        batch.before_connect(self.proxy)
+                    except ResearchRequestNotExecuted:
+                        if not observed:
+                            raise
+                        break  # Keep this call's real failure, not a blocked substitute.
                 try:
                     if self.proxy is not None:
+                        kwargs = {"failure_observer": observe} if batch is not None else {}
                         stream = await open_proxy_tunnel(self.backend, self.proxy, ip, port,
-                                                         timeout, local_address, socket_options)
+                                                         timeout, local_address, socket_options, **kwargs)
                     else:
                         # Preserve origin Host/TLS while dialling only the validated number.
                         stream = await self.backend.connect_tcp(ip, port, timeout, local_address, socket_options)
                     if resolution is not None:
                         self.resolver.connected(resolution, ip, port)
                     return stream
-                except (OSError, httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
-                    failures.append(exc)
-            observed = []
-            for failure in failures:
-                try:
-                    with http_errors():
-                        raise failure
-                except httpx.HTTPError as mapped:
-                    details = http_failure_details(mapped)
-                observed.append((failure, details, http_failure_classification(details)))
-            # Dial order and success are unchanged. When all addresses failed,
-            # an earlier certificate/permission/unknown error must not be hidden
-            # by the final transient error and authorize recovery.
+                except (OSError, httpcore.ConnectError, httpcore.ConnectTimeout, httpcore.ProxyError) as exc:
+                    if batch is None and isinstance(exc, httpcore.ProxyError):
+                        raise  # Preserve the original non-batch proxy behavior.
+                    stopped = observe(exc)
+                    if batch is not None and stopped:
+                        break
+            # Non-batch consumers keep their accepted address fallback behavior.
+            # Batch attempts stop at a newly observed non-automatic boundary.
             selected = next((i for i, row in enumerate(observed) if row[2][0] in {"security", "permission"}),
                             next((i for i, row in enumerate(observed) if not row[2][1]), len(observed) - 1))
             error = observed[selected][0]
             indexes = sorted({*range(min(14, len(observed))), selected, len(observed) - 1})
             summary = [{**observed[i][1], "attempt": i + 1} for i in indexes]
             preserve_http_connection_failure(error, "public_connect", attempts=summary, attempt_count=len(observed))
-            if isinstance(error, (httpcore.ConnectTimeout, httpcore.ConnectError)):
+            if isinstance(error, (httpcore.ConnectTimeout, httpcore.ConnectError, httpcore.ProxyError)):
                 raise error
             raise httpcore.ConnectError("Public research connection failed") from error
 

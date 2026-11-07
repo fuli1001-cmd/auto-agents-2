@@ -5,11 +5,50 @@ from urllib.parse import urlsplit
 
 import httpcore
 
-from .errors import AA2Error, http_failure_classification
+from .errors import AA2Error, DocumentAcquisitionUnavailable, http_failure_classification
 from .network_proxy import ProxySettings
 from .util import digest, identifier
 
 current_batch = ContextVar("research_batch", default=None)
+current_capture = ContextVar("research_capture", default=None)
+current_http_failure = ContextVar("research_http_failure", default=None)
+
+
+class CaptureHistory:
+    """Original failures owned by one capture, including while it is cleaning up."""
+    def __init__(self, url):
+        self.source_url = self.request_url = url
+        self.failures = []
+
+    def record(self, failure):
+        previous = next((row for row in self.failures
+                         if type(row) is type(failure) and row.evidence == failure.evidence), None)
+        if previous is not None:
+            return previous
+        self.failures.append(failure)
+        return failure
+
+    def document_failure(self, error):
+        return self.record(DocumentAcquisitionUnavailable(self.request_url, error))
+
+    def strongest(self):
+        from .research_acquisition import failure_observation
+        rows = [(failure, failure_observation(failure)) for failure in self.failures]
+        return next((failure for failure, facts in rows if facts["classification"] in {"security", "permission"}),
+                    next((failure for failure, facts in rows if not facts["automatic"]), None))
+
+    def observations(self):
+        from .research_acquisition import failure_observation
+        return [failure_observation(failure) for failure in self.failures]
+
+
+class ConnectionBoundary:
+    """Finite pre-cleanup facts when no document/resolver mapper owns the call."""
+    code = "RESEARCH_CONNECTION_BOUNDARY"
+
+    def __init__(self, host, port, details):
+        self.evidence = {"operation": "research_connect", "hostname": host, "port": port,
+                         **details, "connection_phase": "public_connect"}
 
 
 class ResearchRequestNotExecuted(AA2Error):
@@ -73,6 +112,17 @@ class ResearchBatch:
             self.resolver_failure = error
         if endpoint is not None:
             self.observe_connection(error, endpoint)
+
+    def before_connect(self, proxy):
+        failure = self.route_failures.get(self.proxy_settings.key(proxy))
+        if failure is not None:
+            operation = "proxy_request" if proxy is not None else "public_connect"
+            raise ResearchRequestNotExecuted(self, operation, failure)
+
+    def freeze_connect(self, proxy, host, port, details, failure=None):
+        if not http_failure_classification(details)[1]:
+            self.route_failures.setdefault(self.proxy_settings.key(proxy),
+                                           failure or ConnectionBoundary(host, port, details))
 
     def observe_connection(self, error, url):
         proxy = self.proxy_settings.route(httpcore.URL(url).origin)

@@ -12,7 +12,7 @@ import httpx
 
 from .errors import AA2Error, ResearchResolverUnavailable, http_failure_details
 from .http_body import read_body
-from .research_batch import current_batch
+from .research_batch import ResearchRequestNotExecuted, current_batch, current_capture, current_http_failure
 from .util import digest
 
 DNS_BODY_LIMIT = 64 * 1024
@@ -121,6 +121,7 @@ class HTTPSJSONResolver:
         self.bootstrap_ips = tuple(config.bootstrap_ips)
         self.proxy_settings = proxy_settings
         self.connections = []
+        self.observed_failures = []
 
     async def resolve(self, host, port, timeout):
         try:
@@ -142,36 +143,46 @@ class HTTPSJSONResolver:
         def unavailable(error):
             failure = ResearchResolverUnavailable(endpoint_origin=str(endpoint.copy_with(path="/", query=None)),
                 endpoint_url_hash=digest(self.endpoint), **http_failure_details(error))
-            observed.append(failure)
+            history = current_capture.get()
+            if history is not None:
+                failure = history.record(failure)
+            if all(row is not failure for row in observed):
+                observed.append(failure)
+                self.observed_failures.append(failure)
             if batch is not None:
                 batch.observe_resolver(failure, self.endpoint)
             return failure
 
+        deadline = asyncio.timeout(timeout)
         try:
-            async with asyncio.timeout(timeout), httpx.AsyncClient(
+            async with deadline, httpx.AsyncClient(
                     transport=transport, trust_env=False, follow_redirects=False, timeout=timeout,
                     cookies=CookieJar(policy=NoResolverCookies()),
                     headers={"Accept": "application/dns-json", "Accept-Encoding": "identity"}) as client:
                 async def query(kind):
-                    if batch is not None:
-                        batch.before_resolver_request(self.endpoint)
+                    token = current_http_failure.set(unavailable)
                     try:
-                        async with client.stream("GET", self.endpoint, params={"name": hostname, "type": str(kind), "cd": "false"}) as response:
-                            try:
-                                if response.is_redirect:
-                                    raise AA2Error("Research resolver redirects are not permitted")
-                                response.raise_for_status()
-                                content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                                if content_type not in {"application/json", "application/dns-json"}:
-                                    raise AA2Error("Research resolver did not return supported DNS JSON")
-                                return parse_dns_json(await read_body(response, DNS_BODY_LIMIT), hostname, kind)
-                            except httpx.HTTPError as error:
-                                # Freeze a refusal before stream/client cleanup
-                                # can hide it or another request can be dispatched.
-                                raise unavailable(error) from None
-                    except httpx.HTTPError as error:
-                        raise unavailable(error) from None
+                        if batch is not None:
+                            batch.before_resolver_request(self.endpoint)
+                        try:
+                            async with client.stream("GET", self.endpoint, params={"name": hostname, "type": str(kind), "cd": "false"}) as response:
+                                try:
+                                    if response.is_redirect:
+                                        raise AA2Error("Research resolver redirects are not permitted")
+                                    response.raise_for_status()
+                                    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                                    if content_type not in {"application/json", "application/dns-json"}:
+                                        raise AA2Error("Research resolver did not return supported DNS JSON")
+                                    return parse_dns_json(await read_body(response, DNS_BODY_LIMIT), hostname, kind)
+                                except httpx.HTTPError as error:
+                                    # Freeze a refusal before stream/client cleanup
+                                    # can hide it or another request can be dispatched.
+                                    raise unavailable(error) from None
+                        except httpx.HTTPError as error:
+                            raise unavailable(error) from None
 
+                    finally:
+                        current_http_failure.reset(token)
                 queries = [asyncio.create_task(query(kind)) for kind in (1, 28)]
                 try:
                     ipv4, ipv6 = await asyncio.gather(*queries)
@@ -186,7 +197,9 @@ class HTTPSJSONResolver:
             selected = next((failure for failure, facts in failures
                              if facts["classification"] in {"security", "permission"}),
                             next((failure for failure, facts in failures if not facts["automatic"]), None))
-            if selected is not None:
+            replaceable = isinstance(error, (ResearchResolverUnavailable, ResearchRequestNotExecuted, httpx.HTTPError))
+            owned_timeout = isinstance(error, TimeoutError) and deadline.expired()
+            if selected is not None and (replaceable or owned_timeout):
                 if error is not selected and isinstance(error, (TimeoutError, httpx.HTTPError)):
                     selected.evidence["cleanup_failure"] = (
                         http_failure_details(error) if isinstance(error, httpx.HTTPError) else {"category": "unknown"})

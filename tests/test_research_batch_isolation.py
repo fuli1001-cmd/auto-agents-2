@@ -234,7 +234,8 @@ async def test_non_exception_control_boundary_cancels_and_drains_siblings(monkey
     with pytest.raises(StopBatch) as observed:
         await ResearchService(None).verify([source(url) for url in URLS[:2]])
     assert observed.value is control and cleaned.is_set()
-    assert not hasattr(control, "acquisition_observations") and asyncio.all_tasks() <= before
+    assert control.acquisition_observations[0]["status"] == "failed"
+    assert control.acquisition_observations[1]["status"] == "cancelled" and asyncio.all_tasks() <= before
 
 
 async def test_original_url_admission_still_precedes_all_captures(monkeypatch):

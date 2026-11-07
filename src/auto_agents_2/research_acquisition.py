@@ -54,6 +54,8 @@ def failure_observation(error):
         category, automatic = "network", True
     elif known:
         category, automatic = http_failure_classification(evidence, document=isinstance(error, DocumentAcquisitionUnavailable))
+    if evidence.get("recording_failure"):
+        automatic = False  # Missing durable observation is not a recovery permit.
     return {"code": error.code if known else "UNCLASSIFIED_ACQUISITION_ERROR",
             "classification": category, "automatic": automatic, "diagnostic": evidence}
 
@@ -158,7 +160,24 @@ class ResearchAcquisitionRecovery:
                     or permit.get("outcome_hash") != digest(permit["outcome"])):
                 raise StateConflict("Research acquisition re-entry has no completed gate-reset receipt")
 
-    def observe(self, rid, document, error):
+    def recording_failed(self, rid, document, original, error):
+        raw = document.model_dump() if hasattr(document, "model_dump") else document
+        details = {"error_type": type(error).__name__, "original_error_type": type(original).__name__,
+                   "candidate_hash": digest(raw), "acquisition_id": getattr(original, "acquisition_id", None)}
+        original.acquisition_recording_failure = {**details, "audit_recorded": False}
+        original.add_note("Research observation recording failed: " + details["error_type"])
+        if isinstance(getattr(original, "evidence", None), dict):
+            original.evidence["recording_failure"] = original.acquisition_recording_failure
+        try:
+            self.store.event(rid, "research.acquisition_recording_failed",
+                {**details, "observations": getattr(original, "acquisition_observations", [])})
+        except Exception as audit_error:
+            original.acquisition_recording_failure["audit_error_type"] = type(audit_error).__name__
+            original.add_note("Research observation audit also failed: " + type(audit_error).__name__)
+        else:
+            original.acquisition_recording_failure["audit_recorded"] = True
+
+    def observe(self, rid, document, error, *, control=False):
         raw = document.model_dump() if hasattr(document, "model_dump") else document
         report = getattr(error, "acquisition_observations", None)
         if report is None or not getattr(error, "acquisition_id", None):
@@ -180,20 +199,31 @@ class ResearchAcquisitionRecovery:
                    "observations": report}
         # Exclude prose, fragment differences and attempt counters from this
         # no-progress comparison. New actual outcomes may reopen a useful path.
+        def supplemental(row):
+            # Extra presentation of the main failure is not new acquisition
+            # evidence, including when resuming an older ledger format.
+            return [failure for failure in row.get("observed_failures", [])
+                    if failure != row.get("failure")]
+
         facts = [{"url": row["url"], "status": row["status"],
                   "failure": row.get("failure"),
-                  "artifact_hash": row.get("retrieval", {}).get("artifact", {}).get("hash")} for row in report]
+                  "artifact_hash": row.get("retrieval", {}).get("artifact", {}).get("hash"),
+                  **({"observed_failures": sorted(supplemental(row), key=digest)}
+                     if supplemental(row) else {})} for row in report]
         attempt["facts_hash"] = digest(sorted(facts, key=lambda row: row["url"]))
         duplicate = any(row["facts_hash"] == attempt["facts_hash"] for row in record["attempts"])
         attempts = record["attempts"] if attempt in record["attempts"] else [*record["attempts"], attempt]
         failed = [row for row in report if row["status"] == "failed"]
-        automatic = bool(failed) and all(row["status"] in {"retrieved", "failed"} and
+        automatic = not control and bool(failed) and all(row["status"] in {"retrieved", "failed"} and
             (row["status"] == "retrieved" or row["failure"]["automatic"]) for row in report)
         # A later timeout/404 cannot erase an earlier unresolved refusal. Only
         # actual successful acquisition through the unchanged boundary resolves it.
         unresolved = set()
         for observed in attempts:
             for row in observed["observations"]:
+                for failure in row.get("observed_failures", []):
+                    if not failure["automatic"]:
+                        unresolved.add(row["url"])
                 if row["status"] == "retrieved":
                     unresolved.discard(row["url"])
                 elif row["status"] == "failed" and not row["failure"]["automatic"]:

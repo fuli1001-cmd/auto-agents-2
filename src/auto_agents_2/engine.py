@@ -1976,8 +1976,15 @@ class WorkflowEngine:
                         or PlanReviewRecovery(self).requires_research_review(rid) or acquisition.active(rid)):
                     try:
                         retrieved = await self._research_service().verify(document.sources)
-                    except Exception as exc:
-                        acquisition.observe(rid, document, exc)
+                    except BaseException as exc:
+                        try:
+                            acquisition.observe(rid, document, exc, control=not isinstance(exc, Exception))
+                        except (Replan, HumanIntervention) as observation_error:
+                            if isinstance(exc, Exception):
+                                raise  # Preserve the existing intentional recovery boundary.
+                            acquisition.recording_failed(rid, document, exc, observation_error)
+                        except Exception as observation_error:
+                            acquisition.recording_failed(rid, document, exc, observation_error)
                         raise
                     review = await self._review_research(rid, work, document.model_dump(), retrieved)
             if stage == "plan":

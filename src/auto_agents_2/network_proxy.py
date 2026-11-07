@@ -38,7 +38,7 @@ class ProxySettings:
             raise AA2Error("Research proxy must be a valid HTTP(S) proxy; check proxy environment variables") from None
 
 
-async def open_proxy_tunnel(backend, proxy, ip, port, timeout, local_address, socket_options):
+async def open_proxy_tunnel(backend, proxy, ip, port, timeout, local_address, socket_options, *, failure_observer=None):
     """The proxy receives a numeric CONNECT target, never a hostname to resolve.
 
     The returned stream belongs to the origin connection, which performs its own
@@ -65,6 +65,14 @@ async def open_proxy_tunnel(backend, proxy, ip, port, timeout, local_address, so
         if not 200 <= response.status < 300:
             raise httpcore.ProxyError("Research proxy refused the public destination tunnel")
         return response.extensions["network_stream"]
-    except BaseException:
-        await stream.aclose()
+    except BaseException as error:
+        protected = (failure_observer(error) if failure_observer is not None
+                     and isinstance(error, (OSError, httpcore.ConnectError, httpcore.ConnectTimeout, httpcore.ProxyError))
+                     else False)
+        try:
+            await stream.aclose()
+        except Exception:
+            if protected:
+                raise error
+            raise
         raise

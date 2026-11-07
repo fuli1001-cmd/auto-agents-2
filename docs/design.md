@@ -970,6 +970,22 @@ failure, otherwise the first ordinary failure, preserving that original exceptio
 and every source outcome. Partial success and not_executed never approve the batch,
 reuse old success, clear a historical refusal or bypass independent review. Existing
 untyped observation dictionaries retain the new outcome without a database migration.
+Capture-owned histories freeze actual HTTP failures before cleanup, including
+nested resolver operations. Only that capture's controller-owned document deadline
+may restore its earlier non-automatic HTTP failure; another capture's failure,
+ordinary internal TimeoutError or a real caller cancellation cannot replace it.
+Resolver HTTP selection may replace only another HTTP/blocked boundary or that
+resolver's own expired deadline, never a real JSON/protocol, internal or state
+exception. Such global failures and real cancellation retain their original type,
+with earlier source-bound finite facts separately stored as observed_failures on
+the same URL row. The controller records control outcomes with automatic re-entry
+explicitly disabled, then rethrows the same control exception. These facts participate
+in refusal retention and no-progress comparison; cancellation does not erase a
+403 or grant a retry. An actual recording failure retains the original failure or
+control type, adds finite error metadata and attempts one audit event. Failed audit
+is explicitly marked not durable with both finite error notes; it is never called
+successful recording. A known recording failure disables automatic source recovery,
+while normal intentional Replan/HumanIntervention behavior is unchanged.
 Each HTTP download retains its own 30-second total deadline; semaphore waiting
 precedes it, so there is no new 30-second batch wall-clock limit. The separately
 bounded collection helper is unchanged. No transport retry or single-site exception
@@ -983,10 +999,15 @@ the origin handshake boundary. Each request keeps its own trace and preserves an
 existing trace callback. No trace arguments, exception text, credentials or request
 contents enter diagnostics. Unknown causes remain unknown, and phase alone cannot
 authorize automatic recovery. Historical errors are never retroactively enriched.
-If every validated address fails, retain their finite failure observations and
+Within a ResearchBatch, every numeric dial and proxy CONNECT checks the frozen
+route immediately before dispatch. A newly observed non-automatic address failure
+freezes the route before any cleanup await and stops later addresses in that call;
+a blocked later attempt cannot replace an actual earlier failure. Explicitly
+classified ordinary transient failures keep the original legal address fallback.
+Outside a batch, the accepted address fallback and success behavior are unchanged.
+If every attempted address fails, retain their finite failure observations and
 rethrow an original security/permission or unknown exception ahead of a final
-transient error. The existing positive classification rules are shared with research
-recovery; dial order, connection attempts and successful acquisition are unchanged.
+transient error. The positive classification rules are shared with research recovery.
 The diagnostic summary contains at most 16 finite rows, the total failure count and
 actual attempt ordinals, retaining the selected boundary and final attempt. Boundary
 selection checks all failures, even when their diagnostic summary is shortened.

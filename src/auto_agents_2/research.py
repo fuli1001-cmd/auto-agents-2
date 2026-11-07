@@ -19,7 +19,14 @@ from .http_body import ACQUISITION_TIMEOUT, acquisition_deadline, read_body
 from .managed_process import joined
 from .models import SourceEvidence
 from .network import PublicHTTPTransport, public_address
-from .research_batch import ResearchBatch, ResearchRequestNotExecuted, current_batch
+from .research_batch import (
+    CaptureHistory,
+    ResearchBatch,
+    ResearchRequestNotExecuted,
+    current_batch,
+    current_capture,
+    current_http_failure,
+)
 from .util import SECRET, digest, identifier
 
 
@@ -47,6 +54,22 @@ class ResearchService:
         self.resolver_config = resolver_config.model_copy(deep=True) if resolver_config is not None else None
 
     async def capture(self, url: str) -> dict:
+        history = current_capture.get()
+        if history is None or history.source_url != url:
+            history = CaptureHistory(url)
+        capture_token = current_capture.set(history)
+        failure_token = current_http_failure.set(history.document_failure)
+        try:
+            return await self._capture(url, history)
+        except BaseException as error:
+            if history.failures:
+                error.observed_failures = history.observations()
+            raise
+        finally:
+            current_http_failure.reset(failure_token)
+            current_capture.reset(capture_token)
+
+    async def _capture(self, url, history):
         public_url(url)
         label = f"Research document download for {urlsplit(url).hostname}"
         resolver = None
@@ -72,7 +95,7 @@ class ResearchService:
                 try:
                     for _ in range(6):
                         public_url(final)
-                        attempted_url = final
+                        attempted_url = history.request_url = final
                         async with client.stream("GET", final) as response:
                             prior_requests.append({"url_hash": digest(attempted_url),
                                                    "http_status": response.status_code})
@@ -86,28 +109,37 @@ class ResearchService:
                                 break
                             except Exception as error:
                                 observed_error = error
-                                if batch is not None and isinstance(error, httpx.HTTPError):
-                                    batch.observe_connection(DocumentAcquisitionUnavailable(attempted_url, error), attempted_url)
+                                if isinstance(error, httpx.HTTPError):
+                                    failure = history.document_failure(error)
+                                    if batch is not None:
+                                        batch.observe_connection(failure, attempted_url)
                                 raise
                     else:
                         raise AA2Error("Research redirect limit exceeded")
                 except Exception as error:
                     observed_error = observed_error or error
-                    if batch is not None and isinstance(error, httpx.HTTPError):
-                        batch.observe_connection(DocumentAcquisitionUnavailable(attempted_url, error), attempted_url)
+                    if isinstance(error, httpx.HTTPError):
+                        failure = history.document_failure(error)
+                        if batch is not None:
+                            batch.observe_connection(failure, attempted_url)
                     raise
         except Exception as error:
             if isinstance(error, ResearchRequestNotExecuted):
                 error.evidence["blocked_request_url_hash"] = digest(attempted_url)
                 error.evidence["prior_response_headers"] = prior_requests
             from .research_acquisition import failure_observation
-            observed = (DocumentAcquisitionUnavailable(attempted_url, observed_error)
+            observed = (history.document_failure(observed_error)
                         if isinstance(observed_error, httpx.HTTPError) else observed_error)
+            # Only this capture's controller-owned deadline may restore its
+            # earlier HTTP refusal. External cancellation never enters here.
+            if isinstance(error, DocumentAcquisitionTimeout) and (
+                    observed is None or failure_observation(observed)["automatic"]):
+                observed = history.strongest() or observed
             if observed is not None and not failure_observation(observed)["automatic"]:
                 # HTTP status/security/unknown processing failures were observed
                 # before __aexit__. A cleanup timeout must not turn them into a
                 # transient retry. Cancellation remains a BaseException above.
-                if isinstance(observed, DocumentAcquisitionUnavailable) and error is not observed_error:
+                if isinstance(observed, (DocumentAcquisitionUnavailable, ResearchResolverUnavailable)) and error is not observed:
                     observed.evidence["cleanup_failure"] = (
                         {"code": error.code, "diagnostic": error.evidence}
                         if isinstance(error, DocumentAcquisitionTimeout) else
@@ -139,6 +171,7 @@ class ResearchService:
         semaphore = asyncio.Semaphore(4)
         documents = {}
         started = set()
+        histories = {}
         global_failure = None
 
         def independent_failure(error):
@@ -150,19 +183,26 @@ class ResearchService:
             async with semaphore:
                 if global_failure is not None:
                     raise asyncio.CancelledError()
+                history = histories[url] = CaptureHistory(url)
+                capture_token = current_capture.set(history)
+                failure_token = current_http_failure.set(history.document_failure)
                 try:
                     batch.before_capture(url)
                     started.add(url)
                     return await self.capture(url)
                 except BaseException as error:
                     if isinstance(error, ResearchResolverUnavailable):
+                        history.record(error)
                         batch.observe_resolver(error)
                     elif isinstance(error, DocumentAcquisitionUnavailable):
+                        history.record(error)
                         batch.observe_connection(error, error.evidence["source_origin"])
                     if not independent_failure(error) and global_failure is None:
-                        # Freeze before releasing the slot, not in the supervisor.
                         global_failure = error
                     raise
+                finally:
+                    current_http_failure.reset(failure_token)
+                    current_capture.reset(capture_token)
 
         for source in sources:
             public_url(source.url)
@@ -199,21 +239,27 @@ class ResearchService:
                     task.cancel()
                 await asyncio.gather(*documents.values(), return_exceptions=True)
             await joined(asyncio.create_task(cancel_documents()))
-            if isinstance(error, Exception):
-                # Keep original exception types and safe transport diagnostics.
-                # The controller separately persists claim/source associations.
-                error.acquisition_observations = [
-                    {"url": url, "status": "cancelled"} if task.cancelled() else
-                    {"url": url, "status": "not_executed", "capture_started": url in started,
-                     "unit": "pending_request" if url in started else "capture",
-                     "boundary": task.exception().evidence}
-                    if isinstance(task.exception(), ResearchRequestNotExecuted) else
-                    {"url": url, "status": "failed", "failure": failure_observation(task.exception())}
-                    if task.exception() is not None else
-                    {"url": url, "status": "retrieved", "retrieval": {
+            # Control errors retain their type. The controller records these
+            # facts with automatic recovery explicitly disabled.
+            rows = []
+            for url, task in documents.items():
+                if task.cancelled():
+                    row = {"url": url, "status": "cancelled", "capture_started": url in started}
+                elif isinstance(task.exception(), ResearchRequestNotExecuted):
+                    row = {"url": url, "status": "not_executed", "capture_started": url in started,
+                           "unit": "pending_request" if url in started else "capture",
+                           "boundary": task.exception().evidence}
+                elif task.exception() is not None:
+                    row = {"url": url, "status": "failed", "failure": failure_observation(task.exception())}
+                else:
+                    row = {"url": url, "status": "retrieved", "retrieval": {
                         key: value for key, value in task.result().items() if key != "excerpt"}}
-                    for url, task in documents.items()]
-                error.acquisition_id = identifier("research-acquisition")
+                history = histories.get(url)
+                if history is not None and history.failures:
+                    row["observed_failures"] = history.observations()
+                rows.append(row)
+            error.acquisition_observations = rows
+            error.acquisition_id = identifier("research-acquisition")
             raise
         results = []
         for source in sources:
