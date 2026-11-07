@@ -627,8 +627,22 @@ class RetainedPathFactory:
         basename = os.path.normpath(basename)
         if (self.getbasetemp() / basename).resolve().parent != self.getbasetemp():
             raise ValueError(f"{basename} is not a normalized and relative path")
-        number = 0
         while True:
+            number = 0
+            if numbered:
+                work = directory("work", parent=self.store.run_fd)
+                try:
+                    suffixes = [name[len(basename):] for name in os.listdir(work)
+                                if name.lower().startswith(basename.lower())]
+                finally:
+                    os.close(work)
+                numbers = []
+                for suffix in suffixes:
+                    try:
+                        numbers.append(int(suffix))
+                    except ValueError:
+                        numbers.append(-1)
+                number = max(numbers, default=-1) + 1
             try:
                 # Public numbered=False creates only: no unlink-current, cleanup
                 # locks, cleanup_dead_symlinks or atexit cleanup registration.
@@ -636,7 +650,8 @@ class RetainedPathFactory:
             except FileExistsError:
                 if not numbered:
                     raise
-                number += 1
+                # Another creator won mkdir: rescan current direct names.
+                continue
             else:
                 break
         inventory = self.store.record["inventory"]

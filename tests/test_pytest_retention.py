@@ -200,6 +200,57 @@ def test_factory_rejects_escape_and_bounds_its_nonrecursive_inventory(tmp_path):
         store.close()
 
 
+@pytest.mark.parametrize("existing,expected", [
+    (["case5"], "case6"),
+    (["case0", "case2"], "case3"),
+    (["case5suffix", "casecurrent", "other99", "CASE7"], "case8"),
+])
+def test_factory_numbers_follow_largest_matching_numeric_suffix(tmp_path, monkeypatch, existing, expected):
+    store = support.Store(tmp_path / "retained", tmp_path, retain_all=True)
+    try:
+        work = store.start()
+        for name in existing:
+            (work / name).mkdir(mode=0o700)
+        factory = support.RetainedPathFactory(store)
+        for name in ("references", "remove_directory"):
+            monkeypatch.setattr(support, name, forbidden)
+        for name in ("unlink", "rmdir", "fchmod", "chmod"):
+            monkeypatch.setattr(support.os, name, forbidden)
+        assert factory.mktemp("case").name == expected
+        assert all((work / name).is_dir() for name in existing)
+    finally:
+        store.close()
+
+
+def test_factory_rescans_after_an_atomic_mkdir_collision(tmp_path, monkeypatch):
+    store = support.Store(tmp_path / "retained", tmp_path, retain_all=True)
+    try:
+        work = store.start()
+        (work / "case5").mkdir(mode=0o700)
+        factory = support.RetainedPathFactory(store)
+        original = factory.factory.mktemp
+        attempts = []
+
+        def concurrent_creator(basename, numbered=True):
+            assert numbered is False
+            attempts.append(basename)
+            if len(attempts) == 1:
+                (work / basename).mkdir(mode=0o700)
+                (work / "case9").mkdir(mode=0o700)
+            return original(basename, numbered=numbered)
+
+        monkeypatch.setattr(factory.factory, "mktemp", concurrent_creator)
+        for name in ("references", "remove_directory"):
+            monkeypatch.setattr(support, name, forbidden)
+        for name in ("unlink", "rmdir", "fchmod", "chmod"):
+            monkeypatch.setattr(support.os, name, forbidden)
+        assert factory.mktemp("case").name == "case10"
+        assert attempts == ["case6", "case10"]
+        assert (work / "case6").is_dir() and (work / "case9").is_dir()
+    finally:
+        store.close()
+
+
 @pytest.fixture
 def retained_pytest(tmp_path, request):
     harness = tmp_path / "harness"
