@@ -1007,7 +1007,11 @@ public-address, TLS, refusal, source review or prototype gates. A new observed
 refusal creates a new wait even when the same source fails again.
 
 An internal/state fault or failed observation recording has a separate
-recording_error hard hold. One audit and that hold must commit together in the
+recording_error hard hold. A genuine failed capture retains its finite global
+error type even if a later caller cancellation becomes primary during cleanup;
+its own failed row still requires a hard hold, never an ordinary network wait.
+Cancelled and not_executed/blocked rows do not manufacture global provenance.
+One audit and that hold must commit together in the
 original Store, retaining the pre-dispatch binding and actual observations.
 Missing original proof remains unverifiable; reading current state after a
 conflict does not supply authority. Ordinary source/network confirmation cannot

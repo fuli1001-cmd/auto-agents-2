@@ -139,13 +139,27 @@ class ResearchAcquisitionRecovery:
             raise StateConflict("Research wait candidate, requirements or generation changed", phase="provider_research")
 
     @staticmethod
+    def global_failures(report):
+        # Only real failed captures establish this boundary. Cancellation and
+        # not_executed/blocked_by rows cannot supply an internal failure.
+        return [{"url": row["url"],
+                 "error_type": row.get("global_error_type", "UNCLASSIFIED_ACQUISITION_ERROR")}
+                for row in report if row["status"] == "failed"
+                and row["failure"]["code"] == "UNCLASSIFIED_ACQUISITION_ERROR"]
+
+    @staticmethod
     def hard_record(rid, original, error, operation):
         stamp = getattr(original, "acquisition_dispatch", None)
+        global_failures = ResearchAcquisitionRecovery.global_failures(
+            getattr(original, "acquisition_observations", []))
+        error_type = (global_failures[0]["error_type"]
+                      if operation == "research.capture.internal" and global_failures else type(error).__name__)
         return {"version": 1, "kind": "recording_error", "run_id": rid, "operation": operation,
                 "binding_status": "original_frozen" if isinstance(stamp, dict) else "unverifiable",
                 "dispatch": stamp,
                 "acquisition_id": getattr(original, "acquisition_id", None),
-                "error_type": type(error).__name__, "original_error_type": type(original).__name__,
+                "error_type": error_type, "original_error_type": type(original).__name__,
+                "global_failures": global_failures,
                 "observations": getattr(original, "acquisition_observations", [])}
 
     @staticmethod
@@ -411,9 +425,10 @@ class ResearchAcquisitionRecovery:
             updated.pop("pending", None)
         updates = {PREFIX + record["id"]: updated}
         own = self.refusals(report)
+        from .research_batch import ResearchRequestNotExecuted
         source_error = isinstance(error, (DocumentAcquisitionTimeout, DocumentAcquisitionUnavailable,
-                                         ResearchResolverUnavailable, ResearchDestinationRejected))
-        if not control and not source_error:
+                                         ResearchResolverUnavailable, ResearchDestinationRejected, ResearchRequestNotExecuted))
+        if self.global_failures(report) or not control and not source_error:
             updates[HARD] = self.hard_record(rid, error, error, "research.capture.internal")
         elif own:
             if stamp is None:

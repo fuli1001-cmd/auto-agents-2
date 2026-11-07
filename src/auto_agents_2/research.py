@@ -257,6 +257,10 @@ class ResearchService:
                            "boundary": task.exception().evidence}
                 elif task.exception() is not None:
                     row = {"url": url, "status": "failed", "failure": failure_observation(task.exception())}
+                    if not independent_failure(task.exception()):
+                        # A later caller cancellation may become primary while
+                        # this genuine global failure remains a hard boundary.
+                        row["global_error_type"] = type(task.exception()).__name__
                 else:
                     row = {"url": url, "status": "retrieved", "retrieval": {
                         key: value for key, value in task.result().items() if key != "excerpt"}}
