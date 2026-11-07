@@ -7,11 +7,20 @@ from urllib.parse import parse_qs, urldefrag, urljoin, urlsplit
 import httpx
 
 from .artifacts import ArtifactStore
-from .errors import AA2Error, DocumentAcquisitionTimeout, DocumentAcquisitionUnavailable, http_failure_details
+from .errors import (
+    AA2Error,
+    DocumentAcquisitionTimeout,
+    DocumentAcquisitionUnavailable,
+    ResearchDestinationRejected,
+    ResearchResolverUnavailable,
+    http_failure_details,
+)
 from .http_body import ACQUISITION_TIMEOUT, acquisition_deadline, read_body
+from .managed_process import joined
 from .models import SourceEvidence
 from .network import PublicHTTPTransport, public_address
-from .util import SECRET, identifier
+from .research_batch import ResearchBatch, ResearchRequestNotExecuted, current_batch
+from .util import SECRET, digest, identifier
 
 
 def public_url(value: str):
@@ -41,16 +50,21 @@ class ResearchService:
         public_url(url)
         label = f"Research document download for {urlsplit(url).hostname}"
         resolver = None
+        batch = current_batch.get()
+        if batch is not None and batch.resolver_policy_hash != (
+                digest(self.resolver_config.model_dump()) if self.resolver_config is not None else None):
+            raise AA2Error("Research resolver policy changed within its frozen batch")
         if self.resolver_config is None:
             transport = PublicHTTPTransport()
         else:
             from .network_proxy import ProxySettings
             from .research_dns import HTTPSJSONResolver
-            proxy_settings = ProxySettings()
+            proxy_settings = batch.proxy_settings if batch is not None else ProxySettings()
             resolver = HTTPSJSONResolver(self.resolver_config, proxy_settings)
             transport = PublicHTTPTransport(resolver=resolver, proxy_settings=proxy_settings)
         final = attempted_url = url
         observed_error = None
+        prior_requests = []
         try:
             async with acquisition_deadline(ACQUISITION_TIMEOUT, label, source_url=url), httpx.AsyncClient(
                     transport=transport, trust_env=False, follow_redirects=False, timeout=30,
@@ -60,6 +74,8 @@ class ResearchService:
                         public_url(final)
                         attempted_url = final
                         async with client.stream("GET", final) as response:
+                            prior_requests.append({"url_hash": digest(attempted_url),
+                                                   "http_status": response.status_code})
                             try:
                                 if response.is_redirect and "location" in response.headers:
                                     final = urljoin(final, response.headers["location"])
@@ -70,13 +86,20 @@ class ResearchService:
                                 break
                             except Exception as error:
                                 observed_error = error
+                                if batch is not None and isinstance(error, httpx.HTTPError):
+                                    batch.observe_connection(DocumentAcquisitionUnavailable(attempted_url, error), attempted_url)
                                 raise
                     else:
                         raise AA2Error("Research redirect limit exceeded")
                 except Exception as error:
                     observed_error = observed_error or error
+                    if batch is not None and isinstance(error, httpx.HTTPError):
+                        batch.observe_connection(DocumentAcquisitionUnavailable(attempted_url, error), attempted_url)
                     raise
         except Exception as error:
+            if isinstance(error, ResearchRequestNotExecuted):
+                error.evidence["blocked_request_url_hash"] = digest(attempted_url)
+                error.evidence["prior_response_headers"] = prior_requests
             from .research_acquisition import failure_observation
             observed = (DocumentAcquisitionUnavailable(attempted_url, observed_error)
                         if isinstance(observed_error, httpx.HTTPError) else observed_error)
@@ -103,14 +126,43 @@ class ResearchService:
         return result
 
     async def verify(self, sources: list[SourceEvidence]) -> list[dict]:
+        batch = ResearchBatch(self.resolver_config)
+        token = current_batch.set(batch)
+        try:
+            return await self._verify(sources, batch)
+        finally:
+            current_batch.reset(token)
+
+    async def _verify(self, sources, batch):
         from .research_acquisition import failure_observation
 
         semaphore = asyncio.Semaphore(4)
         documents = {}
+        started = set()
+        global_failure = None
+
+        def independent_failure(error):
+            return isinstance(error, (DocumentAcquisitionTimeout, DocumentAcquisitionUnavailable,
+                                      ResearchDestinationRejected, ResearchResolverUnavailable, ResearchRequestNotExecuted))
 
         async def fetch(url):
+            nonlocal global_failure
             async with semaphore:
-                return await self.capture(url)
+                if global_failure is not None:
+                    raise asyncio.CancelledError()
+                try:
+                    batch.before_capture(url)
+                    started.add(url)
+                    return await self.capture(url)
+                except BaseException as error:
+                    if isinstance(error, ResearchResolverUnavailable):
+                        batch.observe_resolver(error)
+                    elif isinstance(error, DocumentAcquisitionUnavailable):
+                        batch.observe_connection(error, error.evidence["source_origin"])
+                    if not independent_failure(error) and global_failure is None:
+                        # Freeze before releasing the slot, not in the supervisor.
+                        global_failure = error
+                    raise
 
         for source in sources:
             public_url(source.url)
@@ -122,26 +174,40 @@ class ResearchService:
             pending = set(documents.values())
             while pending:
                 done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                # Complete concurrent known transient observations, but do not
-                # let the first 404 hide a permission/TLS/safety/unknown failure.
+                # A shared network boundary stops new dispatch, not requests
+                # already in flight. Only true global/control failures cancel.
+                if global_failure is not None:
+                    raise global_failure
                 for task in done:
                     if task.cancelled():
                         raise asyncio.CancelledError()
-                    error = task.exception()
-                    if error is not None and not failure_observation(error)["automatic"]:
-                        raise error
-            failed = [task.exception() for task in documents.values() if task.exception() is not None]
+            failed = [(task.exception(), failure_observation(task.exception()))
+                      for task in documents.values() if task.exception() is not None
+                      and not isinstance(task.exception(), ResearchRequestNotExecuted)]
             if failed:
-                raise failed[0]
+                selected = next((error for error, facts in failed
+                                 if facts["classification"] in {"security", "permission"}),
+                                next((error for error, facts in failed if not facts["automatic"]), failed[0][0]))
+                raise selected
+            blocked = [task.exception() for task in documents.values()
+                       if isinstance(task.exception(), ResearchRequestNotExecuted)]
+            if blocked:
+                raise blocked[0]
         except BaseException as error:
-            for task in documents.values():
-                task.cancel()
-            await asyncio.gather(*documents.values(), return_exceptions=True)
+            async def cancel_documents():
+                for task in documents.values():
+                    task.cancel()
+                await asyncio.gather(*documents.values(), return_exceptions=True)
+            await joined(asyncio.create_task(cancel_documents()))
             if isinstance(error, Exception):
                 # Keep original exception types and safe transport diagnostics.
                 # The controller separately persists claim/source associations.
                 error.acquisition_observations = [
                     {"url": url, "status": "cancelled"} if task.cancelled() else
+                    {"url": url, "status": "not_executed", "capture_started": url in started,
+                     "unit": "pending_request" if url in started else "capture",
+                     "boundary": task.exception().evidence}
+                    if isinstance(task.exception(), ResearchRequestNotExecuted) else
                     {"url": url, "status": "failed", "failure": failure_observation(task.exception())}
                     if task.exception() is not None else
                     {"url": url, "status": "retrieved", "retrieval": {

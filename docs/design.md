@@ -941,8 +941,39 @@ responses, unavailable documents (404/410), or explicit ordinary network causes 
 request the existing Replan/RecoveryPolicy path. An unknown ConnectError can conceal
 a certificate error and cannot authorize it. Any observed permission, certificate,
 public-address, security or unknown failure preserves the original boundary; a faster
-404 cannot mask it. DNS, proxy, TLS, size and redirect checks are unchanged, with no
-new transport retry policy or single-site exception.
+404 cannot mask it. After unchanged whole-source URL admission, typed source-bound
+document timeout, HTTP/network and destination failures do not cancel independent
+siblings. At most four captures remain active, with independent pools, parallel
+A/AAAA and the original public-address, TLS, redirect, body and review checks.
+Each verify batch freezes one resolver policy and proxy snapshot; it is only an
+admission context, never a pool, DNS or response cache. A non-automatic resolver
+failure stops new requests through that resolver context. A ProxyError, unresolved
+public-connect failure or ConnectError without a proven origin-TLS boundary stops
+new use of its frozen route, including direct routes where system resolution may
+be shared. Phase alone never proves a per-source cause or authorizes recovery.
+Existing finite diagnostics do not identify every CONNECT status or prove proxy
+authentication failure. Already dispatched requests finish under their own limits.
+Capture admission is checked before dispatch and DNS admission before each query;
+new connections also check the exact proxy route. Redirects requiring new DNS
+cannot cross the stop, but established sockets are not retroactively invalidated.
+The observation status not_executed identifies its unit: capture_started=false
+means the whole queued capture was not dispatched; capture_started=true means a
+pending subrequest was blocked, with the blocked stage, URL hash and any earlier
+response-header facts retained. It is not a fabricated HTTP failure, successful
+retrieval or assertion that the earlier request never ran. The actual original
+shared failure remains failed. Unclassified internal/configuration/state failures,
+caller cancellation and other BaseException control boundaries still stop and drain
+all tasks. That global stop is frozen before releasing its slot; repeated caller
+cancellation cannot abandon cleanup. Once independent results finish, choose the
+first security/permission failure in source order, otherwise the first non-automatic
+failure, otherwise the first ordinary failure, preserving that original exception
+and every source outcome. Partial success and not_executed never approve the batch,
+reuse old success, clear a historical refusal or bypass independent review. Existing
+untyped observation dictionaries retain the new outcome without a database migration.
+Each HTTP download retains its own 30-second total deadline; semaphore waiting
+precedes it, so there is no new 30-second batch wall-clock limit. The separately
+bounded collection helper is unchanged. No transport retry or single-site exception
+is added.
 
 The public transport snapshots only numeric explicit causes and a finite connection
 phase on the exact exception at httpcore's connection-failure trace, before pool

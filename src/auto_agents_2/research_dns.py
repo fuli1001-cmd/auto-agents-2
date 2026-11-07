@@ -12,6 +12,7 @@ import httpx
 
 from .errors import AA2Error, ResearchResolverUnavailable, http_failure_details
 from .http_body import read_body
+from .research_batch import current_batch
 from .util import digest
 
 DNS_BODY_LIMIT = 64 * 1024
@@ -129,24 +130,47 @@ class HTTPSJSONResolver:
         if literal is not None:
             return ResolvedAddresses(host, (str(literal),), "literal")
         hostname = dns_name(host)
+        batch = current_batch.get()
+        if batch is not None:
+            batch.before_resolver_request(self.endpoint)
         from .network import PublicHTTPTransport
         endpoint = httpx.URL(self.endpoint)
         transport = PublicHTTPTransport(resolver=BootstrapResolver(endpoint.raw_host.decode("ascii"), self.bootstrap_ips),
                                         proxy_settings=self.proxy_settings)
+        observed = []
+
+        def unavailable(error):
+            failure = ResearchResolverUnavailable(endpoint_origin=str(endpoint.copy_with(path="/", query=None)),
+                endpoint_url_hash=digest(self.endpoint), **http_failure_details(error))
+            observed.append(failure)
+            if batch is not None:
+                batch.observe_resolver(failure, self.endpoint)
+            return failure
+
         try:
             async with asyncio.timeout(timeout), httpx.AsyncClient(
                     transport=transport, trust_env=False, follow_redirects=False, timeout=timeout,
                     cookies=CookieJar(policy=NoResolverCookies()),
                     headers={"Accept": "application/dns-json", "Accept-Encoding": "identity"}) as client:
                 async def query(kind):
-                    async with client.stream("GET", self.endpoint, params={"name": hostname, "type": str(kind), "cd": "false"}) as response:
-                        if response.is_redirect:
-                            raise AA2Error("Research resolver redirects are not permitted")
-                        response.raise_for_status()
-                        content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                        if content_type not in {"application/json", "application/dns-json"}:
-                            raise AA2Error("Research resolver did not return supported DNS JSON")
-                        return parse_dns_json(await read_body(response, DNS_BODY_LIMIT), hostname, kind)
+                    if batch is not None:
+                        batch.before_resolver_request(self.endpoint)
+                    try:
+                        async with client.stream("GET", self.endpoint, params={"name": hostname, "type": str(kind), "cd": "false"}) as response:
+                            try:
+                                if response.is_redirect:
+                                    raise AA2Error("Research resolver redirects are not permitted")
+                                response.raise_for_status()
+                                content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                                if content_type not in {"application/json", "application/dns-json"}:
+                                    raise AA2Error("Research resolver did not return supported DNS JSON")
+                                return parse_dns_json(await read_body(response, DNS_BODY_LIMIT), hostname, kind)
+                            except httpx.HTTPError as error:
+                                # Freeze a refusal before stream/client cleanup
+                                # can hide it or another request can be dispatched.
+                                raise unavailable(error) from None
+                    except httpx.HTTPError as error:
+                        raise unavailable(error) from None
 
                 queries = [asyncio.create_task(query(kind)) for kind in (1, 28)]
                 try:
@@ -156,9 +180,20 @@ class HTTPSJSONResolver:
                         task.cancel()
                     await asyncio.gather(*queries, return_exceptions=True)
                     raise
-        except httpx.HTTPError as error:
-            raise ResearchResolverUnavailable(endpoint_origin=str(endpoint.copy_with(path="/", query=None)),
-                endpoint_url_hash=digest(self.endpoint), **http_failure_details(error)) from None
+        except Exception as error:
+            from .research_acquisition import failure_observation
+            failures = [(failure, failure_observation(failure)) for failure in observed]
+            selected = next((failure for failure, facts in failures
+                             if facts["classification"] in {"security", "permission"}),
+                            next((failure for failure, facts in failures if not facts["automatic"]), None))
+            if selected is not None:
+                if error is not selected and isinstance(error, (TimeoutError, httpx.HTTPError)):
+                    selected.evidence["cleanup_failure"] = (
+                        http_failure_details(error) if isinstance(error, httpx.HTTPError) else {"category": "unknown"})
+                raise selected from None
+            if isinstance(error, httpx.HTTPError):
+                raise unavailable(error) from None
+            raise
         return ResolvedAddresses(host, tuple(dict.fromkeys((*ipv4, *ipv6))), "https_json")
 
     def connected(self, resolution, ip, port):

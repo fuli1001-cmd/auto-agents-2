@@ -20,6 +20,7 @@ from .errors import (
 )
 from .network_proxy import ProxySettings, open_proxy_tunnel
 from .process_ownership import PreviewOwnershipError, verify_connection
+from .research_batch import current_batch
 from .util import digest
 
 preview_owner = ContextVar("preview_owner", default=None)
@@ -119,7 +120,9 @@ class PublicConnectionPool(httpcore.AsyncConnectionPool):
     def __init__(self, trust_env=True, *, resolver=None, proxy_settings=None):
         super().__init__(network_backend=PublicNetworkBackend(resolver=resolver))
         self.resolver = resolver
-        self.proxy_settings = proxy_settings if proxy_settings is not None else ProxySettings(trust_env)
+        batch = current_batch.get()
+        self.proxy_settings = (proxy_settings if proxy_settings is not None else
+                               batch.proxy_settings if batch is not None and trust_env else ProxySettings(trust_env))
 
     def create_connection(self, origin):
         proxy = self.proxy_settings.for_origin(origin)
