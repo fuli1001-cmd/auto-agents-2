@@ -251,6 +251,34 @@ def test_factory_rescans_after_an_atomic_mkdir_collision(tmp_path, monkeypatch):
         store.close()
 
 
+def test_factory_stops_after_ten_collisions_without_cleanup(tmp_path, monkeypatch):
+    store = support.Store(tmp_path / "retained", tmp_path, retain_all=True)
+    try:
+        work = store.start()
+        factory = support.RetainedPathFactory(store)
+        original = factory.factory.mktemp
+        attempts = []
+
+        def always_collide(basename, numbered=True):
+            assert numbered is False
+            attempts.append(basename)
+            (work / basename).mkdir(mode=0o700)
+            return original(basename, numbered=numbered)
+
+        monkeypatch.setattr(factory.factory, "mktemp", always_collide)
+        for name in ("references", "remove_directory"):
+            monkeypatch.setattr(support, name, forbidden)
+        for name in ("unlink", "rmdir", "fchmod", "chmod"):
+            monkeypatch.setattr(support.os, name, forbidden)
+        with pytest.raises(OSError, match="after 10 tries"):
+            factory.mktemp("case")
+        assert attempts == [f"case{number}" for number in range(10)]
+        assert all((work / name).is_dir() for name in attempts)
+        assert store.record["inventory"]["allocated_directories"] == []
+    finally:
+        store.close()
+
+
 @pytest.fixture
 def retained_pytest(tmp_path, request):
     harness = tmp_path / "harness"

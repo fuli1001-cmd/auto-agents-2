@@ -627,7 +627,7 @@ class RetainedPathFactory:
         basename = os.path.normpath(basename)
         if (self.getbasetemp() / basename).resolve().parent != self.getbasetemp():
             raise ValueError(f"{basename} is not a normalized and relative path")
-        while True:
+        for _ in range(10):
             number = 0
             if numbered:
                 work = directory("work", parent=self.store.run_fd)
@@ -654,6 +654,10 @@ class RetainedPathFactory:
                 continue
             else:
                 break
+        else:
+            raise OSError(
+                f"could not create numbered dir with prefix {basename} in {self.getbasetemp()} after 10 tries"
+            )
         inventory = self.store.record["inventory"]
         if len(inventory["allocated_directories"]) < 128:
             inventory["allocated_directories"].append(path.name)
