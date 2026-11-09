@@ -2049,10 +2049,14 @@ class WorkflowEngine:
                         or PlanReviewRecovery(self).requires_research_review(rid) or acquisition.active(rid)):
                     service = self._research_service(rid)
                     dispatch = acquisition.dispatch_binding(rid, document)
+                    service.ledger = acquisition.begin(rid, document, dispatch)
                     try:
                         retrieved = await service.verify(document.sources)
                     except BaseException as exc:
                         exc.acquisition_dispatch = dispatch
+                        recording_error = getattr(exc, "acquisition_document_recording_error", None)
+                        if recording_error is not None:
+                            acquisition.recording_failed(rid, document, exc, recording_error)
                         try:
                             acquisition.observe(rid, document, exc, control=not isinstance(exc, Exception))
                         except (Replan, HumanIntervention) as observation_error:

@@ -271,7 +271,11 @@ async def test_same_stage_answer_and_final_publication_reach_independent_review(
                 assert source["answer_record"] == bound and source["binding"] == bound["artifact_hash"]
                 assert source["text"] == answer and source["question_context"] == prompt
                 view = ContextPlanner(workflow.artifacts).prepare(stage, context, work, run_id=rid)
-                assert view.payload["controller_review_basis"]["sources"]["answer:" + bound["id"]] == source
+                source_view = view.payload["controller_review_basis"]["sources"]
+                if "material_id" in source_view:
+                    assert source_view["source_ref"] == "controller_review_basis.sources"
+                    source_view = workflow.artifacts.json(source_view["artifact"])
+                assert source_view["answer:" + bound["id"]] == source
                 assert view.payload["research"] == complete().model_dump()
                 rendered, _ = PromptCompiler().compile(stage, view.payload)
                 assert RESEARCH_PUBLICATION_RULE in rendered

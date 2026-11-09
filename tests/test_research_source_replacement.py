@@ -288,18 +288,20 @@ def test_complete_claim_and_requirement_mapping_cannot_be_silently_weakened(tmp_
 
 
 @pytest.mark.parametrize("url", [OLD, OLD + "?new=yes", OLD + "#changed", "http://OLD.EXAMPLE.TEST.:8080/other", "https://sub.old.example.test/ref", "https://old.example.test。/ref", "https://old%2eexample.test/ref", "https://93.184.216.34/ref"])
-async def test_whole_source_set_is_checked_before_any_network(tmp_path, monkeypatch, url):
+async def test_excluded_source_is_checked_without_blocking_independent_safe_capture(tmp_path, monkeypatch, url):
     case = source_case(tmp_path)
     register(case)
     calls = []
     async def capture(self, url):
         calls.append(url)
-        pytest.fail("Source list should be rejected before scheduling any capture")
+        assert url == NEW, "An excluded target must never reach capture"
+        return {"artifact": self.artifacts.put("Independent fixture facts", "research"), "excerpt": "Independent fixture facts",
+                "source": url, "final_url": url}
     monkeypatch.setattr(ResearchService, "capture", capture)
     service = ResearchService(case.artifacts, excluded_hosts=guard_network(case.store, case.rid))
     with pytest.raises(AA2Error):
         await service.verify([SourceEvidence(url=NEW, claim="Safe first"), SourceEvidence(url=url, claim="Excluded")])
-    assert not calls
+    assert calls == [NEW]
 
 
 async def test_redirect_to_excluded_source_stops_before_second_request(tmp_path, monkeypatch):

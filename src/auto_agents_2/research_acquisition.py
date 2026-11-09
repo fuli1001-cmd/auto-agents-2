@@ -49,6 +49,9 @@ class ResearchRecoveryDocument(DocumentResult):
 
 def failure_observation(error):
     """Positive, finite classifications only. A cause-less ConnectError may be TLS."""
+    from .research_documents import RetainedDocumentFailure
+    if isinstance(error, RetainedDocumentFailure):
+        return dict(error.observation)
     known = isinstance(error, (DocumentAcquisitionTimeout, DocumentAcquisitionUnavailable,
                                ResearchResolverUnavailable, ResearchDestinationRejected))
     evidence = dict(error.evidence) if known else {}
@@ -93,8 +96,8 @@ def extend_basis(body, context):
             "kind": "research_evidence", "owner": "provider_research", "source": "failed_research",
             "statement": row["source"]["claim"],
             "instruction": "Assess the exact original source row and its replacement disposition. This is a proposal, "
-                "not a new product requirement. Necessary facts require freshly acquired authoritative evidence covering "
-                "the same claim and version. not_required needs a grounded necessity explanation preserving every original "
+                "not a new product requirement. Necessary facts require complete controller-acquired authoritative evidence covering "
+                "the same claim and version; validated same-run receipts may be reused. not_required needs a grounded necessity explanation preserving every original "
                 "goal and explicit source constraint. Do not defer this assessment, infer success from acquisition, "
                 "or accept blocked/missing facts. Use an evidence_gap/defect finding for an unresolved disposition, "
                 "quoting the original claim. failed_research is historical evidence, not a source_dispute target."})
@@ -110,7 +113,7 @@ def extend_basis(body, context):
                 "statement": json.dumps(row, ensure_ascii=False, sort_keys=True),
                 "instruction": "Check this complete original requirement, including every acceptance item, against the "
                     "explicit requirement_assessment and exact claim dispositions. No-research mappings require a grounded "
-                    "necessity explanation, not silent removal. Check authority, version and equivalent support in freshly "
+                    "necessity explanation, not silent removal. Check authority, version and equivalent support in complete controller-collected "
                     "collected independent sources. Old denied hosts must not be contacted. A fetch or renamed URL alone "
                     "does not satisfy this criterion. Preserve all product and human prototype gates."})
 
@@ -133,14 +136,15 @@ class ResearchAcquisitionRecovery:
                 "source_urls": sorted({urldefrag(row["url"])[0] for row in raw.get("sources", [])})}
 
     @staticmethod
-    def refusals(report):
+    def refusals(report, *, shared_only=False):
+        from .research_documents import shared_boundary
         result = []
         for row in report:
             facts = ([row["failure"]] if row["status"] == "failed" else []) + row.get("observed_failures", [])
             selected = []
             for failure in facts:
                 if (failure["code"] in SOURCE_CODES and not failure["automatic"]
-                        and failure not in selected):
+                        and failure not in selected and (not shared_only or shared_boundary(failure))):
                     selected.append(failure)
             if selected:
                 result.append({"url": row["url"], "failures": selected})
@@ -184,8 +188,8 @@ class ResearchAcquisitionRecovery:
         return next((failure for failure in failures if failure["classification"] in {"security", "permission"}),
                     failures[0])
 
-    def source_wait(self, rid, stamp, acquisition_id, report):
-        own = self.refusals(report)
+    def source_wait(self, rid, stamp, acquisition_id, report, *, shared_only=False):
+        own = self.refusals(report, shared_only=shared_only)
         if not own:
             return None
         identity = digest([stamp, acquisition_id, own])
@@ -276,7 +280,7 @@ class ResearchAcquisitionRecovery:
             key = PREFIX + digest([rid, self.store.run(rid)["data"].get("replans", 0), self.binding(rid), candidate])
             record = self.store.get(rid, key)
         for attempt in (record or {}).get("attempts", []):
-            own = self.refusals(attempt["observations"])
+            own = self.refusals(attempt["observations"], shared_only=attempt.get("document_protocol") == 1)
             if not own or replacement and covers_attempt(replacement, attempt):
                 continue
             stamp = attempt.get("dispatch")
@@ -301,21 +305,54 @@ class ResearchAcquisitionRecovery:
                                     "original question and obtain an owner-verified bridge before reacquisition.",
                                     phase="provider_research")
 
-    def active(self, rid):
+    def episode(self, rid):
         pointer = self.store.get(rid, CURRENT)
         if not pointer:
             return None
         record = self.store.get(rid, pointer["key"])
         if not record or record.get("id") != pointer.get("id") or pointer["key"] != PREFIX + record["id"]:
             raise StateConflict("Research acquisition lost its original episode evidence")
-        if record.get("completed"):
-            return None
         original = self.engine.artifacts.json(record["original_candidate"])
         if record.get("claims") != claim_rows(original):
             raise StateConflict("Research recovery original claim identities changed")
-        if record["binding"] != self.binding(rid):
+        if record["binding"] != self.binding(rid) and not (record.get("completed") or record.get("collecting")):
             raise StateConflict("Research recovery requirements changed; preserve the original claims and resolve the owning stage")
         return record
+
+    def active(self, rid):
+        record = self.episode(rid)
+        if not record or record.get("completed") or record.get("collecting"):
+            return None
+        return record
+
+    def begin(self, rid, document, stamp):
+        """Register before capture without imposing failure-only author schema."""
+        from .research_documents import ResearchDocumentLedger, commit
+        self.validate_dispatch(rid, stamp)
+        raw = document.model_dump() if hasattr(document, "model_dump") else document
+        previous = self.episode(rid)
+        pointer = self.store.get(rid, CURRENT)
+        record = previous
+        if record is None or record.get("completed") or record["binding"] != self.binding(rid):
+            identity = digest([rid, stamp["generation"], self.binding(rid), raw])
+            record = {"version": 2, "id": identity, "run_id": rid, "binding": self.binding(rid),
+                      "original_candidate": self.engine.artifacts.put(raw, "research-acquisition-candidate"),
+                      "claims": claim_rows(raw), "attempts": [], "collecting": True,
+                      "document_ledger_version": 1, "documents": (previous or {}).get("documents", {})}
+        else:
+            record = {**record, "run_id": rid, "document_ledger_version": 1,
+                      "documents": record.get("documents", {})}
+            if record.get("collecting"):
+                record.update(original_candidate=self.engine.artifacts.put(raw, "research-acquisition-candidate"),
+                              claims=claim_rows(raw))
+        key = PREFIX + record["id"]
+        expected = {CURRENT: pointer, key: self.store.get(rid, key)}
+        dispatched = {"stamp": stamp, "candidate": self.engine.artifacts.put(raw, "research-acquisition-dispatch")}
+        updated = {**record, "dispatches": [*record.get("dispatches", []), dispatched]}
+        commit(self.store, rid, stamp, expected,
+               {CURRENT: {"id": record["id"], "key": key}, key: updated},
+               ("research.acquisition_dispatched", {"episode_id": record["id"], "dispatch": stamp}))
+        return ResearchDocumentLedger(self, rid, key, stamp)
 
     def context(self, rid):
         record = self.active(rid)
@@ -330,11 +367,19 @@ class ResearchAcquisitionRecovery:
                      "requirement_assessment": replacement["request"]["requirement_assessment"]}}
                    if replacement else {}),
                 "original_candidate": record["original_candidate"], "attempts": record["attempts"],
+                **({"documents": record["documents"], "retry_policy": {
+                    "max_attempts_per_file_cause": 3,
+                    "scope": "Same run and URL, across restarts, replans and providers; 404/410 never retried",
+                    "terminal_action": "Choose an independent alternative, grounded not_required, or honest blocked"}}
+                   if record.get("document_ledger_version") == 1 else {}),
                 **({"rejected_reviews": record["rejected_reviews"]} if record.get("rejected_reviews") else {}),
                 "instruction": "The source failed, not necessarily the fact or the project. Assess necessity against "
-                    "the original requirements. Return a full research replacement and exactly one acquisition_resolution "
+                    "the original requirements. Successful document receipts are reusable collection, not approved facts. "
+                    "Never retry a terminal/exhausted URL, reword it, change fragments, or use aliases/routes of a denied "
+                    "host to bypass its boundary. For a target refusal choose an independent authority; a shared "
+                    "resolver/proxy boundary needs its prerequisite resolved. Return a full research replacement and exactly one acquisition_resolution "
                     "row per original claim. Choose first-party authoritative alternatives with equivalent coverage; "
-                    "a new URL or download is not proof. Reacquisition and independent review are mandatory even for "
+                    "a new URL or download is not proof. Controller collection or validated same-run reuse and independent review are mandatory even for "
                     "empty sources. Preserve all safety/permission refusals and human prototype approval. Do not change "
                     "network settings or retry a denied operation. Repeating the same failed source set without new "
                     "evidence is not progress. If no useful permitted path remains, return blocked with the exact "
@@ -342,6 +387,10 @@ class ResearchAcquisitionRecovery:
 
     def prepare(self, rid):
         self.prepare_wait(rid)
+        episode = self.episode(rid)
+        if episode and any(row.get("pending") for row in episode.get("documents", {}).values()):
+            raise StateConflict("Research document has a dispatched operation without a durable outcome",
+                                phase="provider_research", evidence_refs=[CURRENT])
         record = self.active(rid)
         if not record:
             return
@@ -406,15 +455,19 @@ class ResearchAcquisitionRecovery:
             if stamp["candidate_hash"] != digest(raw):
                 raise StateConflict("Research observation no longer matches its original dispatch candidate")
         generation = self.store.run(rid)["data"].get("replans", 0)
-        record = self.active(rid)
-        had_active = record is not None
+        record = self.episode(rid)
+        if record and record.get("completed"):
+            raise StateConflict("Research failure cannot rewrite a completed acquisition episode")
+        had_active = bool(record and not record.get("collecting"))
+        durable_flow = bool(getattr(error, "document_ledger", False))
         if record is None:
             identity = digest([rid, generation, self.binding(rid), raw])
             record = self.store.get(rid, PREFIX + identity) or {"version": 1, "id": identity, "binding": self.binding(rid),
                 "original_candidate": self.engine.artifacts.put(raw, "research-acquisition-candidate"),
                 "claims": claim_rows(raw), "attempts": []}
         attempt = {"id": error.acquisition_id, "generation": generation, "candidate_hash": digest(raw), "sources": raw["sources"],
-                   "observations": report, **({"dispatch": stamp} if stamp is not None else {})}
+                   "observations": report, **({"dispatch": stamp} if stamp is not None else {}),
+                   **({"document_protocol": 1} if durable_flow else {})}
         # Exclude prose, fragment differences and attempt counters from this
         # no-progress comparison. New actual outcomes may reopen a useful path.
         def supplemental(row):
@@ -432,45 +485,68 @@ class ResearchAcquisitionRecovery:
         duplicate = any(row["facts_hash"] == attempt["facts_hash"] for row in record["attempts"])
         attempts = record["attempts"] if attempt in record["attempts"] else [*record["attempts"], attempt]
         failed = [row for row in report if row["status"] == "failed"]
-        automatic = not control and bool(failed) and all(row["status"] in {"retrieved", "failed"} and
-            (row["status"] == "retrieved" or row["failure"]["automatic"]) for row in report)
+        from .research_documents import RetainedDocumentFailure, shared_boundary
+        def agent_row(row):
+            if row["status"] == "retrieved":
+                return True
+            if row["status"] == "failed":
+                failure = row["failure"]
+                return ((failure["automatic"] or durable_flow and failure["code"] in SOURCE_CODES
+                         and not shared_boundary(failure))
+                        and not failure["diagnostic"].get("recording_failure"))
+            if durable_flow and row["status"] == "not_executed":
+                boundary = row.get("boundary", {}).get("blocked_by", {})
+                # A blocked request is not an HTTP failure. Only its exact
+                # actually observed, non-shared owner can reach the agent.
+                return any(not shared_boundary(failure) and boundary == {
+                    "code": failure["code"], "diagnostic": failure["diagnostic"]}
+                    for observed in report for failure in (
+                        ([observed["failure"]] if observed["status"] == "failed" else [])
+                        + observed.get("observed_failures", [])))
+            return False
+
+        automatic = not control and bool(failed) and all(agent_row(row) for row in report)
         # A later timeout/404 cannot erase an earlier unresolved refusal. Only
         # actual successful acquisition through the unchanged boundary resolves it.
         unresolved = set()
         for observed in attempts:
             for row in observed["observations"]:
                 for failure in row.get("observed_failures", []):
-                    if not failure["automatic"]:
+                    if not failure["automatic"] and (not durable_flow or shared_boundary(failure)):
                         unresolved.add(row["url"])
                 if row["status"] == "retrieved":
                     unresolved.discard(row["url"])
-                elif row["status"] == "failed" and not row["failure"]["automatic"]:
+                elif row["status"] == "failed" and not row["failure"]["automatic"] and (
+                        not durable_flow or shared_boundary(row["failure"])):
                     unresolved.add(row["url"])
         automatic = automatic and not unresolved
         reason = "Research acquisition " + record["id"] + ": " + "; ".join(
             f"{row['url']} ({row['failure']['classification']}, {row['failure']['code']})" for row in failed)
-        updated = {**record, "attempts": attempts}
+        updated = {**record, "attempts": attempts,
+                   **({"collecting": False} if durable_flow and automatic else {})}
         if automatic and not duplicate:
             updated["pending"] = {"generation": generation, "candidate_hash": digest(raw), "reason": reason}
         else:
             updated.pop("pending", None)
         updates = {PREFIX + record["id"]: updated}
-        own = self.refusals(report)
+        own = self.refusals(report, shared_only=durable_flow)
         from .research_batch import ResearchRequestNotExecuted
         source_error = isinstance(error, (DocumentAcquisitionTimeout, DocumentAcquisitionUnavailable,
-                                         ResearchResolverUnavailable, ResearchDestinationRejected, ResearchRequestNotExecuted))
-        if self.global_failures(report) or not control and not source_error:
+                                         ResearchResolverUnavailable, ResearchDestinationRejected, ResearchRequestNotExecuted,
+                                         RetainedDocumentFailure))
+        if (self.global_failures(report) or getattr(error, "acquisition_document_recording_error", None)
+                or not control and not source_error):
             updates[HARD] = self.hard_record(rid, error, error, "research.capture.internal")
         elif own:
             if stamp is None:
                 updates[HARD] = self.hard_record(rid, error, error, "research.dispatch.unverifiable")
             else:
-                wait = self.source_wait(rid, stamp, error.acquisition_id, report)
+                wait = self.source_wait(rid, stamp, error.acquisition_id, report, shared_only=durable_flow)
                 previous = self.store.get(rid, WAIT)
                 if previous is not None and previous != wait:
                     raise StateConflict("Another exact research source wait must be resolved first")
                 updates[WAIT] = wait
-        if automatic or had_active:
+        if automatic or had_active or durable_flow:
             updates[CURRENT] = {"id": record["id"], "key": PREFIX + record["id"]}
         self.store.checkpoints(rid, updates, event=("research.acquisition_failed", {"episode_id": record["id"],
             "attempt": len(attempts), "automatic": automatic and not duplicate,
@@ -579,7 +655,15 @@ class ResearchAcquisitionRecovery:
     def acceptance(self, rid, document, review, retrieved=None):
         record = self.active(rid)
         if not record:
-            return {}
+            collected = self.episode(rid)
+            if not collected or not collected.get("collecting") or collected.get("completed"):
+                return {}
+            proof = self.engine.authority.receipt(rid, review.model_dump())
+            if not review.approved or proof["owned_candidate"] != document:
+                raise StateConflict("Initial research collection lost its exact independent review")
+            return {PREFIX + collected["id"]: {**collected, "completed": {
+                "candidate_hash": digest(document), "review_key": "authority/reviews/" + digest(review.model_dump()),
+                "mode": "initial_collection"}}}
         self.validate(rid, document)
         if document["acquisition_resolution"]["status"] != "ready":
             self.block(rid, "Research has no verified permitted continuation.", document)

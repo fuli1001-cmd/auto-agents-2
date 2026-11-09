@@ -217,20 +217,36 @@ async def test_successful_capture_still_publishes_a_real_collected_artifact(tmp_
 
 
 @pytest.mark.parametrize("kind", ["connect", "read", "403"])
-async def test_document_http_failure_keeps_engine_candidate_and_waits(tmp_path, monkeypatch, kind):
+async def test_document_http_failure_keeps_original_claims_and_agent_blocks_necessary_gap(tmp_path, monkeypatch, kind):
     from test_workflow import CodingAgent, engine
 
     from auto_agents_2.models import DocumentResult, SourceEvidence
+    from auto_agents_2.research_acquisition import (
+        CONTEXT,
+        ResearchAcquisitionRecovery,
+        ResearchRecoveryDocument,
+    )
 
     class ResearchAgent(CodingAgent):
         async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
             if stage == "provider_research":
                 self.calls.append((stage, fresh))
+                if CONTEXT in context:
+                    recovery = context[CONTEXT]
+                    return ResearchRecoveryDocument(summary="Necessary original fact is unavailable",
+                        document="Preserve the original fact and requirement.", sources=[],
+                        acquisition_resolution={"episode_id": recovery["episode_id"], "status": "blocked",
+                            "claims": [{"claim_id": row["id"], "disposition": "blocked", "source_indexes": [],
+                                "requirement_ids": ["R1"], "reason": "No independent authoritative replacement exists"}
+                                for row in recovery["claims"]],
+                            "missing_information": ["Authoritative material for the original required fact"]})
                 return DocumentResult(summary="research", document="# Research\nRetain candidate.",
                     sources=[SourceEvidence(url=URL, claim="fixture")])
             return await super().invoke(stage, context, schema, workspace, run_id, operation, fresh)
 
+    requests = []
     def respond(request):
+        requests.append(str(request.url))
         if kind == "403":
             return httpx.Response(403, text="EXAMPLE_DENIED_BODY")
         raise (httpx.ConnectError if kind == "connect" else httpx.ReadError)("EXAMPLE_DOCUMENT_ERROR")
@@ -251,8 +267,10 @@ async def test_document_http_failure_keeps_engine_candidate_and_waits(tmp_path, 
         await workflow.start(str(request))
     rid = workflow.store.current()["id"]
     fault = workflow.store.get(rid, "recovery/current-fault")
-    assert fault["route"] == "human" and fault["reason_code"] == "DOCUMENT_ACQUISITION_UNAVAILABLE"
-    assert fault["human_requirement"]["evidence"]["source_url_hash"] == digest(URL)
+    assert fault["route"] == "human" and fault["reason_code"] == "research_acquisition_blocked"
+    record = ResearchAcquisitionRecovery(workflow).active(rid)
+    assert record["attempts"][0]["observations"][0]["failure"]["diagnostic"]["source_url_hash"] == digest(URL)
+    assert record["claims"][0]["source"]["claim"] == "fixture"
     assert workflow.store.get(rid, "candidate/provider_research") and workflow.store.get(rid, "provider_research") is None
-    assert [stage for stage, _ in agent.calls].count("provider_research") == 1
-    assert len(questions) == 1
+    assert [stage for stage, _ in agent.calls].count("provider_research") == 2
+    assert len(questions) == 1 and requests == [URL]

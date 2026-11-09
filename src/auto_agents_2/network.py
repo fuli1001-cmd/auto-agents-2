@@ -70,7 +70,7 @@ class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
         async with asyncio.timeout(timeout):
             batch = current_batch.get()
             if batch is not None:
-                batch.before_connect(self.proxy)
+                batch.before_connect(self.proxy, host, port)
             resolution = None
             if self.resolver is None:
                 addresses = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
@@ -112,14 +112,14 @@ class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
             for ip in targets:
                 if batch is not None:
                     try:
-                        batch.before_connect(self.proxy)
+                        batch.before_connect(self.proxy, host, port)
                     except ResearchRequestNotExecuted:
                         if not observed:
                             raise
                         break  # Keep this call's real failure, not a blocked substitute.
                 try:
                     if self.proxy is not None:
-                        kwargs = {"failure_observer": observe} if batch is not None else {}
+                        kwargs = {"failure_observer": observe, "origin_host": host} if batch is not None else {}
                         stream = await open_proxy_tunnel(self.backend, self.proxy, ip, port,
                                                          timeout, local_address, socket_options, **kwargs)
                     else:

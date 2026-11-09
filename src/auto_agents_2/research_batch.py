@@ -77,7 +77,8 @@ class BatchProxySettings(ProxySettings):
 
     def for_origin(self, origin):
         proxy = self.route(origin)
-        failure = self.context.route_failures.get(self.key(proxy))
+        failure = (self.context.route_failures.get(self.key(proxy))
+                   or self.context.origin_failures.get(self.context.origin_key(proxy, origin.host.decode(), origin.port)))
         if failure is not None:
             operation = "proxy_request" if proxy is not None else "public_connect"
             raise ResearchRequestNotExecuted(self.context, operation, failure)
@@ -89,6 +90,7 @@ class ResearchBatch:
         self.id = identifier("research-network-context")
         self.resolver_policy_hash = digest(resolver_config.model_dump()) if resolver_config is not None else None
         self.route_failures = {}
+        self.origin_failures = {}
         self.resolver_failure = None
         self.proxy_settings = BatchProxySettings(self)
 
@@ -113,26 +115,32 @@ class ResearchBatch:
         if endpoint is not None:
             self.observe_connection(error, endpoint)
 
-    def before_connect(self, proxy):
-        failure = self.route_failures.get(self.proxy_settings.key(proxy))
+    def origin_key(self, proxy, host, port):
+        return self.proxy_settings.key(proxy), (host or "").rstrip(".").lower(), port
+
+    def before_connect(self, proxy, host=None, port=None):
+        failure = (self.route_failures.get(self.proxy_settings.key(proxy))
+                   or self.origin_failures.get(self.origin_key(proxy, host, port)))
         if failure is not None:
             operation = "proxy_request" if proxy is not None else "public_connect"
             raise ResearchRequestNotExecuted(self, operation, failure)
 
     def freeze_connect(self, proxy, host, port, details, failure=None):
         if not http_failure_classification(details)[1]:
-            self.route_failures.setdefault(self.proxy_settings.key(proxy),
-                                           failure or ConnectionBoundary(host, port, details))
+            boundary = failure or ConnectionBoundary(host, port, details)
+            if details.get("connection_scope") == "shared_proxy":
+                self.route_failures.setdefault(self.proxy_settings.key(proxy), boundary)
+            else:
+                self.origin_failures.setdefault(self.origin_key(proxy, host, port), boundary)
 
     def observe_connection(self, error, url):
         proxy = self.proxy_settings.route(httpcore.URL(url).origin)
-        # Public-connect includes system resolution and proxy TCP/TLS/CONNECT.
-        # Missing phase on a ConnectError also cannot prove per-target scope.
-        # Stop new use of the frozen route (including direct), without inventing
-        # a cause or invalidating a request already dispatched on that route.
+        # A phase is not proof of shared infrastructure. Freeze only this
+        # origin unless the actual proxy TCP/TLS/407 observation proves sharing.
         _, automatic = http_failure_classification(error.evidence)
         phase = error.evidence.get("connection_phase")
-        unresolved = not automatic and (phase == "public_connect" or
-            error.evidence.get("error_type") == "ConnectError" and phase != "origin_tls")
-        if error.evidence.get("category") == "proxy" or unresolved:
-            self.route_failures.setdefault(self.proxy_settings.key(proxy), error)
+        if not automatic and (phase in {"public_connect", "origin_tls"}
+                or error.evidence.get("error_type") == "ConnectError"
+                or error.evidence.get("category") == "proxy"):
+            target = httpcore.URL(url).origin
+            self.freeze_connect(proxy, target.host.decode(), target.port, error.evidence, error)

@@ -238,7 +238,7 @@ async def test_non_exception_control_boundary_cancels_and_drains_siblings(monkey
     assert control.acquisition_observations[1]["status"] == "cancelled" and asyncio.all_tasks() <= before
 
 
-async def test_original_url_admission_still_precedes_all_captures(monkeypatch):
+async def test_per_file_original_url_admission_preserves_independent_captures(monkeypatch):
     starts = []
 
     async def capture(self, url):
@@ -248,7 +248,7 @@ async def test_original_url_admission_still_precedes_all_captures(monkeypatch):
     monkeypatch.setattr(ResearchService, "capture", capture)
     with pytest.raises(AA2Error, match="public"):
         await ResearchService(None).verify([source(URLS[0]), source("http://127.0.0.1/private")])
-    assert starts == []
+    assert starts == [URLS[0]]
 
 
 async def test_previous_success_is_not_reused_to_clear_later_unknown_failure(monkeypatch):
@@ -451,6 +451,7 @@ async def test_shared_proxy_boundary_stops_same_route_but_not_direct_sources(mon
     cause = httpx.ProxyError("EXAMPLE_PROXY_SECRET") if phase == "proxy_error" else httpx.ConnectError(
         "EXAMPLE_PUBLIC_CONNECT_SECRET")
     failure = DocumentAcquisitionUnavailable(URLS[0], cause)
+    failure.evidence["connection_scope"] = "shared_proxy"  # Fixture proves actual proxy TCP/TLS scope.
     if phase == "uncertain_public_connect":
         failure.evidence["connection_phase"] = "public_connect"
         failure.evidence["connection_context_uncertain"] = True
@@ -707,7 +708,7 @@ def test_not_executed_ledger_retains_refusal_and_does_not_mint_progress(tmp_path
 
 
 @pytest.mark.parametrize("phase", [None, "public_connect", "origin_tls"])
-async def test_unknown_connect_needs_proven_source_scope_before_new_route_dispatch(monkeypatch, phase):
+async def test_unknown_connect_stops_origin_without_freezing_unrelated_routes(monkeypatch, phase):
     failure = unknown(URLS[0])
     if phase is not None:
         failure.evidence["connection_phase"] = phase
@@ -736,12 +737,7 @@ async def test_unknown_connect_needs_proven_source_scope_before_new_route_dispat
             await asyncio.wait_for(batch, 1)
         assert observed.value is failure
         rows = failure.acquisition_observations
-        if phase == "origin_tls":
-            assert starts == URLS and all(row["status"] == "retrieved" for row in rows[1:])
-        else:
-            assert starts == URLS[:4]
-            assert [row["status"] for row in rows] == ["failed"] + ["retrieved"] * 3 + ["not_executed"] * 2
-            assert rows[4]["boundary"]["operation"] == "public_connect"
+        assert starts == URLS and all(row["status"] == "retrieved" for row in rows[1:])
     finally:
         trigger.set()
         release.set()
@@ -831,6 +827,7 @@ def test_effective_http_https_and_no_proxy_routes_remain_distinct(monkeypatch):
     context = ResearchBatch(None)
     http_url = URLS[0].replace("https:", "http:")
     failure = DocumentAcquisitionUnavailable(http_url, httpx.ProxyError("EXAMPLE_PROXY_SECRET"))
+    failure.evidence["connection_scope"] = "shared_proxy"  # An actually shared proxy boundary, not an inferred origin.
     context.observe_connection(failure, http_url)
     with pytest.raises(ResearchRequestNotExecuted) as observed:
         context.before_capture(URLS[1].replace("https:", "http:"))

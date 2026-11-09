@@ -9,7 +9,7 @@ from urllib.request import getproxies_environment, proxy_bypass_environment
 import httpcore
 import httpx
 
-from .errors import AA2Error
+from .errors import AA2Error, preserve_http_connection_failure
 
 
 class ProxySettings:
@@ -38,7 +38,7 @@ class ProxySettings:
             raise AA2Error("Research proxy must be a valid HTTP(S) proxy; check proxy environment variables") from None
 
 
-async def open_proxy_tunnel(backend, proxy, ip, port, timeout, local_address, socket_options, *, failure_observer=None):
+async def open_proxy_tunnel(backend, proxy, ip, port, timeout, local_address, socket_options, *, failure_observer=None, origin_host=None):
     """The proxy receives a numeric CONNECT target, never a hostname to resolve.
 
     The returned stream belongs to the origin connection, which performs its own
@@ -48,18 +48,24 @@ async def open_proxy_tunnel(backend, proxy, ip, port, timeout, local_address, so
     batch = current_batch.get()
     url = httpcore.URL(scheme=proxy.url.raw_scheme, host=proxy.url.raw_host,
                        port=proxy.url.port, target=b"/")
-    stream = await backend.connect_tcp(url.host.decode("ascii"), url.origin.port,
-                                      timeout, local_address, socket_options)
+    try:
+        stream = await backend.connect_tcp(url.host.decode("ascii"), url.origin.port,
+                                          timeout, local_address, socket_options)
+    except (OSError, httpcore.NetworkError, httpcore.TimeoutException) as error:
+        preserve_http_connection_failure(error, "public_connect", scope="shared_proxy")
+        raise
+    scope = "shared_proxy"
     try:
         if batch is not None:
-            batch.before_connect(proxy)
+            batch.before_connect(proxy, origin_host, port)
         if url.scheme == b"https":
             stream = await stream.start_tls(ssl_context=ssl.create_default_context(),
                                             server_hostname=url.host.decode("ascii"), timeout=timeout)
         # TCP and proxy TLS may have awaited while a sibling froze this route.
         # CONNECT is a new request and must be checked at its actual handoff.
         if batch is not None:
-            batch.before_connect(proxy)
+            batch.before_connect(proxy, origin_host, port)
+        scope = "origin"
         target = (f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}").encode("ascii")
         headers = [(b"Host", target)]
         if proxy.raw_auth is not None:
@@ -71,9 +77,19 @@ async def open_proxy_tunnel(backend, proxy, ip, port, timeout, local_address, so
             headers=headers, extensions={"timeout": {"read": timeout, "write": timeout}},
         ))
         if not 200 <= response.status < 300:
-            raise httpcore.ProxyError("Research proxy refused the public destination tunnel")
+            error = httpcore.ProxyError("Research proxy refused the public destination tunnel")
+            preserve_http_connection_failure(error, "public_connect",
+                scope="shared_proxy" if response.status == 407 else "origin", proxy_status=response.status)
+            raise error
         return response.extensions["network_stream"]
     except BaseException as error:
+        if isinstance(error, (OSError, httpcore.NetworkError, httpcore.TimeoutException,
+                              httpcore.ProxyError, httpcore.ProtocolError)):
+            # Only proxy TCP/TLS and an explicit 407 establish shared scope.
+            # A refused numeric CONNECT destination belongs to that origin.
+            from .errors import _http_cause_details
+            if "connection_scope" not in _http_cause_details(error):
+                preserve_http_connection_failure(error, "public_connect", scope=scope)
         protected = (failure_observer(error) if failure_observer is not None
                      and isinstance(error, (OSError, httpcore.ConnectError, httpcore.ConnectTimeout, httpcore.ProxyError))
                      else False)

@@ -7,7 +7,11 @@ import pytest
 
 from auto_agents_2.artifacts import ArtifactStore
 from auto_agents_2.engine import choice_spec
-from auto_agents_2.errors import DocumentAcquisitionTimeout, DocumentAcquisitionUnavailable
+from auto_agents_2.errors import (
+    DocumentAcquisitionTimeout,
+    DocumentAcquisitionUnavailable,
+    preserve_http_connection_failure,
+)
 from auto_agents_2.faults import StateConflict
 from auto_agents_2.models import DocumentResult, SourceEvidence
 from auto_agents_2.research import ResearchService
@@ -138,25 +142,18 @@ async def paused_engine(tmp_path, monkeypatch, *, normal=False, unknown=False):
 
     state = {"mode": "bad", "block": not normal, "closing": asyncio.Event(), "requests": []}
 
-    class Refusal(httpx.AsyncByteStream):
-        async def __aiter__(self):
-            yield b"Fixture forbidden"
-        async def aclose(self):
-            if state["block"]:
-                state["closing"].set()
-                await asyncio.Future()
-
     def respond(request):
         state["requests"].append(str(request.url))
         if state["mode"] == "good":
             return httpx.Response(200, text="Fixture fact")
-        if unknown:
-            raise httpx.ConnectError("EXAMPLE_UNKNOWN")
-        return httpx.Response(403, stream=Refusal())
+        error = httpx.ConnectError("EXAMPLE_UNKNOWN") if unknown else httpx.ProxyError("EXAMPLE_PROXY_AUTH")
+        preserve_http_connection_failure(error, "public_connect", scope="shared_proxy",
+                                         proxy_status=None if unknown else 407)
+        raise error
 
     class Transport(httpx.MockTransport):
         async def aclose(self):
-            if unknown and state["block"]:
+            if state["block"]:
                 state["closing"].set()
                 await asyncio.Future()
             await super().aclose()

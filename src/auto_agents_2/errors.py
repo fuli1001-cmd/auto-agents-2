@@ -82,6 +82,10 @@ def _safe_connection_failure(row):
             result[key] = value
     if row.get("connection_context_uncertain") is True:
         result["connection_context_uncertain"] = True
+    if row.get("connection_scope") in {"origin", "shared_proxy"}:
+        result["connection_scope"] = row["connection_scope"]
+    if type(row.get("proxy_status")) is int and 100 <= row["proxy_status"] <= 599:
+        result["proxy_status"] = row["proxy_status"]
     if type(row.get("attempt")) is int and 0 < row["attempt"] < 2**31:
         result["attempt"] = row["attempt"]
     return result
@@ -90,9 +94,10 @@ def _safe_connection_failure(row):
 class _HTTPConnectionFailure:
     """A controller observation bound to the exact exception before pool remapping."""
 
-    __slots__ = ("attempts", "count", "error_id", "numeric", "phase", "uncertain")
+    __slots__ = ("attempts", "count", "error_id", "numeric", "phase", "uncertain", "scope", "proxy_status")
 
-    def __init__(self, error, phase, numeric, attempts, count, uncertain):
+    def __init__(self, error, phase, numeric, attempts, count, uncertain, scope, proxy_status):
+        self.scope, self.proxy_status = scope, proxy_status
         self.error_id, self.phase, self.numeric = id(error), phase, numeric
         self.attempts, self.count, self.uncertain = attempts, count, uncertain
 
@@ -116,6 +121,10 @@ def _http_cause_details(error):
                  and type(snapshot.numeric) is dict and type(snapshot.uncertain) is bool)
         if valid:
             details.setdefault("connection_phase", snapshot.phase)
+            if snapshot.scope in {"origin", "shared_proxy"}:
+                details.setdefault("connection_scope", snapshot.scope)
+            if type(snapshot.proxy_status) is int and 100 <= snapshot.proxy_status <= 599:
+                details.setdefault("proxy_status", snapshot.proxy_status)
             for key, lower in (("os_errno", -(2**31)), ("ssl_verify_code", 0)):
                 value = snapshot.numeric.get(key)
                 if type(value) is int and lower <= value < 2**31:
@@ -138,7 +147,8 @@ def _http_cause_details(error):
     return details
 
 
-def preserve_http_connection_failure(error, phase, *, attempts=None, attempt_count=None):
+def preserve_http_connection_failure(error, phase, *, attempts=None, attempt_count=None,
+                                     scope=None, proxy_status=None):
     """Snapshot finite facts at httpcore's connection trace, before it clears causes."""
     if isinstance(error, Exception) and phase in {"public_connect", "origin_tls"}:
         details = _http_cause_details(error)
@@ -151,7 +161,8 @@ def preserve_http_connection_failure(error, phase, *, attempts=None, attempt_cou
         rows = tuple(safe for row in rows if (safe := _safe_connection_failure(row)) is not None)
         count = details.get("connection_failure_count", len(rows)) if attempt_count is None else attempt_count
         error._aa2_http_connection_failure = _HTTPConnectionFailure(
-            error, phase, numeric, rows, count, details.get("connection_context_uncertain") is True)
+            error, phase, numeric, rows, count, details.get("connection_context_uncertain") is True,
+            scope or details.get("connection_scope"), proxy_status or details.get("proxy_status"))
 
 
 def http_failure_details(error):
@@ -173,7 +184,7 @@ def http_failure_classification(evidence, *, document=False):
     """Shared positive HTTP failure rules; a missing cause never grants recovery."""
     import errno
 
-    status = evidence.get("http_status")
+    status = evidence.get("http_status", evidence.get("proxy_status"))
     if ("ssl_verify_code" in evidence or evidence.get("os_errno") in {errno.EACCES, errno.EPERM}
             or status in {401, 403, 407, 451}):
         return ("security" if "ssl_verify_code" in evidence else "permission"), False
@@ -217,7 +228,8 @@ class ResearchResolverUnavailable(AA2Error):
 
     def __init__(self, *, category, error_type, endpoint_origin, endpoint_url_hash, status_code=None, os_errno=None,
                  ssl_verify_code=None, connection_phase=None, connection_failures=None, connection_failure_count=None,
-                 connection_context_uncertain=False, connection_failures_truncated=False):
+                 connection_context_uncertain=False, connection_failures_truncated=False,
+                 connection_scope=None, proxy_status=None):
         self.evidence = {"operation": "research_resolver", "category": category,
                          "error_type": error_type, "endpoint_origin": endpoint_origin,
                          "endpoint_url_hash": endpoint_url_hash}
@@ -228,6 +240,10 @@ class ResearchResolverUnavailable(AA2Error):
                 self.evidence[key] = value
         if connection_phase in {"public_connect", "origin_tls"}:
             self.evidence["connection_phase"] = connection_phase
+        if connection_scope in {"origin", "shared_proxy"}:
+            self.evidence["connection_scope"] = connection_scope
+        if type(proxy_status) is int and 100 <= proxy_status <= 599:
+            self.evidence["proxy_status"] = proxy_status
         if connection_failures:
             self.evidence["connection_failures"] = connection_failures
         if connection_failure_count is not None:
@@ -253,6 +269,13 @@ class ResearchDestinationRejected(AA2Error):
         super().__init__(f"Research destination {hostname} must resolve exclusively to public addresses; "
                          f"{observation}. Check DNS, possible Fake-IP mapping, or whether the destination "
                          "itself is non-public.")
+
+
+class ResearchURLRejected(ResearchDestinationRejected):
+    """A per-source URL admission refusal, without inventing a DNS observation."""
+    def __init__(self, hostname, reason, message):
+        self.evidence = {"operation": "research_url_admission", "hostname": hostname, "reason": reason}
+        AA2Error.__init__(self, message)
 
 
 class ResearchSourceExcluded(ResearchDestinationRejected):

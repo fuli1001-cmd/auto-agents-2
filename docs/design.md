@@ -932,150 +932,113 @@ No system settings, permissions, probe timeouts or user approval semantics chang
 
 ## Research acquisition recovery
 
-Initial provider research records each document's acquisition outcome and the exact
-original candidate and claim rows before requesting normal research re-entry.
-Document transfer still deduplicates fragments; claim identity includes the original
-candidate, row index, URL, claim, version and validation. Successful sibling retrievals
-remain unapproved observations. Cancellation retains cancellation semantics.
+Provider research uses one configured author, controller collection, and independent
+authority review. Provider/model comparison does not participate in this stage.
+A provider response remains a proposal. Downloading or caching a document never
+approves its claims, versions, authority, necessity, or any later gate.
 
-Only positively classified document deadlines, transport timeouts, temporary service
-responses, unavailable documents (404/410), or explicit ordinary network causes may
-request the existing Replan/RecoveryPolicy path. An unknown ConnectError can conceal
-a certificate error and cannot authorize it. Any observed permission, certificate,
-public-address, security or unknown failure preserves the original boundary; a faster
-404 cannot mask it. After unchanged whole-source URL admission, typed source-bound
-document timeout, HTTP/network and destination failures do not cancel independent
-siblings. At most four captures remain active, with independent pools, parallel
-A/AAAA and the original public-address, TLS, redirect, body and review checks.
-Each verify batch freezes one resolver policy and proxy snapshot; it is only an
-admission context, never a pool, DNS or response cache. A non-automatic resolver
-failure stops new requests through that resolver context. A ProxyError, unresolved
-public-connect failure or ConnectError without a proven origin-TLS boundary stops
-new use of its frozen route, including direct routes where system resolution may
-be shared. Phase alone never proves a per-source cause or authorizes recovery.
-Existing finite diagnostics do not identify every CONNECT status or prove proxy
-authentication failure. Already dispatched requests finish under their own limits.
-Capture admission is checked before dispatch and DNS admission before each query;
-proxy routes are checked again after TCP and proxy TLS, immediately before CONNECT,
-closing an already opened socket when that not-yet-dispatched request is blocked;
-new connections also check the exact proxy route. Redirects requiring new DNS
-cannot cross the stop, but established sockets are not retroactively invalidated.
-The observation status not_executed identifies its unit: capture_started=false
-means the whole queued capture was not dispatched; capture_started=true means a
-pending subrequest was blocked, with the blocked stage, URL hash and any earlier
-response-header facts retained. It is not a fabricated HTTP failure, successful
-retrieval or assertion that the earlier request never ran. The actual original
-shared failure remains failed. Unclassified internal/configuration/state failures,
-caller cancellation and other BaseException control boundaries still stop and drain
-all tasks. That global stop is frozen before releasing its slot; repeated caller
-cancellation cannot abandon cleanup. Once independent results finish, choose the
-first security/permission failure in source order, otherwise the first non-automatic
-failure, otherwise the first ordinary failure, preserving that original exception
-and every source outcome. Partial success and not_executed never approve the batch,
-reuse old success, clear a historical refusal or bypass independent review. Existing
-untyped observation dictionaries retain the new outcome without a database migration.
-Capture-owned histories freeze actual HTTP failures before cleanup, including
-nested resolver operations. Only that capture's controller-owned document deadline
-may restore its earlier non-automatic HTTP failure; another capture's failure,
-ordinary internal TimeoutError or a real caller cancellation cannot replace it.
-Resolver HTTP selection may replace only another HTTP/blocked boundary or that
-resolver's own expired deadline, never a real JSON/protocol, internal or state
-exception. Such global failures and real cancellation retain their original type,
-with earlier source-bound finite facts separately stored as observed_failures on
-the same URL row. The controller records control outcomes with automatic re-entry
-explicitly disabled, then rethrows the same control exception. These facts participate
-in refusal retention and no-progress comparison; cancellation does not erase a
-403 or grant a retry. An actual recording failure retains the original failure or
-control type, adds finite error metadata and attempts one audit event. Failed audit
-is explicitly marked not durable with both finite error notes; it is never called
-successful recording. Acquisition checkpoints, their pending re-entry and the
-required failure event commit in one Store transaction, so a failed event cannot
-leave behind newly authorized pending work. A known recording failure disables automatic source recovery,
-while normal intentional Replan/HumanIntervention behavior is unchanged.
+Before the first dispatch, the controller registers a collecting acquisition episode
+under the existing CURRENT/PREFIX lifecycle. A collecting episode is not active
+failure recovery: an ordinary first DocumentResult, one author call and the original
+independent review remain sufficient when every document succeeds. Only an actual
+source failure routed through normal Replan activates the original-claim
+ResearchRecoveryDocument contract. Pure cancellation and unresolved shared
+prerequisites do not silently change the retained candidate's schema.
 
-Before dispatch the controller freezes the original run, generation, candidate,
-source set and capture/clarify bindings. An actual nonautomatic source observation,
-including one observed before a real caller cancellation, atomically records a
-source_wait checkpoint with the acquisition ledger and required event. Pure
-cancellation, ordinary transient failures and another source's blocked_by reason
-do not create this wait. Restart checks it before authoring or verify and raises
-the existing HumanIntervention boundary without new network work. Its original
-question identity and attempt stay bound to that exact observation. Only a
-matching, actually submitted retry answer consumes the wait, increments the
-existing prerequisite counter and saves its receipt in one CAS transaction;
-pause, superseded questions, changed bindings and old answers do not consume it.
-That answer permits the original resumable read-only recheck, not a waiver of
-public-address, TLS, refusal, source review or prototype gates. A new observed
-refusal creates a new wait even when the same source fails again.
+The same episode owns a document ledger keyed by the exact defragmented URL. Each
+capture reserves its exact run, candidate artifact, complete source rows, requirement
+binding and generation before dispatch. Outcomes and their mandatory events commit
+with an exact checkpoint/candidate/requirement CAS in one transaction. Per-document
+successes are saved immediately, even when another file later fails or collection is
+cancelled. A reservation without a durable outcome is an internal state boundary,
+not authority to retry after restart. Failed writes retain the original error or
+control type, attempt the existing recording-error audit, and stop automatic recovery.
+The acquisition batch and its audit never become successful merely because a sibling
+was retrieved.
 
-An internal/state fault or failed observation recording has a separate
-recording_error hard hold. A genuine failed capture retains its finite global
-error type even if a later caller cancellation becomes primary during cleanup;
-its own failed row still requires a hard hold, never an ordinary network wait.
-Cancelled and not_executed/blocked rows do not manufacture global provenance.
-One audit and that hold must commit together in the
-original Store, retaining the pre-dispatch binding and actual observations.
-Missing original proof remains unverifiable; reading current state after a
-conflict does not supply authority. Ordinary source/network confirmation cannot
-clear a hard hold or replay its failed write. There is no new automated owner
-repair or hard-hold release operation. An unavailable Store may prevent even
-this audit: both failures remain visible on the original exception, no durable
-protection is claimed and execution stops. Historical recording audits and
-source refusals/questions lacking a verified dispatch/consumption binding hard
-stop before network work; this change does not migrate, retag, clear or fabricate
-old refusals. Any owner-verified historical bridge requires separate review.
-These additions use existing checkpoints/questions/events, with no schema
-migration, new recovery permit, budget reset or automatic journal replay.
+A successful document may be reused only within its original run after verifying
+run ownership, artifact kinds, bounded regular files, byte counts and hashes, original
+dispatch candidate/source/version rows, and the original mandatory outcome event.
+The manifest must agree exactly with raw/extracted/index references and registered
+dependency edges; full text, encoding and section index must reproduce from raw bytes
+with the supported extractor. Cache corruption is a hard error, never a redownload
+fallback. Reuse retains the original captured_at, final URL and network provenance
+and adds an explicit original/current-dispatch receipt. It does not invent HTTP 200,
+replace the old dispatch, import a historical failed batch, or migrate legacy evidence.
+Completed episodes remain historical and cannot lock a later normally authorized
+clarification binding. A new episode carries the same run's original document
+outcomes, refusals and cause history forward.
 
-Each HTTP download retains its own 30-second total deadline; semaphore waiting
-precedes it, so there is no new 30-second batch wall-clock limit. The separately
-bounded collection helper is unchanged. No transport retry or single-site exception
-is added.
+Anchors, claim wording and declared version corrections do not identify a different
+file or clear its ledger. Multiple claims use one snapshot while retaining every
+original row. A changed declared version remains unverified support for independent
+review; it does not request a fresh HTTP download. A genuinely different version URL
+is a different file. This release does not add implicit refreshes or a cross-project
+cache.
 
-The public transport snapshots only numeric explicit causes and a finite connection
-phase on the exact exception at httpcore's connection-failure trace, before pool
-remapping can clear its cause. Public-connect includes resolution and proxy tunnelling;
-it does not prove that an origin TCP connection was reached. Origin-TLS identifies
-the origin handshake boundary. Each request keeps its own trace and preserves any
-existing trace callback. No trace arguments, exception text, credentials or request
-contents enter diagnostics. Unknown causes remain unknown, and phase alone cannot
-authorize automatic recovery. Historical errors are never retroactively enriched.
-Within a ResearchBatch, every numeric dial and proxy CONNECT checks the frozen
-route immediately before dispatch. A newly observed non-automatic address failure
-freezes the route before any cleanup await and stops later addresses in that call;
-a blocked later attempt cannot replace an actual earlier failure. Explicitly
-classified ordinary transient failures keep the original legal address fallback.
-Outside a batch, the accepted address fallback and success behavior are unchanged.
-If every attempted address fails, retain their finite failure observations and
-rethrow an original security/permission or unknown exception ahead of a final
-transient error. The positive classification rules are shared with research recovery.
-The diagnostic summary contains at most 16 finite rows, the total failure count and
-actual attempt ordinals, retaining the selected boundary and final attempt. Boundary
-selection checks all failures, even when their diagnostic summary is shortened.
-An implicit exception context that differs from the explicit cause is only an
-uncertainty signal: it is never traversed or used to infer a cause. It prevents a
-later cleanup timeout or network error from authorizing recovery over a possible
-earlier refusal. The signal is frozen before pool remapping, like the numeric facts.
+Retryability is separate from recovery classification. The default is three actual
+captures for one file and stable cause (initial capture plus at most two retries),
+kept across interruption, restart, Replan and provider changes. Stable cause includes
+finite error type, phase/scope, status, errno, certificate facts and bounded nested
+connection causes, excluding timestamps, prose, attempt ordinals and presentation
+noise. Every actual capture has a separate history; cleanup observations remain on
+that capture. A cause is charged at most once per capture, including facts observed
+before cancellation. Only positively classified transient deadlines, timeouts,
+408/429/temporary 5xx or ordinary network errors retry. 404/410 are not redownloaded.
+There is no new global diagnostic/model-call/correction ceiling or counter reset.
+The per-cause default is internal MAX_CAUSE_ATTEMPTS, not an exposed configuration
+override.
 
-The research author receives the failed claims and actual attempts, evaluates their
-necessity against the original goals, and proposes a full replacement source set.
-Every original row needs an explicit supported/not_required/blocked disposition.
-Necessary facts map to newly acquired authoritative sources with equivalent coverage;
-not_required needs a grounded explanation and cannot remove explicit user constraints.
-Empty replacement sources still require independent review. The existing research
-authority review binds these dispositions and the full acquisition observations and
-assesses every original row without converting a proposal into a product requirement.
-Acceptance and completion of the acquisition obligation are one checkpoint batch.
+A failed document does not cancel unrelated admitted files. Four captures may run
+at once; each keeps its original request and collection deadlines. Per-file URL
+admission now produces an explicit source refusal without stopping valid siblings.
+Typed source failures are collected in source order; security/permission facts take
+precedence over unknown/ordinary failures. Real cancellation and unclassified
+internal/configuration/state failures still stop and drain every child. Repeated
+caller cancellation cannot abandon cleanup. Earlier finite refusals remain in the
+same URL's observations and ledger.
 
-Re-entry uses existing authorization, counters, candidate archival and stage ownership.
-The source-recovery caller completes its exact started permit and cycle in the same
-transaction as the gate reset, never issuing a new grant or replaying a rejected response.
-The existing default for other callers and historical records remains unchanged. Repeated identical
-acquisition facts or ordinary independent-review rejections without new evidence stop automatically; counters, rewording and
-fragment changes do not create progress. There is no added model-call or correction
-ceiling. Missing necessary information or no useful permitted path produces an explicit
-user prerequisite listing claims, actual attempts and the remaining gap. Blocked
-proposals never advance the research gate or replace human prototype approval.
+Network failure scope requires positive evidence. A public_connect phase or
+cause-less ConnectError does not establish shared infrastructure. Unknown direct
+connections and origin TLS/CONNECT refusals freeze only that origin in the current
+batch. Proxy TCP/TLS failures and explicit proxy 407 freeze that configured proxy
+route; non-automatic HTTPS resolver failures freeze that resolver context.
+Already-dispatched independent requests finish. Later connections and numeric
+CONNECT requests recheck the exact origin/shared boundary before dispatch, including
+after awaited proxy TCP/TLS setup. not_executed retains the original blocked_by,
+stage, prior response facts and whether its capture started. It is neither a
+fabricated HTTP failure nor a charge against a stable-cause download budget.
+Only a blocked row bound to an actual non-shared failure in the same report may
+join the agent branch; an unowned blocked row cannot manufacture a recovery permit.
+
+Single-target terminal failures, including target access/TLS/address refusals, are
+retained and passed to the same configured author for independent alternatives,
+grounded not_required, or honest blocked dispositions. A denied host and its named
+subdomains cannot be retried through a changed path/alias/route; new network
+acquisition requires independent named evidence. Existing successful material is
+collection, not permission to contact the denied destination again. Shared
+resolver/proxy prerequisites still use the existing exact WAIT/CONSUMED question
+and counter contract. Only an actually submitted matching answer permits its
+original bounded recheck. A consumed receipt covers only its exact old refusal,
+never a new refusal or later cause-budget exhaustion. Shared proxy/resolver
+refusals do not falsely blacklist the document's origin.
+
+Historical source waits/refusals without new dispatch/consumption bindings retain
+their original conservative checks. No old question, refusal, rejected review,
+checkpoint, counter or recording hard hold is cleared or reconstructed from current
+state. New regular collection does not import legacy successes or authorize old
+denied operations.
+
+Every original claim needs exactly one supported/not_required/blocked disposition.
+Alternatives require equal claim/version and first-party coverage; not_required
+needs a grounded explanation preserving every original requirement. Empty sources
+still require independent review. Original claim rows and full observations bind
+that review, and acceptance plus episode completion commit atomically. Repeated
+identical terminal sources after the author has seen the ledger stop without new
+HTTP work; changed fragments or prose are not progress. Independent review rejection
+also keeps its existing no-progress stop. Missing necessary information creates an
+explicit blocked prerequisite listing the actual attempts and gap. Human prototype
+approval and all downstream gates remain unchanged.
 
 ## 公共研究资料的可选 HTTPS DNS JSON
 

@@ -73,7 +73,13 @@ def publication():
         SourceEvidence(url=URL + "#second", claim="Second fact", version="2")])
 
 
-def captured(url):
+def captured(url, artifacts=None):
+    if artifacts is not None:
+        import base64
+
+        from auto_agents_2.collection_worker import execute
+        return execute(artifacts.store.root, {"action": "research", "source": url, "final_url": url,
+            "mime": "text/plain", "raw": base64.b64encode(url.encode()).decode()})
     return {"artifact": {"hash": digest(url), "kind": "fixture", "bytes": 12},
             "excerpt": "Fixture source content", "url": url, "final_url": url}
 
@@ -190,7 +196,7 @@ def scenario(tmp_path, monkeypatch, mode="alternative"):
     async def capture(self, url):
         if url == URL:
             raise http_error(404)
-        return captured(url)
+        return captured(url, self.artifacts)
     monkeypatch.setattr(ResearchService, "capture", capture)
     project = tmp_path / "project"
     project.mkdir()
@@ -380,6 +386,9 @@ async def test_later_timeout_does_not_erase_a_refusal_or_its_attempt(tmp_path, m
     async def denied(self, url):
         raise http_error(403)
     monkeypatch.setattr(ResearchService, "capture", denied)
+    def interrupt_reentry(*args):
+        raise asyncio.CancelledError()
+    monkeypatch.setattr(workflow, "_controller_replan", interrupt_reentry)
     async def pause(question):
         raise asyncio.CancelledError()
     workflow.question_handler = pause
@@ -387,14 +396,14 @@ async def test_later_timeout_does_not_erase_a_refusal_or_its_attempt(tmp_path, m
         await workflow.start(str(request))
     rid = workflow.store.current()["id"]
     recovery = ResearchAcquisitionRecovery(workflow)
-    assert not recovery.active(rid)
+    assert recovery.active(rid)  # A target refusal now reaches the agent, without retrying it.
     async def timed_out(self, url):
         raise DocumentAcquisitionTimeout("Fixture download", 30, source_url=url)
     monkeypatch.setattr(ResearchService, "capture", timed_out)
     with pytest.raises(DocumentAcquisitionTimeout) as observed:
         await ResearchService(None).verify(publication().sources)
     recovery.observe(rid, publication(), observed.value)
-    assert not recovery.active(rid) and agent.authors == 1
+    assert recovery.active(rid) and agent.authors == 1
     identity = digest([rid, 0, recovery.binding(rid), publication().model_dump()])
     attempts = workflow.store.get(rid, PREFIX + identity)["attempts"]
     assert len(attempts) == 2 and len({row["id"] for row in attempts}) == 2
@@ -404,12 +413,24 @@ async def test_later_timeout_does_not_erase_a_refusal_or_its_attempt(tmp_path, m
 async def test_new_observed_final_authority_is_new_evidence_even_with_identical_text(tmp_path, monkeypatch):
     workflow, agent, request = scenario(tmp_path, monkeypatch, "review_repeat")
     captures = []
+    invoke = agent.invoke
+    async def independent_source(stage, context, schema, work, rid, operation, fresh=False):
+        document = await invoke(stage, context, schema, work, rid, operation, fresh)
+        if stage == "provider_research" and agent.authors >= 3:
+            document.sources[0].url = "https://official.example.test/reference"
+        return document
+    monkeypatch.setattr(agent, "invoke", independent_source)
     async def capture(self, url):
         if url == URL:
             raise http_error(404)
+        import base64
+
+        from auto_agents_2.collection_worker import execute
         captures.append(url)
-        final = "https://third-party.example.test/reference" if len(captures) == 1 else "https://official.example.test/reference"
-        return {**captured(url), "final_url": final}
+        final = ("https://third-party.example.test/reference" if url == ALTERNATIVE else
+                 "https://official.example.test/reference")
+        return execute(self.artifacts.store.root, {"action": "research", "source": url, "final_url": final,
+            "mime": "text/plain", "raw": base64.b64encode(ALTERNATIVE.encode()).decode()})
     monkeypatch.setattr(ResearchService, "capture", capture)
     async def pause(question):
         raise asyncio.CancelledError()
@@ -418,7 +439,7 @@ async def test_new_observed_final_authority_is_new_evidence_even_with_identical_
         await workflow.start(str(request))
     rid = workflow.store.current()["id"]
     failures = ResearchAcquisitionRecovery(workflow).active(rid)["rejected_reviews"]
-    assert len(captures) == 3 and agent.authors == 4 and agent.reviews == 3
+    assert len(captures) == 2 and agent.authors == 4 and agent.reviews == 3
     assert failures[0]["facts_hash"] != failures[1]["facts_hash"]
     assert failures[1]["facts_hash"] == failures[2]["facts_hash"]
     assert workflow.store.get(rid, "provider_research") is None

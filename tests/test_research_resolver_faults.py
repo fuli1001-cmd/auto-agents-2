@@ -129,7 +129,9 @@ async def test_resolver_failure_preserves_refusal_or_returns_to_research(tmp_pat
     if status == 403:
         assert fault["reason_code"] == "RESEARCH_RESOLVER_UNAVAILABLE"
         assert fault["human_requirement"]["evidence"]["http_status"] == 403 and authors == 1
-        assert not workflow.store.get(rid, CURRENT)
+        pointer = workflow.store.get(rid, CURRENT)
+        assert workflow.store.get(rid, pointer["key"])["collecting"]
+        assert not workflow.store.get(rid, pointer["key"]).get("completed")
     else:
         assert fault["reason_code"] == "research_acquisition_blocked" and authors == 2
         record = workflow.store.get(rid, workflow.store.get(rid, CURRENT)["key"])

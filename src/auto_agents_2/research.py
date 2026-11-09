@@ -13,6 +13,7 @@ from .errors import (
     DocumentAcquisitionUnavailable,
     ResearchDestinationRejected,
     ResearchResolverUnavailable,
+    ResearchURLRejected,
     http_failure_details,
 )
 from .http_body import ACQUISITION_TIMEOUT, acquisition_deadline, read_body
@@ -33,17 +34,19 @@ from .util import SECRET, digest, identifier
 def public_url(value: str):
     url = urlsplit(value)
     if url.scheme not in {"https", "http"} or not url.hostname or url.username or url.password:
-        raise AA2Error("Research evidence must use public HTTP(S) documentation URLs")
+        raise ResearchURLRejected(url.hostname or "", "invalid_url",
+                                  "Research evidence must use public HTTP(S) documentation URLs")
     if any(SECRET.search(k) for k in parse_qs(url.query)):
-        raise AA2Error("Research URLs must not contain credentials")
+        raise ResearchURLRejected(url.hostname, "credentials",
+                                  "Research URLs must not contain credentials")
     if url.hostname.rstrip(".").lower() == "localhost":
-        raise AA2Error("Research destination must be public")
+        raise ResearchURLRejected(url.hostname, "non_public", "Research destination must be public")
     try:
         address = ipaddress.ip_address(url.hostname)
     except ValueError:
         return  # DNS addresses are checked again at connection time.
     if not public_address(str(address)):
-        raise AA2Error("Research destination must be public")
+        raise ResearchURLRejected(url.hostname, "non_public", "Research destination must be public")
 
 
 class ResearchService:
@@ -51,14 +54,18 @@ class ResearchService:
 
     def __init__(self, artifacts: ArtifactStore, *, resolver_config=None, excluded_hosts=()):
         self.artifacts = artifacts
+        self.ledger = None
         self.excluded_hosts = tuple(excluded_hosts)
         self.resolver_config = resolver_config.model_copy(deep=True) if resolver_config is not None else None
 
-    def admit(self, url):
+    def admit(self, url, *, network=True):
         public_url(url)
-        if self.excluded_hosts:
+        excluded = self.excluded_hosts
+        if network and self.ledger is not None:
+            excluded = (*excluded, *self.ledger.excluded_hosts())
+        if excluded:
             from .research_replacement import admit_url
-            admit_url(url, self.excluded_hosts)
+            admit_url(url, excluded)
 
     async def capture(self, url: str) -> dict:
         history = current_capture.get()
@@ -174,16 +181,19 @@ class ResearchService:
 
     async def _verify(self, sources, batch):
         from .research_acquisition import failure_observation
+        from .research_documents import RetainedDocumentFailure
 
         semaphore = asyncio.Semaphore(4)
         documents = {}
         started = set()
         histories = {}
+        completed_outcomes = {}
         global_failure = None
 
         def independent_failure(error):
             return isinstance(error, (DocumentAcquisitionTimeout, DocumentAcquisitionUnavailable,
-                                      ResearchDestinationRejected, ResearchResolverUnavailable, ResearchRequestNotExecuted))
+                                      ResearchDestinationRejected, ResearchResolverUnavailable, ResearchRequestNotExecuted,
+                                      RetainedDocumentFailure))
 
         async def fetch(url):
             nonlocal global_failure
@@ -194,9 +204,46 @@ class ResearchService:
                 capture_token = current_capture.set(history)
                 failure_token = current_http_failure.set(history.document_failure)
                 try:
-                    batch.before_capture(url)
-                    started.add(url)
-                    return await self.capture(url)
+                    self.admit(url, network=False)
+                    if self.ledger is not None:
+                        previous = self.ledger.previous(url)
+                        if previous is not None:
+                            return previous
+                    while True:
+                        batch.before_capture(url)
+                        pending = self.ledger.start(url) if self.ledger is not None else None
+                        started.add(url)
+                        attempt_history = CaptureHistory(url)
+                        attempt_capture = current_capture.set(attempt_history)
+                        attempt_failure = current_http_failure.set(attempt_history.document_failure)
+                        try:
+                            try:
+                                self.admit(url)
+                                evidence = await self.capture(url)
+                            finally:
+                                current_http_failure.reset(attempt_failure)
+                                current_capture.reset(attempt_capture)
+                                for failure in attempt_history.failures:
+                                    history.record(failure)
+                        except BaseException as error:
+                            if pending is not None:
+                                try:
+                                    error.document_outcome = self.ledger.finish(url, pending, error=error)
+                                    completed_outcomes[url] = error.document_outcome
+                                except Exception as recording_error:
+                                    error.acquisition_document_recording_error = recording_error
+                                    if isinstance(getattr(error, "evidence", None), dict):
+                                        error.evidence["recording_failure"] = {
+                                            "error_type": type(recording_error).__name__, "operation": "research.document.finish"}
+                                    global_failure = error
+                                    raise error
+                                if isinstance(error, Exception) and self.ledger.retry(url, error):
+                                    await asyncio.sleep(.25)
+                                    continue
+                            raise
+                        if pending is not None:
+                            evidence = self.ledger.finish(url, pending, evidence=evidence)
+                        return evidence
                 except BaseException as error:
                     if isinstance(error, ResearchResolverUnavailable):
                         history.record(error)
@@ -211,8 +258,6 @@ class ResearchService:
                     current_http_failure.reset(failure_token)
                     current_capture.reset(capture_token)
 
-        for source in sources:
-            self.admit(source.url)
         for source in sources:
             url = urldefrag(source.url)[0]
             if url not in documents:
@@ -264,6 +309,12 @@ class ResearchService:
                            "boundary": task.exception().evidence}
                 elif task.exception() is not None:
                     row = {"url": url, "status": "failed", "failure": failure_observation(task.exception())}
+                    owned = getattr(task.exception(), "document_outcome", None)
+                    if owned is not None:
+                        row["document_operation_id"] = owned["id"]
+                    if isinstance(task.exception(), RetainedDocumentFailure):
+                        row.update(request_executed=False, retained_outcome_hash=digest(task.exception().outcome),
+                                   retained_operation_id=task.exception().outcome["id"])
                     if not independent_failure(task.exception()):
                         # A later caller cancellation may become primary while
                         # this genuine global failure remains a hard boundary.
@@ -271,12 +322,19 @@ class ResearchService:
                 else:
                     row = {"url": url, "status": "retrieved", "retrieval": {
                         key: value for key, value in task.result().items() if key != "excerpt"}}
+                owned = completed_outcomes.get(url)
+                if owned is not None:
+                    row["document_operation_id"] = owned["id"]
                 history = histories.get(url)
-                if history is not None and history.failures:
-                    row["observed_failures"] = history.observations()
+                observations = history.observations() if history is not None else []
+                if not task.cancelled() and task.exception() is not None:
+                    observations += getattr(task.exception(), "observed_failures", [])
+                if observations:
+                    row["observed_failures"] = list({digest(fact): fact for fact in observations}.values())
                 rows.append(row)
             outcome.acquisition_observations = rows
             outcome.acquisition_id = identifier("research-acquisition")
+            outcome.document_ledger = self.ledger is not None
             raise outcome
         results = []
         for source in sources:

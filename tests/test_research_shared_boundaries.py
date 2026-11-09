@@ -87,7 +87,7 @@ async def test_batch_first_nonautomatic_ip_stops_before_successful_second(monkey
             await backend.connect_tcp("docs.example", 443, 1)
         assert observed.value is failure and len(calls) == 1
         with pytest.raises(ResearchRequestNotExecuted):
-            context.before_connect(proxy)
+            context.before_connect(proxy, "docs.example", 443)
         assert asyncio.all_tasks() <= before
     finally:
         current_batch.reset(token)
@@ -446,7 +446,9 @@ async def test_engine_cancel_records_refusal_without_replan_or_retry(tmp_path, m
         error = control_error.value
         details = error.acquisition_recording_failure
         assert details["error_type"] == "OSError" and details["original_error_type"] == "CancelledError"
-        assert details["audit_recorded"] is (recording_failure == "journal") and record is None
+        assert details["audit_recorded"] is (recording_failure == "journal")
+        assert record["collecting"] and record["attempts"] == [] and not record.get("completed")
+        assert record["documents"][URL]["outcomes"][-1]["status"] == "cancelled"
         assert any(item["diagnostic"].get("http_status") == 403
                    for item in error.acquisition_observations[0]["observed_failures"])
         assert "EXAMPLE_" not in str(error.__notes__) + str(details)

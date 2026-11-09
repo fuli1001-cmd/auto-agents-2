@@ -145,7 +145,8 @@ async def test_proxy_connect_rechecks_route_after_last_await_and_closes_socket(m
     try:
         await asyncio.wait_for(waiting.wait(), 1)
         context.freeze_connect(proxy, "sibling.example", 443, {
-            "category": "network", "error_type": "ConnectError", "os_errno": errno.EACCES})
+            "category": "network", "error_type": "ConnectError", "os_errno": errno.EACCES,
+            "connection_scope": "shared_proxy"})
         release.set()
         with pytest.raises(ResearchRequestNotExecuted) as observed:
             await asyncio.wait_for(task, 1)
@@ -297,15 +298,19 @@ async def test_cancelled_refusal_blocks_normal_engine_restart_before_verify(tmp_
 
     closing = asyncio.Event()
 
-    class Refusal(httpx.AsyncByteStream):
-        async def __aiter__(self):
-            yield b"Fixture forbidden"
+    from auto_agents_2.errors import preserve_http_connection_failure
+
+    def respond(request):
+        error = httpx.ProxyError("EXAMPLE_SHARED_PROXY_AUTH")
+        preserve_http_connection_failure(error, "public_connect", scope="shared_proxy", proxy_status=407)
+        raise error
+
+    class Transport(httpx.MockTransport):
         async def aclose(self):
             closing.set()
             await asyncio.Future()
 
-    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport",
-                        lambda: httpx.MockTransport(lambda request: httpx.Response(403, stream=Refusal())))
+    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda: Transport(respond))
     original_record = ResearchAcquisitionRecovery.observe
 
     def record(self, rid, document, error, *, control=False):
