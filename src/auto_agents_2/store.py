@@ -1008,12 +1008,17 @@ class Store:
         from .contract_reentry import ACTIVE, legacy_baseline, state
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            def get(key, default=None):
+                return checkpoint_get_db(db, rid, key, default)
+
+            # Validate an open chain before considering the ordinary-plan fast
+            # path. Unrelated frozen requests are never reentry inputs.
+            if get(ACTIVE):
+                state(get)
+                return
+            if get("plan") is not None or not get("replan_feedback"):
+                return
             rows = {row[0]: json.loads(row[1]) for row in checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=?', (rid,), wire_index=1)}
-            if rows.get(ACTIVE):
-                state(rows.get)
-                return
-            if rows.get("plan") is not None or not rows.get("replan_feedback"):
-                return
             data = json.loads(db.execute("SELECT data FROM runs WHERE id=?", (rid,)).fetchone()[0])
             rows["authority/submitted-answers"] = self._submitted_answers(db, rid)
             updates = legacy_baseline(rows, rid, data.get("replans", 0))
