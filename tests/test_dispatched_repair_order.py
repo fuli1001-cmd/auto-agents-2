@@ -279,6 +279,68 @@ async def test_repair_priority_requires_current_permit_and_accepted_input(tmp_pa
     assert {key: store.get(rid, key) for key in before} == before
 
 
+
+async def test_unready_stale_repair_does_not_consume_permit_or_block_ready_task(tmp_path, monkeypatch):
+    workflow, rid, plan, base, _ = await paused_at_repair(tmp_path, monkeypatch)
+    store = workflow.store
+    state = store.get(rid, 'task_state/P')
+    state['implementation'] = 'needs_repair'
+    store.checkpoint(rid, 'task_state/P', state)
+    key = store.get(rid, 'develop/task/C')['recovery_permit']
+    permit = store.get(rid, key)
+    permit['authority_sources']['plan'] = 'stale'
+    store.checkpoint(rid, key, permit)
+    keys = ['develop/done', 'rounds/P', 'rounds/C', 'task_state/P', 'task_state/C',
+            'develop/task/P', 'develop/task/C', key]
+    before = {key: store.get(rid, key) for key in keys}
+
+    def no_consumption(*args, **kwargs):
+        pytest.fail('An unready future task must not consume or validate its permit')
+
+    monkeypatch.setattr(workflow.recovery_policy, 'task_authorized', no_consumption)
+    monkeypatch.setattr(workflow.recovery_policy, 'validate_consumption', no_consumption)
+    assert dispatched_repair(workflow, rid, plan, set(), base) is None
+    assert [task.id for task in ready_batch(plan.tasks, set(), 1)] == ['P']
+    assert {key: store.get(rid, key) for key in keys} == before
+
+
+async def test_unready_stale_repair_does_not_hide_later_eligible_repair(tmp_path, monkeypatch):
+    workflow, rid, plan, base, _ = await paused_at_repair(tmp_path, monkeypatch)
+    store = workflow.store
+    future = plan.tasks[1].model_copy(update={
+        'id': 'F', 'origin_id': 'F', 'depends_on': ['C'], 'allowed_paths': ['future.py']})
+    plan = plan.model_copy(update={'tasks': [future, *plan.tasks]})
+    store.checkpoint(rid, 'plan', plan.model_dump())
+    key = store.get(rid, 'develop/task/C')['recovery_permit']
+    permit = store.get(rid, key)
+    permit['plan_hash'] = digest(plan.model_dump())
+    permit['authority_sources'] = workflow.authority.identity(rid)
+    store.checkpoint(rid, key, permit)
+    future_key = 'recovery/permits/synthetic-future'
+    future_permit = copy.deepcopy(permit)
+    future_permit['action']['task_ids'] = ['F']
+    future_permit['task_scopes'] = {'F': future.allowed_paths}
+    future_permit['outcome'] = {'expected_tasks': ['F'], 'tasks': {}}
+    future_permit['authority_sources']['plan'] = 'stale'
+    store.checkpoint(rid, future_key, future_permit)
+    store.checkpoint(rid, 'develop/task/F', {'phase': 'pending', 'recovery_permit': future_key})
+    authorized = workflow.recovery_policy.task_authorized
+    consumed = []
+
+    def record_consumption(run_id, saved, task):
+        consumed.append(task.id)
+        assert task.id == 'C', 'The unready future task is not a permit consumer'
+        return authorized(run_id, saved, task)
+
+    before = {key: store.get(rid, key) for key in [future_key, key, 'rounds/P', 'rounds/C']}
+    monkeypatch.setattr(workflow.recovery_policy, 'task_authorized', record_consumption)
+    selection = dispatched_repair(workflow, rid, plan, set(), base)
+    assert selection and selection[0].id == 'C'
+    assert selection[1]['mode'] == 'execute_dispatched_repair'
+    assert consumed == ['C']
+    assert {key: store.get(rid, key) for key in before} == before
+
+
 def test_normal_readiness_waits_for_all_ancestors_after_repair():
     p = TaskSpec(id='P', title='P', description='P', allowed_paths=['p'], acceptance=['P'],
                  requirement_ids=['R1'], checks=[COMPILE])

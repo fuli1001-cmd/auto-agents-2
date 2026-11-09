@@ -143,6 +143,14 @@ history or changed contracts simply leave the original dependency gate in place.
                 or permit.get("task_scopes", {}).get(task.id) != task.allowed_paths
                 or task.id not in permit.get("outcome", {}).get("expected_tasks", [])):
             continue
+        # An ineligible future task is not an action consumer. Establish its
+        # dependency proof before consulting a permit that cannot be used yet.
+        if history is None:
+            history = _history(engine.store, rid)
+        proofs = [_accepted_input(engine, rid, tasks[dep], plan, base, history)
+                  if dep in tasks else None for dep in sorted(missing)]
+        if not all(proofs):
+            continue
         if _verified_result(engine, rid, task, saved, permit):
             engine.recovery_policy.validate_consumption(rid, saved["recovery_permit"], expected={action})
             mode = "integrate_verified_result"
@@ -154,11 +162,6 @@ history or changed contracts simply leave the original dependency gate in place.
             mode = "execute_dispatched_recheck"
         else:
             continue
-        if history is None:
-            history = _history(engine.store, rid)
-        proofs = [_accepted_input(engine, rid, tasks[dep], plan, base, history)
-                  if dep in tasks else None for dep in sorted(missing)]
-        if all(proofs):
-            return task, {"task": task.id, "permit": saved["recovery_permit"],
-                          "base": base, "dependencies": proofs, "mode": mode}
+        return task, {"task": task.id, "permit": saved["recovery_permit"],
+                      "base": base, "dependencies": proofs, "mode": mode}
     return None
