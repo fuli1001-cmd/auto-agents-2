@@ -95,6 +95,9 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":11,"output_tok
             review["authority"] = []
         elif mode == "stale_basis":
             review["authority"]["basis_hash"] = "not-the-controller-basis"
+        elif mode == "empty_prototype_binding":
+            assert kind == "prototype"
+            review["basis_hash"] = review["candidate_hash"] = ""
         text = "{malformed" if mode == "invalid_json" else json.dumps(value)
         if mode == "transport":
             text = "__CLI_TRANSPORT_ERROR__"

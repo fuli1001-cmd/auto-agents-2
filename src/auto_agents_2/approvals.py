@@ -140,6 +140,28 @@ class PrototypeApprovals:
         basis = review_basis(source, specification, prototype_identity(work, actions), visuals, visual.get("ui_design"))
         return basis, source
 
+    def browser_report_current(self, report, binding, actions, browser_version, *, expected_routes):
+        """Reuse a completed observation, never a review or human approval."""
+        if (not isinstance(report, dict) or report.get("version") != browser_version
+                or report.get("source_hash") != binding["hash"]
+                or report.get("actions_hash") != binding["actions_hash"]
+                or report.get("error") != ""
+                or not exact_actions(actions, report.get("results", []), expected_routes=expected_routes)):
+            return False
+        try:
+            for row in report["results"]:
+                for image in [row, *row.get("tiles", [])]:
+                    ref = image.get("image_artifact")
+                    if (not isinstance(ref, dict) or ref.get("kind") != "screenshot"
+                            or not isinstance(ref.get("hash"), str) or not isinstance(ref.get("bytes"), int)):
+                        return False
+                    raw = self.artifacts.bytes(ref)
+                    if len(raw) != ref["bytes"] or not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+                        return False
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+        return True
+
     def automation_current(self, record, binding, actions, browser_version, *, expected_routes, review_inputs=None):
         if not isinstance(record, dict):
             return False

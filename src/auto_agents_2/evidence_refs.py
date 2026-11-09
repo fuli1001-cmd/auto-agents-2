@@ -136,6 +136,14 @@ def controller_context_catalog(context, *, aliases=(), provenance=None):
             context.pop(name)
         elif name in context:
             prototype_protocols[name] = value
+    from .prototype_reading import KEY as prototype_reading_key
+    from .prototype_reading import reading_contract as prototype_reading_contract
+    if prototype_reading_key in context:
+        if (context_basis_current(context.get("prototype_review_basis"), context)
+                and context[prototype_reading_key] == prototype_reading_contract(context)):
+            prototype_protocols[prototype_reading_key] = context[prototype_reading_key]
+        else:
+            context.pop(prototype_reading_key)
     origins = {}
     failure = context.get("failure") or {}
     if isinstance(failure, dict):

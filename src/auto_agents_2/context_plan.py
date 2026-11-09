@@ -40,7 +40,8 @@ CONTRACTS = {
     "prototype": {"specification", "project", "design_baseline", "design_candidates", "prototype_answer",
                   "controller_browser_report", "previous_prototype", "prototype", "design_evidence", "browser_evidence",
                   "controller_prototype_reentry", "controller_prototype_output",
-                  "unresolved_issues", "controller_prototype_contract", "prototype_requirement_source", "prototype_review_basis"},
+                  "unresolved_issues", "controller_prototype_contract", "prototype_requirement_source", "prototype_review_basis",
+                  "controller_prototype_review_reading"},
     "design": {"specification", "project", "provider_research", "prototype", "design_answer", "design",
                "design_review_evidence", "design_documents"},
     "plan": {"specification", "project", "design", "provider_research", "prototype", "plan",
@@ -511,6 +512,7 @@ class _Selection:
                     "controller_review_basis", "controller_authority_scope", "submitted_answers"} else
                     self.compact(value, key) if key in KNOWN else copy.deepcopy(value))
             self.mark(key, "inline", "Stage input contract" if key in KNOWN else "Unclassified mandatory extension", value)
+        self.prototype_review_reading()
         self.review_reading()
         self.evidence_dependencies()
         self.deduplicate_contracts()
@@ -519,6 +521,67 @@ class _Selection:
                           "Read required_read materials before deciding. Read optional records only when relevant. "
                           "Missing evidence cannot establish success; source and model proposals remain distinct."}
         return self.result
+
+    def prototype_review_reading(self):
+        from .prototype_reading import KEY, reading_contract
+        if KEY not in self.original:
+            return
+        from .prototype_review import context_basis_current
+        basis = self.original.get("prototype_review_basis")
+        if (self.stage != "review" or self.purpose != "prototype"
+                or not context_basis_current(basis, self.original)
+                or self.original[KEY] != reading_contract(self.original)):
+            raise ProviderError("Prototype review reading contract lost its controller binding")
+
+        def material(value, path, reason, *, required=False):
+            pointer = self.reference(value, path, reason, required=required)
+            # Image artifacts remain discoverable through the complete browser
+            # observation's registered image_artifact edges. Do not duplicate
+            # their full metadata in every wrapper as well as the image index.
+            nested = {ref["hash"]: ref for ref in references(value)
+                      if {"kind", "bytes"} <= ref.keys() and ref["kind"] != "screenshot"}
+            if nested:
+                pointer["nested_materials"] = list(nested.values())
+            images = []
+            def collect(item):
+                if isinstance(item, dict):
+                    for name, child in item.items():
+                        if name == "screenshot" and isinstance(child, str):
+                            images.append(child)
+                        else:
+                            collect(child)
+                elif isinstance(item, list):
+                    for child in item:
+                        collect(child)
+            collect(value)
+            if images:
+                pointer["nested_images"] = [{"screenshot": path} for path in dict.fromkeys(images)]
+            return pointer
+
+        payload = self.result.payload
+        report = self.original.get("controller_browser_report")
+        if (isinstance(report, dict) and "results" in report
+                and report["results"] == self.original.get("browser_evidence")):
+            payload["controller_browser_report"]["results"] = {
+                "source_ref": "browser_evidence", "same_observation": True,
+                "identity": digest(report["results"])}
+            self.result.reference_map["controller_browser_report.results"] = "browser_evidence"
+            self.mark("controller_browser_report.results", "same_content",
+                      "Exact complete results are already supplied as browser_evidence", report["results"])
+        view = copy.deepcopy(basis)
+        view["visual_evidence"] = material(basis["visual_evidence"], "prototype_review_basis.visual_evidence",
+            "Complete image-ID lookup catalogue; locate images actually inspected")
+        if len(json.dumps(basis["criteria"], ensure_ascii=False)) > TEXT_INLINE:
+            view["criteria"] = material(basis["criteria"], "prototype_review_basis.criteria",
+                "Complete original prototype criteria; assess every ID once", required=True)
+        payload["prototype_review_basis"] = view
+        for key, value in list(payload.items()):
+            if key in {"prototype_review_basis", KEY, "context_files", "project"}:
+                continue
+            if len(json.dumps(value, ensure_ascii=False)) > TEXT_INLINE:
+                payload[key] = material(value, key,
+                    "Complete selected prototype review input; read before deciding and follow nested references",
+                    required=True)
 
     def review_reading(self):
         reading = self.original.get("controller_review_reading")

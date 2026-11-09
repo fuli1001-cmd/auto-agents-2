@@ -1076,8 +1076,13 @@ class WorkflowEngine:
         visual = UIDesign(self.store, self.artifacts).context(rid, spec, controlled["prototype_requirement_source"])
         basis = review_basis(controlled["prototype_requirement_source"], spec,
                              prototype_identity(work, actions), context.get("browser_evidence", []), visual.get("ui_design"))
-        return self._prototype_reentry_context(rid, work, {
+        rendered = self._prototype_reentry_context(rid, work, {
             **context, **controlled, **visual, "specification": spec, "prototype_review_basis": basis}, review=True)
+        from .prototype_reading import KEY, reading_contract
+        rendered.pop(KEY, None)
+        if reading := reading_contract(rendered):
+            rendered[KEY] = reading
+        return rendered
 
     def _validate_stage_response(self, result, stage, context, rid):
         if stage == "provider_research" and isinstance(result, DocumentResult):
@@ -1251,6 +1256,23 @@ class WorkflowEngine:
                         pass  # Unread/invalid old responses need the new disclosed request.
                     else:
                         compatible.add(old_identity)
+        from .prototype_reading import KEY as prototype_reading_key
+        from .prototype_reading import reading_contract as prototype_reading_contract
+        if (stage == "review" and context.get("review_kind") == "prototype"
+                and context.get(prototype_reading_key) == prototype_reading_contract(context)
+                and context.get(prototype_reading_key)):
+            legacy = {k: v for k, v in context.items() if k != prototype_reading_key}
+            old_identity = invocation_identity(stage, legacy, schema, workspace,
+                                              invocation_config, source_before, execution)
+            if saved.get("identity") == old_identity and saved.get("result"):
+                from .prototype_review import InvalidPrototypeReview, validate_review
+                try:
+                    validate_review(saved["result"], context["prototype_review_basis"],
+                                    context["prototype_requirement_source"])
+                except InvalidPrototypeReview:
+                    pass
+                else:
+                    compatible.add(old_identity)
         if stage == "recovery_diagnosis":
             old_execution = self.agent.execution_identity("review") if isinstance(self.agent, ProviderRouter) else None
             compatible.add(invocation_identity("review", context, schema, workspace, self.config.load(), source_before, old_execution))
@@ -1443,7 +1465,11 @@ class WorkflowEngine:
                 review_inputs=self.approvals.review_inputs(rid, work, actions, previous.get("visuals", []))):
             review, visuals = previous["review"], previous["visuals"]
         else:
-            report = await self._prototype_browser_report(rid, work, document)
+            retained = self.store.get(rid, "prototype_browser_report")
+            report = self.artifacts.json(retained) if retained else None
+            if not self.approvals.browser_report_current(report, binding, actions, self.browser_check_version(),
+                    expected_routes=self.approvals.routes(work, actions)):
+                report = await self._prototype_browser_report(rid, work, document)
             if report["error"]:
                 raise Replan("prototype", report["error"])
             visuals = report["results"]
