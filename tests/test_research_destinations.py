@@ -174,6 +174,29 @@ def test_special_hosts_authentication_and_management_actions_never_use_unknown_f
         ResearchDestinationPolicy(target)
 
 
+@pytest.mark.parametrize("authorized", [False, True])
+@pytest.mark.parametrize("path", ["/restart", "/reference/restart"])
+async def test_restart_action_never_dials_even_with_document_authorization(monkeypatch, path, authorized):
+    stream = RecordingStream([])
+    lookups, connections = install_network(monkeypatch, stream, {"docs.example.test": ["10.0.0.8"]})
+    grants = [{"origin": "https://docs.example.test", "path_prefix": path}] if authorized else []
+    with pytest.raises((ResearchDestinationPolicyRejected, ValueError)):
+        selected = ResearchDestinationPolicy("https://docs.example.test" + path, grants)
+        async with httpx.AsyncClient(transport=PublicHTTPTransport(destination_policy=selected), trust_env=False) as client:
+            await client.get("https://docs.example.test" + path)
+    assert lookups == [] and connections == []
+
+
+async def test_restart_document_name_remains_an_ordinary_unknown_private_document(monkeypatch):
+    target = "https://docs.example.test/docs/server-restart"
+    stream = RecordingStream([b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"])
+    lookups, connections = install_network(monkeypatch, stream, {"docs.example.test": ["10.0.0.8"]})
+    selected = ResearchDestinationPolicy(target)
+    async with httpx.AsyncClient(transport=PublicHTTPTransport(destination_policy=selected), trust_env=False) as client:
+        assert (await client.get(target)).text == "ok"
+    assert lookups == ["docs.example.test"] and connections == [("10.0.0.8", 443)]
+
+
 async def test_new_connection_revalidates_rebinding_to_special_address(monkeypatch):
     stream = RecordingStream([])
     calls = []

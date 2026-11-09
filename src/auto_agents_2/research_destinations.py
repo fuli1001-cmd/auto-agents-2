@@ -28,7 +28,7 @@ SENSITIVE_SERVICES = {22: "ssh", 23: "telnet", 389: "ldap", 445: "smb", 636: "ld
 SENSITIVE_PORTS = frozenset(SENSITIVE_SERVICES)
 MANAGEMENT_ROOTS = {"admin", "manage", "management", "console"}
 ACTION_TERMINALS = {"login", "logout", "signin", "signout", "authorize", "token",
-                    "shutdown", "reboot", "reset"}
+                    "shutdown", "reboot", "restart", "reset"}
 ACTION_VALUES = {"delete", "remove", "restart", "shutdown", "reboot", "reset", "exec", "execute",
                  "write", "update", "create", "set", "change", "logout"}
 ACTION_KEYS = {"action", "command", "cmd", "operation", "op", "do"}
