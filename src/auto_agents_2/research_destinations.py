@@ -228,7 +228,7 @@ class ResearchDestinationPolicy:
             self.reject(host, "special_host")
         if port in SENSITIVE_PORTS:
             self.reject(host, "sensitive_service")
-        if (management_path(path) and not public_document_action(path)
+        if (management_path(path) and not (url.scheme == "https" and public_document_action(path))
                 or any(key.lower() in ACTION_KEYS and any(item.lower() in ACTION_VALUES for item in values)
                        for key, values in parse_qs(url.query.decode()).items())):
             self.reject(host, "authentication_or_management_action")

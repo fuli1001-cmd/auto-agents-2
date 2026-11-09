@@ -842,3 +842,16 @@ async def test_action_document_redirect_rechecks_destination_instead_of_inheriti
     assert lookups == ["docs.example.test", "other.example.test"]
     assert connections == [("93.184.216.34", 443)]
     assert b"/reference/restart" not in b"".join(stream.writes)
+
+
+@pytest.mark.parametrize("authorized", [False, True])
+async def test_initial_http_action_document_has_no_tls_exception_even_with_parent_grant(monkeypatch, authorized):
+    target = "http://docs.example.test/docs/reference/restart"
+    grants = [{"origin": "http://docs.example.test", "path_prefix": "/docs/reference"}] if authorized else []
+    stream = RecordingStream([])
+    lookups, connections = install_network(monkeypatch, stream, {"docs.example.test": ["93.184.216.34"]})
+    with pytest.raises(ResearchDestinationPolicyRejected, match="authentication_or_management_action"):
+        selected = ResearchDestinationPolicy(target, grants)
+        async with httpx.AsyncClient(transport=PublicHTTPTransport(destination_policy=selected), trust_env=False) as client:
+            await client.get(target)
+    assert lookups == [] and connections == []
