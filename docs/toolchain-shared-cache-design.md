@@ -58,6 +58,54 @@ Node 保留 `PLAYWRIGHT_BROWSERS_PATH=0`，只将专用 `.local-browsers` 入口
 
 原型选择控制器驱动匹配的对象，记录实际版本/内容身份，不能以任意 `chromium-*` 文件存在判定就绪。原型与应用预览的证据保存实际浏览器身份，复用必须匹配；人审内容批准与自动浏览器证据保持不同职责，环境变化要求自动重验，不伪造新的人工批准。
 
+## Browser source identity and storage reuse (2026-11-09)
+
+A browser spec remains source-bound. Its existing version/key is preserved for
+unchanged configurations, including legacy exact hits. Actual npm host fallbacks
+(`npm_config_` then `npm_package_config_`, suppressed by a present primary variable)
+and `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE` now enter identity when used. HTTP proxy
+settings remain transport-only. No raw custom host URLs or proxy values are saved
+in source proofs.
+
+Prepare locks use all non-source spec fields, so source variants for the same
+complete driver/browser/platform identity serialize. Source-bound indexes may
+refer to one immutable object only through one of two proofs:
+
+- Before download, the locked driver's dry-run must report every component's
+  complete official artifact URL. Each component must share an exact URL with a
+  previously observed independent installation plan. Exact official mirror bases
+  alone do not prove equivalence: Chrome-for-Testing routes can differ. Missing,
+  custom, malformed or new unsupported URL metadata grants no such reuse.
+- After a normal independent install, the complete manifest (paths, types, links,
+  executable bits, sizes and hashes) and all non-source spec fields must match an
+  existing object. That object is fully revalidated before storage is reused.
+  This can avoid a second copy of equal content from a custom source, but never
+  authorizes skipping its first independent installation.
+
+New provenance is separately versioned and bound to the observed source spec.
+Version-2 indexes bind the requested spec, original object/spec, content and file
+manifest hashes, provenance hash, and independent installation witness. Official
+aliases compare to that installation witness directly; they do not form an
+unbounded inference chain. Ordinary index plans cannot upgrade a legacy manifest
+whose immutable provenance is missing. Corrupt metadata is a miss; corrupt objects
+are retained. Existing owner/path/symlink checks, immutable content checks,
+references, control/GC locks and read-only sandbox mounts remain required.
+
+Legacy exact hits preserve the previous contract and do not cause an upgrade
+redownload. They do not retroactively prove historical environment variables that
+were never recorded. A legacy object lacking the new witness cannot be used for
+pre-download cross-source reuse; an independently installed, fully equal tree can
+still reuse its storage. No old duplicate object is deleted, relinked or rewritten.
+Runtime bindings keep the immutable object's original spec and also validate the
+requested source alias. Events distinguish storage `hit`, `requested_spec_key`,
+`reuse` proof kind and whether the installer actually ran (`downloaded`).
+
+Focused regressions use tiny fake payloads without network/browser downloads,
+including legacy zero-installer exact hits, conservative legacy cross-source
+handling, official and unknown mirrors, complete identity mismatches, malformed
+proofs, controller identity, corruption and real-process source-variant locking.
+
+
 ## 引用、清理与恢复
 
 浏览器引用包含项目、run（如有）、消费者位置和对象身份。索引、发布、引用与 GC 使用同一控制锁协调；安装完成到消费者可见之间不能出现无保护空窗。

@@ -11,6 +11,7 @@ import stat
 import time
 from pathlib import Path
 
+from .browser_sources import equivalent_plans
 from .errors import BusyProject, PolicyViolation
 from .safe_files import read_regular
 from .util import async_file_lock, digest, file_lock, identifier, write_json
@@ -65,6 +66,13 @@ def manifest_tree(root):
             else:
                 raise PolicyViolation("Browser object contains a special file")
     return sorted(rows)
+
+
+def browser_payload_spec(spec):
+    """Only transport provenance may differ; all driver/ABI/platform inputs stay."""
+    if not isinstance(spec, dict):
+        raise ValueError("Browser specification must be a mapping")
+    return {key: value for key, value in spec.items() if key != "download_configuration_hash"}
 
 
 def immutable(root):
@@ -155,16 +163,22 @@ class SharedCache:
                 for kind in paths:
                     write_json(self.root / "index" / f"download-{kind}.json", {"touched": time.time()})
 
-    def object(self, object_id):
+    def _object_metadata(self, object_id):
         if not isinstance(object_id, str) or not ID.fullmatch(object_id):
             raise PolicyViolation("Invalid browser object identity")
         path = self.root / "objects" / object_id
         local_directory(self.root, private=True)
         local_directory(path)
         record = read_json(path / "manifest.json")
-        if (record.get("version") != 1 or record.get("object_id") != object_id
+        if (not isinstance(record, dict) or not isinstance(record.get("spec"), dict)
+                or record.get("version") != 1 or record.get("object_id") != object_id
                 or record.get("spec_key") != digest(record.get("spec"))):
             raise PolicyViolation("Browser object metadata is inconsistent")
+        return record
+
+    def object(self, object_id):
+        record = self._object_metadata(object_id)
+        path = self.root / "objects" / object_id
         for item in [path, *(path.rglob("*"))]:
             if not item.is_symlink() and item.stat().st_mode & 0o222:
                 raise PolicyViolation("Shared browser object is no longer immutable")
@@ -188,25 +202,151 @@ class SharedCache:
             value["pending"] = False
             write_json(path, value)
 
-    def lookup(self, spec, consumer, run_id):
+    def _valid_provenance(self, provenance, spec):
+        return (isinstance(provenance, dict) and spec.get("version") == 1
+                and provenance.get("version") == 2 and provenance.get("spec_key") == digest(spec)
+                and isinstance(spec.get("download_configuration_hash"), str)
+                and bool(ID.fullmatch(spec["download_configuration_hash"]))
+                and provenance.get("download_configuration_hash") == spec["download_configuration_hash"])
+
+    def _installation_witness(self, spec, record, provenance):
+        return {"spec": spec, "provenance": provenance, "content_hash": record["content_hash"],
+                "files_hash": digest(record["files"])}
+
+    def _valid_witness(self, witness, record):
+        return (isinstance(witness, dict) and isinstance(witness.get("spec"), dict)
+                and self._valid_provenance(witness.get("provenance"), witness["spec"])
+                and browser_payload_spec(witness["spec"]) == browser_payload_spec(record["spec"])
+                and witness.get("content_hash") == record["content_hash"]
+                and witness.get("files_hash") == digest(record["files"]))
+
+    def _index_matches(self, index, spec, record):
+        if not isinstance(index, dict) or index.get("object_id") != record["object_id"]:
+            return False
+        if record["spec_key"] == digest(spec):
+            return True
+        provenance, proof = index.get("provenance"), index.get("proof")
+        if (index.get("version") != 2 or index.get("spec") != spec
+                or index.get("content_hash") != record["content_hash"]
+                or browser_payload_spec(record["spec"]) != browser_payload_spec(spec)
+                or not self._valid_provenance(provenance, spec) or not isinstance(proof, dict)
+                or proof.get("requested_spec_key") != digest(spec)
+                or proof.get("object_id") != record["object_id"]
+                or proof.get("object_spec_key") != record["spec_key"]
+                or proof.get("content_hash") != record["content_hash"]
+                or proof.get("provenance_hash") != digest(provenance)
+                or not self._valid_witness(proof.get("installation"), record)):
+            return False
+        anchor = proof["installation"]
+        if index.get("reuse") == "verified-content-v1":
+            return anchor["spec"] == spec and anchor["provenance"] == provenance
+        if index.get("reuse") == "official-download-plan-v1":
+            return equivalent_plans(provenance.get("official_plan"), anchor["provenance"].get("official_plan"))
+        return False
+
+    def _source_witness(self, index, record):
+        if record["spec_key"] == digest(index.get("spec", record["spec"])):
+            provenance = record.get("provenance")
+            if self._valid_provenance(provenance, record["spec"]):
+                return self._installation_witness(record["spec"], record, provenance)
+            return None  # A mutable index cannot repair missing immutable source evidence.
+        proof = index.get("proof")
+        witness = proof.get("installation") if isinstance(proof, dict) else None
+        return witness if self._valid_witness(witness, record) else None
+
+    def matches(self, spec, record):
+        """Read-only binding comparison, including an already proved source alias."""
+        if record["spec_key"] == digest(spec):
+            return True
+        try:
+            index = read_json(self.root / "index" / f"browser-{digest(spec)}.json")
+            return self._index_matches(index, spec, record)
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
+    def _register_browser(self, spec, record, consumer, run_id, *, provenance=None, reuse=None, installation=None):
+        index = {"version": 2, "object_id": record["object_id"], "spec": spec,
+                 "content_hash": record["content_hash"], "touched": time.time(),
+                 "provenance": provenance, "reuse": reuse}
+        if reuse:
+            index["proof"] = {"requested_spec_key": digest(spec), "object_id": record["object_id"],
+                              "object_spec_key": record["spec_key"], "content_hash": record["content_hash"],
+                              "provenance_hash": digest(provenance), "installation": installation}
+            if not self._index_matches(index, spec, record):
+                raise PolicyViolation("Browser source reuse proof is incomplete")
+        self.reference(record, consumer, run_id)
+        write_json(self.root / "index" / f"browser-{digest(spec)}.json", index)
+
+    def lookup(self, spec, consumer, run_id, *, compatible=None, provenance=None):
         self.initialize()
         key = digest(spec)
         with file_lock(self.root / "locks/control.lock"):
             try:
                 index = read_json(self.root / "index" / f"browser-{key}.json")
-                record = self.object(index["object_id"])
-                if record["spec_key"] != key:
+                record = self._object_metadata(index["object_id"])
+                if not self._index_matches(index, spec, record):
                     raise PolicyViolation("Shared browser index belongs to another driver")
+                record = self.object(record["object_id"])
             except (OSError, ValueError, KeyError, TypeError, PolicyViolation):
+                record = None
+            if record:
+                aliased = record["spec_key"] != key
+                evidence = index.get("provenance") if aliased else record.get("provenance")
+                reuse = index.get("reuse") if aliased else None
+                installation = index["proof"]["installation"] if aliased else None
+                self._register_browser(spec, record, consumer, run_id,
+                    provenance=evidence, reuse=reuse, installation=installation)
+                return {**record, "hit": True, "requested_spec_key": key, "reuse": reuse}
+            if compatible is None:
                 return None
-            self.reference(record, consumer, run_id)
-            write_json(self.root / "index" / f"browser-{key}.json", {"object_id": record["object_id"], "touched": time.time()})
-            return {**record, "hit": True}
+            # Read small registered metadata first. Never hash unrelated browser
+            # payloads or accept an index alias without its source/content proof.
+            for path in sorted((self.root / "index").glob("browser-*.json")):
+                try:
+                    index = read_json(path)
+                    record = self._object_metadata(index["object_id"])
+                    previous_spec = index.get("spec", record["spec"])
+                    if (path.name != f"browser-{digest(previous_spec)}.json"
+                            or not self._index_matches(index, previous_spec, record)
+                            or browser_payload_spec(previous_spec) != browser_payload_spec(spec)):
+                        continue
+                    witness = self._source_witness(index, record)
+                    if not witness or not compatible(witness["spec"], witness["provenance"]):
+                        continue
+                    record = self.object(record["object_id"])
+                except (OSError, ValueError, KeyError, TypeError, PolicyViolation):
+                    continue
+                reuse = "official-download-plan-v1"
+                self._register_browser(spec, record, consumer, run_id, provenance=provenance, reuse=reuse,
+                                       installation=witness)
+                return {**record, "hit": True, "requested_spec_key": key, "reuse": reuse}
+            return None
 
-    def publish(self, spec, source, consumer, run_id):
+    def publish(self, spec, source, consumer, run_id, *, provenance=None):
         self.initialize()
         before = manifest_tree(source)
         content_hash = digest(before)
+        # The requested source has already produced this complete validated tree.
+        # Equal full bytes/types/executable bits, plus every non-source identity
+        # input, can reuse storage even when a custom mirror was requested. This
+        # proof does not authorize a pre-download cross-mirror hit.
+        with file_lock(self.root / "locks/control.lock"):
+            for path in sorted((self.root / "objects").iterdir()):
+                try:
+                    record = self._object_metadata(path.name)
+                    if (record.get("content_hash") != content_hash or record.get("files") != before
+                            or browser_payload_spec(record["spec"]) != browser_payload_spec(spec)
+                            or (record["spec_key"] != digest(spec) and not self._valid_provenance(provenance, spec))):
+                        continue
+                    record = self.object(path.name)
+                except (OSError, ValueError, KeyError, TypeError, PolicyViolation):
+                    continue
+                if manifest_tree(source) != before:
+                    raise PolicyViolation("Browser installation changed while comparing published content")
+                reuse = "verified-content-v1"
+                self._register_browser(spec, record, consumer, run_id, provenance=provenance, reuse=reuse,
+                                       installation=self._installation_witness(spec, record, provenance))
+                return {**record, "hit": True, "requested_spec_key": digest(spec), "reuse": reuse}
         object_id = digest([content_hash, identifier("browser")])
         stage = self.root / "staging" / object_id
         stage.mkdir(mode=0o700)
@@ -216,7 +356,7 @@ class SharedCache:
             raise PolicyViolation("Browser installation changed while publishing; staging retained")
         record = {"version": 1, "object_id": object_id, "spec_key": digest(spec), "spec": spec,
                   "content_hash": content_hash, "files": before, "created": time.time(),
-                  "logical_bytes": sum(row[3] for row in before if row[1] == "file")}
+                  "logical_bytes": sum(row[3] for row in before if row[1] == "file"), "provenance": provenance}
         write_json(stage / "manifest.json", record)
         immutable(stage / "browser")
         (stage / "manifest.json").chmod(0o444)
@@ -224,10 +364,8 @@ class SharedCache:
         with file_lock(self.root / "locks/control.lock"):
             os.rename(stage, target)
             target.chmod(0o555)
-            self.reference(record, consumer, run_id)
-            write_json(self.root / "index" / f"browser-{record['spec_key']}.json",
-                       {"object_id": object_id, "touched": time.time()})
-        return {**record, "path": str(target / "browser"), "hit": False}
+            self._register_browser(spec, record, consumer, run_id, provenance=provenance)
+        return {**record, "path": str(target / "browser"), "hit": False, "requested_spec_key": digest(spec)}
 
     def binding(self, workspace, record):
         return {"version": 1, "workspace": str(workspace), "object_id": record["object_id"],

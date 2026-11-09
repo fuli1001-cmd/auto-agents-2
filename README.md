@@ -224,6 +224,13 @@ pytest 验证保存控制器生成的 JUnit 报告与用例清单；只跳过测
 
 共享内容为 npm/pip/Conda 下载缓存和经完整清单校验的不可变 Playwright 浏览器。匹配实际驱动、浏览器清单、平台及下载来源配置身份才命中；不同驱动可能需要不同构建。项目 Conda 前缀和 node_modules 仍独立，Conda 使用复制安装。Node 只把专用 `.local-browsers` 入口链接到只读制品；检查沙箱只能读取本项目登记对象，不能写对象或读取其它缓存元数据。安装器只取得相应下载区写权限。
 
+Browser source variants retain separate spec/provenance identities. Only a proved
+per-component official artifact URL match can skip a new-source download; unknown
+sources install independently first. Equal complete validated content can then
+reuse one immutable object without another payload copy. Unchanged legacy exact
+hits remain valid; missing legacy source evidence does not authorize cross-source
+reuse. Existing duplicate objects are retained, not cleaned up automatically.
+
 命中和实际内容身份写入环境/运行证据；浏览器身份变化要求自动复验，不能将旧审核当成新环境通过。部分安装、损坏对象和未确认清理记录保留。已经使用共享入口的项目不能仅关闭配置就宣称环境不变，应正常重新准备并复验；不要手删仍在使用的制品。
 
 共享清理独立于项目自动清理，本轮仅提供显式入口：

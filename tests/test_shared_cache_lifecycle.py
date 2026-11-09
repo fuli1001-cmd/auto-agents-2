@@ -42,7 +42,8 @@ m,e,w,c,_=fake_installer(Path(sys.argv[1]),Path(sys.argv[2]))
 asyncio.run(m.prepare_node_browsers(w,e))
 print(json.dumps({'calls':len(c),'object':str((w/'node_modules/playwright-core/.local-browsers').resolve())}))
 """
-    env = {**os.environ, "PYTHONPATH": str(tests), "PYTHONDONTWRITEBYTECODE": "1"}
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(tests.resolve().parent / "src"), str(tests)]),
+           "PYTHONDONTWRITEBYTECODE": "1"}
     processes = [subprocess.Popen([sys.executable, "-c", script, str(tmp_path / name), str(tmp_path / "shared")],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for name in ("one", "two")]
     outputs = []

@@ -9,8 +9,13 @@ import re
 import shutil
 from pathlib import Path
 
+from .browser_sources import (
+    download_configuration,
+    equivalent_plans,
+    official_plan,
+)
 from .errors import PolicyViolation, ToolchainUnavailable
-from .shared_cache import SharedCache, manifest_tree, read_json
+from .shared_cache import SharedCache, browser_payload_spec, manifest_tree, read_json
 from .util import async_file_lock, digest, write_json
 from .workspace import input_entry
 
@@ -39,8 +44,9 @@ def driver_identity(package, families, environment):
             "families": sorted(set(families)), "platform": platform.system(), "architecture": platform.machine(),
             "libc": list(platform.libc_ver()),
             "os_release": digest(Path("/etc/os-release").read_bytes()) if Path("/etc/os-release").is_file() else "",
-            "download_configuration_hash": digest({key: value for key, value in environment.items()
-                if key.startswith("PLAYWRIGHT_") and key.endswith("DOWNLOAD_HOST")})}
+            "download_configuration_hash": digest(download_configuration(environment)),
+            **({"host_platform_override": environment["PLAYWRIGHT_HOST_PLATFORM_OVERRIDE"]}
+               if environment.get("PLAYWRIGHT_HOST_PLATFORM_OVERRIDE") else {})}
 
 
 def expected_directories(output, root):
@@ -87,9 +93,11 @@ class BrowserCache:
         cache.initialize()
         run = manager.store.current(unfinished=True)
         rid = run["id"] if run else None
-        async with async_file_lock(cache.root / "locks" / ("browser-" + digest(spec) + ".lock")):
+        async with async_file_lock(cache.root / "locks" / ("browser-" + digest(browser_payload_spec(spec)) + ".lock")):
             record = cache.lookup(spec, consumer, rid)
             if record:
+                if driver_identity(package, families, environment) != spec:
+                    raise PolicyViolation("Browser driver changed while waiting for preparation")
                 self.event(rid, record)
                 return record
             with manager.resources.temporary("shared-browser-install") as scratch:
@@ -101,6 +109,19 @@ class BrowserCache:
                     raw = await manager._command([str(node), str(cli), "install", "--dry-run", *families],
                         workspace, variables, [scratch], reads, timeout=60, machine=True)
                     expected = expected_directories(raw, install)
+                    plan = official_plan(raw, install)
+                    provenance = {"version": 2, "spec_key": digest(spec),
+                                  "download_configuration_hash": spec["download_configuration_hash"],
+                                  "official_plan": plan}
+                    if plan:
+                        def compatible(candidate, evidence):
+                            return equivalent_plans(plan, evidence.get("official_plan"))
+                        record = cache.lookup(spec, consumer, rid, compatible=compatible, provenance=provenance)
+                        if record:
+                            if driver_identity(package, families, environment) != spec:
+                                raise PolicyViolation("Browser driver changed during source comparison")
+                            self.event(rid, record)
+                            return record
                     await manager._command([str(node), str(cli), "install", *families],
                         workspace, variables, [scratch], reads, timeout=900)
                     validate_installation(install, expected)
@@ -119,7 +140,8 @@ class BrowserCache:
                             raise PolicyViolation("The installed browser does not match this driver")
                     if driver_identity(package, families, environment) != spec:
                         raise PolicyViolation("Browser driver changed during installation")
-                    record = cache.publish(spec, install, consumer, rid)
+                    record = cache.publish(spec, install, consumer, rid, provenance=provenance)
+                    record["downloaded"] = True
                 except BaseException:
                     hold = manager.resources.hold(scratch, "unpublished browser installation", rid)
                     if rid:
@@ -132,7 +154,8 @@ class BrowserCache:
     def event(self, rid, record):
         self.manager.store.event(rid, "cache.browser", {"hit": record["hit"], "path": record["path"],
             "object_id": record["object_id"], "content_hash": record["content_hash"],
-            "spec_key": record["spec_key"], "driver_version": record["spec"]["driver_version"],
+            "spec_key": record["spec_key"], "requested_spec_key": record.get("requested_spec_key", record["spec_key"]),
+            "reuse": record.get("reuse"), "downloaded": record.get("downloaded", False), "driver_version": record["spec"]["driver_version"],
             "logical_bytes": record["logical_bytes"], "families": record["spec"]["families"]})
 
     async def node(self, workspace, environment):
@@ -198,5 +221,5 @@ class BrowserCache:
         record = self.cache.object(binding["object_id"])
         if any(binding[key] != record[key] for key in ("path", "content_hash", "spec_key")):
             raise PolicyViolation("Controller browser binding changed")
-        return {"spec_key": digest(spec), "available": record["spec_key"] == digest(spec),
+        return {"spec_key": digest(spec), "available": self.cache.matches(spec, record),
                 "content_hash": record["content_hash"], "driver_version": spec["driver_version"]}
