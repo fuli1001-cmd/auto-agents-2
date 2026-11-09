@@ -169,7 +169,7 @@ class ResearchDocumentLedger:
         from .research_acquisition import CURRENT
         commit(self.store, self.rid, self.dispatch,
                {CURRENT: {"id": record["id"], "key": self.key}, self.key: record},
-               {self.key: updated}, (kind, {"episode_id": record["id"], **outcome}))
+               {self.key: updated}, (kind, {**outcome, "run_id": self.rid, "episode_id": record["id"]}))
 
     def entry(self, record, url, *, allow_pending=False):
         entry = record["documents"].get(url, {"url": url, "outcomes": []})
@@ -196,7 +196,15 @@ class ResearchDocumentLedger:
                     raise StateConflict("Research document original claim/version provenance changed")
                 events = db.execute("SELECT data FROM events WHERE run_id=? AND kind=?",
                                     (self.rid, "research.document_finished"))
-                if not any(json.loads(row[0]).get("outcome") == outcome for row in events):
+                def matches(row):
+                    event = json.loads(row[0])
+                    if "outcome_hash" in event:
+                        return (event.get("run_id") == self.rid and outcome.get("episode_id") is not None
+                                and event.get("episode_id") == outcome["episode_id"]
+                                and event.get("operation_id") == outcome["id"]
+                                and event["outcome_hash"] == digest(outcome))
+                    return event.get("outcome") == outcome  # Existing events remain strictly bound, never rewritten.
+                if not any(matches(row) for row in events):
                     raise StateConflict("Research document outcome lost its original mandatory event")
             if outcome["status"] == "failed" and outcome.get("cause") != stable_cause(outcome["failure"]):
                 raise StateConflict("Research document stable-cause evidence changed")
@@ -213,7 +221,35 @@ class ResearchDocumentLedger:
                     result.update(denied_hosts(url, failure))
         return tuple(sorted(result))
 
-    def previous(self, url):
+    def excluded_addresses(self):
+        """Observed numeric routes of target refusals, never inferred old DNS."""
+        import ipaddress
+
+        record = self.record()
+        result = set()
+        for url in record["documents"]:
+            for outcome in self.entry(record, url, allow_pending=True)["outcomes"]:
+                failures = [row for row in self.failures(outcome)
+                            if row["classification"] in {"security", "permission"} and not shared_boundary(row)]
+                if not failures:
+                    continue
+                hosts = {urlsplit(url).hostname}
+                hosts.update(row["diagnostic"].get("hostname") for row in failures)
+                for host in hosts - {None}:
+                    try:
+                        result.add(str(ipaddress.ip_address(host)))
+                    except ValueError:
+                        pass
+                for binding in outcome.get("destination_bindings", []):
+                    for value in binding["addresses"]:
+                        try:
+                            result.add(str(ipaddress.ip_address(value)))
+                        except ValueError as error:
+                            raise StateConflict("Research document has invalid recorded numeric destination evidence") from error
+        return tuple(sorted(result))
+
+    def previous(self, url, *, document_authorizations=None):
+        from .research_destinations import matching_document_grant
         record = self.record()
         outcomes = self.entry(record, url)["outcomes"]
         successful = next((row for row in reversed(outcomes) if row["status"] == "retrieved"), None)
@@ -230,9 +266,11 @@ class ResearchDocumentLedger:
                     continue
                 if shared_boundary(fact) and self.consumed_shared_wait(record, url, row, fact):
                     continue
+                if matching_document_grant(fact, document_authorizations) is not None:
+                    continue
                 raise RetainedDocumentFailure(row, fact)
             if not failure["automatic"]:
-                return None  # Only the exact already-consumed shared observation remains.
+                return None  # Only an exact consumed shared or owner-granted local gap remains.
             count = self.cause_count(outcomes, failure)
             if not retryable(failure) or count >= MAX_CAUSE_ATTEMPTS:
                 raise RetainedDocumentFailure(last, failure)
@@ -271,7 +309,7 @@ class ResearchDocumentLedger:
         dispatches = [row for row in record["dispatches"] if row["stamp"] == self.dispatch]
         if not dispatches:
             raise StateConflict("Research document dispatch registration is absent")
-        pending = {"id": identifier("research-document"), "dispatch": self.dispatch,
+        pending = {"id": identifier("research-document"), "episode_id": record["id"], "dispatch": self.dispatch,
                    "candidate": dispatches[-1]["candidate"],
                    "sources": [row for row in candidate["sources"] if urldefrag(row["url"])[0] == url]}
         updated = copy.deepcopy(record)
@@ -286,6 +324,8 @@ class ResearchDocumentLedger:
         if entry.get("pending") != pending:
             raise StateConflict("Research document completion lost its original dispatch")
         outcome = {**pending, "observed_failures": getattr(error, "observed_failures", []) if error else []}
+        if getattr(error, "document_destination_bindings", None) is not None:
+            outcome["destination_bindings"] = copy.deepcopy(error.document_destination_bindings)
         if evidence is not None:
             retrieval = {key: value for key, value in evidence.items() if key != "excerpt"}
             text = validate_capture(self.store, self.rid, url, retrieval)
@@ -302,7 +342,8 @@ class ResearchDocumentLedger:
             outcome.update(status="cancelled", error_type=type(error).__name__)
         updated = copy.deepcopy(record)
         updated["documents"][url] = {"url": url, "outcomes": [*entry["outcomes"], outcome]}
-        self.save(record, updated, "research.document_finished", {"url": url, "outcome": outcome})
+        self.save(record, updated, "research.document_finished", {
+            "url": url, "operation_id": outcome["id"], "outcome_hash": digest(outcome), "outcome": outcome})
         if evidence is not None:
             return self.evidence(outcome, text, reused=False)
         return outcome

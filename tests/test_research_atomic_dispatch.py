@@ -165,7 +165,7 @@ async def test_proxy_connect_rechecks_route_after_last_await_and_closes_socket(m
 
 async def test_normal_source_403_does_not_fabricate_cleanup_failure(monkeypatch):
     monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport",
-                        lambda: httpx.MockTransport(lambda request: httpx.Response(403)))
+                        lambda **kwargs: httpx.MockTransport(lambda request: httpx.Response(403)))
     from auto_agents_2.errors import DocumentAcquisitionUnavailable
     with pytest.raises(DocumentAcquisitionUnavailable) as observed:
         await ResearchService(None).verify([SourceEvidence(url=URL, claim="Fixture")])
@@ -310,7 +310,7 @@ async def test_cancelled_refusal_blocks_normal_engine_restart_before_verify(tmp_
             closing.set()
             await asyncio.Future()
 
-    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda: Transport(respond))
+    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda **kwargs: Transport(respond))
     original_record = ResearchAcquisitionRecovery.observe
 
     def record(self, rid, document, error, *, control=False):

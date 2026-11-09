@@ -158,7 +158,7 @@ async def paused_engine(tmp_path, monkeypatch, *, normal=False, unknown=False):
                 await asyncio.Future()
             await super().aclose()
 
-    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda: Transport(respond))
+    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda **kwargs: Transport(respond))
     project = tmp_path / "project"
     project.mkdir()
     request = tmp_path / "request.md"
@@ -449,7 +449,7 @@ async def test_double_recording_failure_stops_normal_engine_without_network_retr
         pytest.fail("An unrecorded failure cannot become a retry question")
 
     monkeypatch.setattr(workflow.store, "_event", event)
-    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda: httpx.MockTransport(respond))
+    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda **kwargs: httpx.MockTransport(respond))
     if kind == "state":
         async def invalid_state(self, url, history):
             requests.append(url)

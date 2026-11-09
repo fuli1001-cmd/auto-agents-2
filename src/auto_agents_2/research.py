@@ -52,20 +52,31 @@ def public_url(value: str):
 class ResearchService:
     """Preserve the response and provenance; acquisition is not proof of a claim."""
 
-    def __init__(self, artifacts: ArtifactStore, *, resolver_config=None, excluded_hosts=()):
+    def __init__(self, artifacts: ArtifactStore, *, resolver_config=None, excluded_hosts=(),
+                 document_authorizations=None):
+        self.document_authorizations = document_authorizations
         self.artifacts = artifacts
         self.ledger = None
         self.excluded_hosts = tuple(excluded_hosts)
         self.resolver_config = resolver_config.model_copy(deep=True) if resolver_config is not None else None
 
     def admit(self, url, *, network=True):
-        public_url(url)
-        excluded = self.excluded_hosts
+        policy = None
+        if self.document_authorizations is None:
+            public_url(url)
+        else:
+            from .research_destinations import ResearchDestinationPolicy
+            policy = ResearchDestinationPolicy(url, self.document_authorizations)
+        from .research_replacement import admit_url
+        if self.excluded_hosts:
+            admit_url(url, self.excluded_hosts)  # Original explicit replacement contract remains named-only.
         if network and self.ledger is not None:
-            excluded = (*excluded, *self.ledger.excluded_hosts())
-        if excluded:
-            from .research_replacement import admit_url
-            admit_url(url, excluded)
+            denied = self.ledger.excluded_hosts()
+            if denied:
+                if policy is None:
+                    admit_url(url, denied)
+                else:
+                    policy.admit_recorded_denials(denied, self.ledger.excluded_addresses())
 
     async def capture(self, url: str) -> dict:
         history = current_capture.get()
@@ -76,6 +87,9 @@ class ResearchService:
         try:
             return await self._capture(url, history)
         except BaseException as error:
+            if history.destination_policy is not None:
+                import copy
+                error.document_destination_bindings = copy.deepcopy(history.destination_policy.connections)
             if history.failures:
                 error.observed_failures = history.observations()
             raise
@@ -87,28 +101,36 @@ class ResearchService:
         self.admit(url)
         label = f"Research document download for {urlsplit(url).hostname}"
         resolver = None
+        from .research_destinations import ResearchDestinationPolicy, source_cookie_jar
+        policy = (ResearchDestinationPolicy(url, self.document_authorizations)
+                  if self.document_authorizations is not None else None)
+        history.destination_policy = policy
+        transport_options = {"destination_policy": policy} if policy is not None else {}
+        client_options = {"cookies": source_cookie_jar()} if policy is not None else {}
         batch = current_batch.get()
         if batch is not None and batch.resolver_policy_hash != (
                 digest(self.resolver_config.model_dump()) if self.resolver_config is not None else None):
             raise AA2Error("Research resolver policy changed within its frozen batch")
         if self.resolver_config is None:
-            transport = PublicHTTPTransport()
+            transport = PublicHTTPTransport(**transport_options)
         else:
             from .network_proxy import ProxySettings
             from .research_dns import HTTPSJSONResolver
             proxy_settings = batch.proxy_settings if batch is not None else ProxySettings()
             resolver = HTTPSJSONResolver(self.resolver_config, proxy_settings)
-            transport = PublicHTTPTransport(resolver=resolver, proxy_settings=proxy_settings)
+            transport = PublicHTTPTransport(resolver=resolver, proxy_settings=proxy_settings, **transport_options)
         final = attempted_url = url
         observed_error = None
         prior_requests = []
         try:
             async with acquisition_deadline(ACQUISITION_TIMEOUT, label, source_url=url), httpx.AsyncClient(
                     transport=transport, trust_env=False, follow_redirects=False, timeout=30,
-                    headers={"Accept-Encoding": "gzip, deflate"}) as client:
+                    headers={"Accept-Encoding": "gzip, deflate"}, **client_options) as client:
                 try:
                     for _ in range(6):
                         self.admit(final)
+                        if policy is not None:
+                            policy.before_request(final)
                         attempted_url = history.request_url = final
                         async with client.stream("GET", final) as response:
                             prior_requests.append({"url_hash": digest(attempted_url),
@@ -167,8 +189,11 @@ class ResearchService:
         from .collection import run_collection
         result = await run_collection(self.artifacts.store.root, {"action": "research", "source": url,
             "final_url": final, "mime": mime, "raw": base64.b64encode(data).decode()}, timeout=ACQUISITION_TIMEOUT)
-        if resolver is not None:
-            return {**result, "network_policy": resolver.evidence()}
+        if resolver is not None or policy is not None:
+            evidence = resolver.evidence() if resolver is not None else {}
+            if policy is not None:
+                evidence["destination_policy"] = policy.evidence()
+            return {**result, "network_policy": evidence}
         return result
 
     async def verify(self, sources: list[SourceEvidence]) -> list[dict]:
@@ -206,7 +231,7 @@ class ResearchService:
                 try:
                     self.admit(url, network=False)
                     if self.ledger is not None:
-                        previous = self.ledger.previous(url)
+                        previous = self.ledger.previous(url, document_authorizations=self.document_authorizations)
                         if previous is not None:
                             return previous
                     while True:

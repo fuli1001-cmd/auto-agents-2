@@ -62,7 +62,8 @@ def public_address(value: str) -> bool:
 
 
 class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
-    def __init__(self, proxy=None, *, resolver=None):
+    def __init__(self, proxy=None, *, resolver=None, destination_policy=None):
+        self.destination_policy = destination_policy
         self.backend = httpcore.AnyIOBackend()
         self.proxy, self.resolver = proxy, resolver
 
@@ -71,6 +72,8 @@ class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
             batch = current_batch.get()
             if batch is not None:
                 batch.before_connect(self.proxy, host, port)
+            if self.destination_policy is not None:
+                self.destination_policy.before_connect(host, port)
             resolution = None
             if self.resolver is None:
                 addresses = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
@@ -78,7 +81,10 @@ class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
             else:
                 resolution = await self.resolver.resolve(host, port, timeout)
                 targets = list(dict.fromkeys(resolution.addresses))
-            if not targets or not all(public_address(ip) for ip in targets):
+            if self.destination_policy is not None:
+                self.destination_policy.admit_addresses(host, port, targets,
+                    resolution.source if resolution is not None else "system")
+            elif not targets or not all(public_address(ip) for ip in targets):
                 raise ResearchDestinationRejected(host, empty_resolution=not targets)
             observed = []
 
@@ -127,6 +133,8 @@ class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
                         stream = await self.backend.connect_tcp(ip, port, timeout, local_address, socket_options)
                     if resolution is not None:
                         self.resolver.connected(resolution, ip, port)
+                    if self.destination_policy is not None:
+                        self.destination_policy.connected(host, port, ip)
                     return stream
                 except (OSError, httpcore.ConnectError, httpcore.ConnectTimeout, httpcore.ProxyError) as exc:
                     if batch is None and isinstance(exc, httpcore.ProxyError):
@@ -151,9 +159,9 @@ class PublicNetworkBackend(httpcore.AsyncNetworkBackend):
 
 
 class PublicConnectionPool(httpcore.AsyncConnectionPool):
-    def __init__(self, trust_env=True, *, resolver=None, proxy_settings=None):
-        super().__init__(network_backend=PublicNetworkBackend(resolver=resolver))
-        self.resolver = resolver
+    def __init__(self, trust_env=True, *, resolver=None, proxy_settings=None, destination_policy=None):
+        super().__init__(network_backend=PublicNetworkBackend(resolver=resolver, destination_policy=destination_policy))
+        self.resolver, self.destination_policy = resolver, destination_policy
         batch = current_batch.get()
         self.proxy_settings = (proxy_settings if proxy_settings is not None else
                                batch.proxy_settings if batch is not None and trust_env else ProxySettings(trust_env))
@@ -162,7 +170,8 @@ class PublicConnectionPool(httpcore.AsyncConnectionPool):
         proxy = self.proxy_settings.for_origin(origin)
         if proxy is None:
             return super().create_connection(origin)
-        return httpcore.AsyncHTTPConnection(origin=origin, network_backend=PublicNetworkBackend(proxy, resolver=self.resolver))
+        return httpcore.AsyncHTTPConnection(origin=origin, network_backend=PublicNetworkBackend(
+            proxy, resolver=self.resolver, destination_policy=self.destination_policy))
 
 
 class ResponseStream(httpx.AsyncByteStream):
@@ -180,10 +189,14 @@ class ResponseStream(httpx.AsyncByteStream):
 
 
 class PublicHTTPTransport(httpx.AsyncBaseTransport):
-    def __init__(self, *, trust_env=True, resolver=None, proxy_settings=None):
-        self.pool = PublicConnectionPool(trust_env, resolver=resolver, proxy_settings=proxy_settings)
+    def __init__(self, *, trust_env=True, resolver=None, proxy_settings=None, destination_policy=None):
+        self.destination_policy = destination_policy
+        self.pool = PublicConnectionPool(trust_env, resolver=resolver, proxy_settings=proxy_settings,
+                                         destination_policy=destination_policy)
 
     async def handle_async_request(self, request):
+        if self.destination_policy is not None:
+            self.destination_policy.before_request(str(request.url), headers=request.headers)
         previous_trace = request.extensions.get("trace")
 
         async def trace(name, info):

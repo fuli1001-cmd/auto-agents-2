@@ -271,6 +271,27 @@ class ResearchDestinationRejected(AA2Error):
                          "itself is non-public.")
 
 
+class ResearchDocumentAuthorizationRequired(ResearchDestinationRejected):
+    """A local pre-dispatch document scope gap, never a remote refusal."""
+    code = "RESEARCH_DOCUMENT_AUTHORIZATION_REQUIRED"
+
+    def __init__(self, hostname, origin, path, reason):
+        self.evidence = {"operation": "research_document_authorization", "hostname": hostname,
+                         "resolution": "authorization_required", "scope": {"origin": origin, "path": path},
+                         "local_admission_only": True, "target_request_executed": False,
+                         "target_connection_dispatched": False,
+                         "policy_version": 1, "reason": reason}
+        AA2Error.__init__(self, f"Research document needs explicit owner authorization for {origin}{path}")
+
+
+class ResearchDestinationPolicyRejected(ResearchDestinationRejected):
+    """A document-only destination refusal, not a claim that all private IPs are unsafe."""
+    def __init__(self, hostname, reason):
+        self.evidence = {"operation": "research_document_destination", "hostname": hostname,
+                         "resolution": reason}
+        AA2Error.__init__(self, f"Research document destination {hostname} was rejected ({reason})")
+
+
 class ResearchURLRejected(ResearchDestinationRejected):
     """A per-source URL admission refusal, without inventing a DNS observation."""
     def __init__(self, hostname, reason, message):

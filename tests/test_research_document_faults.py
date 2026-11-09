@@ -49,7 +49,7 @@ async def test_document_http_errors_are_safe_prerequisites(tmp_path, monkeypatch
         if kind == "ReadError":
             return httpx.Response(200, stream=stream)
         raise getattr(httpx, kind)("EXAMPLE_ERROR_SECRET https://EXAMPLE_USER:EXAMPLE_PASSWORD@private.invalid/?token=EXAMPLE_TOKEN")
-    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda: httpx.MockTransport(respond))
+    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda **kwargs: httpx.MockTransport(respond))
     collected = []
     async def forbidden(*args, **kwargs):
         collected.append(True)
@@ -142,7 +142,7 @@ async def test_redirect_failure_binds_the_failed_hop_without_path_query(tmp_path
     def respond(request):
         requests.append(str(request.url))
         return httpx.Response(302, headers={"location": destination}) if len(requests) == 1 else httpx.Response(403)
-    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda: httpx.MockTransport(respond))
+    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda **kwargs: httpx.MockTransport(respond))
     with pytest.raises(DocumentAcquisitionUnavailable) as observed:
         await ResearchService(SimpleNamespace(store=SimpleNamespace(root=tmp_path))).capture(URL)
     assert requests == [URL, destination]
@@ -164,7 +164,7 @@ async def test_redirect_close_failure_binds_old_attempt_not_unvalidated_location
         requests.append(str(request.url))
         assert len(requests) == 1, "Unvalidated Location must never be requested"
         return httpx.Response(302, headers={"location": "https://EXAMPLE_USER:EXAMPLE_PASSWORD@unvisited.example/EXAMPLE_PATH"}, stream=BrokenClose())
-    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda: httpx.MockTransport(respond))
+    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda **kwargs: httpx.MockTransport(respond))
     with pytest.raises(DocumentAcquisitionUnavailable) as observed:
         await ResearchService(SimpleNamespace(store=SimpleNamespace(root=tmp_path))).capture(URL)
     assert requests == [URL]
@@ -185,7 +185,7 @@ async def test_non_document_http_boundaries_keep_their_original_semantics(tmp_pa
     error = errors[kind]
     def respond(request):
         raise error
-    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda: httpx.MockTransport(respond))
+    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda **kwargs: httpx.MockTransport(respond))
     with pytest.raises(type(error)) as observed:
         await ResearchService(SimpleNamespace(store=SimpleNamespace(root=tmp_path))).capture(URL)
     assert observed.value is error
@@ -198,7 +198,7 @@ async def test_non_document_http_boundaries_keep_their_original_semantics(tmp_pa
 @pytest.mark.parametrize("kind", ["http", "parser"])
 async def test_collection_failures_stay_outside_the_http_boundary(tmp_path, monkeypatch, kind):
     error = httpx.ConnectError("EXAMPLE_COLLECTION_BUG") if kind == "http" else ValueError("EXAMPLE_PARSER_BUG")
-    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda: httpx.MockTransport(lambda request: httpx.Response(200, text="complete document")))
+    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda **kwargs: httpx.MockTransport(lambda request: httpx.Response(200, text="complete document")))
     async def collect(*args, **kwargs):
         raise error
     monkeypatch.setattr("auto_agents_2.collection.run_collection", collect)
@@ -208,7 +208,7 @@ async def test_collection_failures_stay_outside_the_http_boundary(tmp_path, monk
 
 
 async def test_successful_capture_still_publishes_a_real_collected_artifact(tmp_path, monkeypatch):
-    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda: httpx.MockTransport(
+    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda **kwargs: httpx.MockTransport(
         lambda request: httpx.Response(200, text="<h1>Fixture</h1><p>complete document</p>", headers={"content-type": "text/html"})))
     artifacts = ArtifactStore(Store(tmp_path).root)
     result = await ResearchService(artifacts).capture(URL)
@@ -250,7 +250,7 @@ async def test_document_http_failure_keeps_original_claims_and_agent_blocks_nece
         if kind == "403":
             return httpx.Response(403, text="EXAMPLE_DENIED_BODY")
         raise (httpx.ConnectError if kind == "connect" else httpx.ReadError)("EXAMPLE_DOCUMENT_ERROR")
-    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda: httpx.MockTransport(respond))
+    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda **kwargs: httpx.MockTransport(respond))
     project = tmp_path / "project"
     project.mkdir()
     request = tmp_path / "request.md"

@@ -19,6 +19,7 @@ class CaptureHistory:
     def __init__(self, url):
         self.source_url = self.request_url = url
         self.failures = []
+        self.destination_policy = None
 
     def record(self, failure):
         previous = next((row for row in self.failures

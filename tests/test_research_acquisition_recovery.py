@@ -465,7 +465,7 @@ def cleanup_transport(monkeypatch, status, mode):
     from auto_agents_2.http_body import acquisition_deadline
     monkeypatch.setattr("auto_agents_2.research.acquisition_deadline",
         lambda timeout, label, *, source_url: acquisition_deadline(.01, label, source_url=source_url))
-    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda: httpx.MockTransport(
+    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda **kwargs: httpx.MockTransport(
         lambda request: httpx.Response(status, stream=CleanupStream(mode))))
 
 

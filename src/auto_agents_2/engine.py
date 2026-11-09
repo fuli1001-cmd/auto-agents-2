@@ -2048,6 +2048,7 @@ class WorkflowEngine:
                 if (document.sources or self.authority.author_scope(rid, stage)["correction"]
                         or PlanReviewRecovery(self).requires_research_review(rid) or acquisition.active(rid)):
                     service = self._research_service(rid)
+                    service.document_authorizations = tuple(self.config.load().research_document_authorizations)
                     dispatch = acquisition.dispatch_binding(rid, document)
                     service.ledger = acquisition.begin(rid, document, dispatch)
                     try:

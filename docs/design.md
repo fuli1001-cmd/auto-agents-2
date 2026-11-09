@@ -1040,6 +1040,84 @@ also keeps its existing no-progress stop. Missing necessary information creates 
 explicit blocked prerequisite listing the actual attempts and gap. Human prototype
 approval and all downstream gates remain unchanged.
 
+### Provider-research document destinations
+
+Only the provider_research controller explicitly enables the document destination
+policy. Shared public_address, ordinary transports, requirement acquisition,
+prototype/design acquisition, resolver bootstrap, system DNS and configured proxy
+routing retain their existing defaults. No direct-route, proxy or resolver fallback
+is added after a refusal. Existing denial ledgers and prerequisite bindings remain
+in force across this policy change.
+
+A new ordinary named HTTPS document may use a non-public unicast address on port
+443 when the controller cannot distinguish real addressing from proxy Fake-IP
+mapping. This includes ordinary private, ULA, CGNAT and benchmark addresses. All
+returned addresses are checked at every new actual connection and the admitted
+number is pinned while retaining the original Host, SNI and strict certificate
+validation. Classification stays unknown: neither an IP range nor a successful
+TLS handshake proves Fake-IP. This adds no proxy-mapping discovery API or claim of
+DNSSEC. Configured trusted HTTPS DNS JSON answers pass through the same document
+policy; the resolver's own HTTPS endpoint/bootstrap still use the original strict
+public transport. Existing numeric proxy CONNECT and configured proxy authentication
+are unchanged. Proxy credentials are never sent to the document origin.
+
+research_document_authorizations is an optional controller/project configuration
+list, default empty and omitted from serialization. Each entry contains only origin
+and path_prefix. For example, origin https://docs.intra.example:8443 with path_prefix
+/reference authorizes that exact document subtree. Origins normalize scheme,
+hostname and effective port; paths match full segments, not reference2 or a host
+suffix. Dot traversal, encoded separators and double-encoded traversal cannot
+enlarge the grant. Agent proposals do not create or change these grants. As with
+research_resolver, these acquisition settings do not enter Native logical
+invocation identity.
+
+A new RESEARCH_DOCUMENT_AUTHORIZATION_REQUIRED observation is a typed local
+origin/path gap raised before that document request/connection is dispatched. It is
+not a remote access refusal and does not blacklist the host or block an authorized
+same-origin sibling. Only a current matching owner document grant can satisfy that
+exact new scope; unrelated configuration edits or grants cannot. Missing undispatched
+proof, old non_public/TLS/HTTP/platform refusals and special destinations cannot be
+released this way. The original fact and all cause budgets remain. If the author
+has already returned blocked, one exact verified scope/grant receipt may request
+normal same-episode Replan, with existing permit/archive/CAS and independent review.
+The blocked candidate/questions are retained; the receipt and pending transition
+commit atomically and the same scope cannot produce an author loop.
+
+Literal private HTTPS documents are supported with an exact origin/path grant and
+strict TLS using the literal IP identity, which requires a valid certificate IP SAN.
+They are not excluded merely for lacking a DNS name. Unauthorised literal management
+targets do not enter the unknown-mapping fallback, and special addresses remain
+non-overridable. Private HTTP, additional private ports, explicitly internal
+hostnames, literal private targets and cross-origin redirects to private destinations need a matching
+explicit document grant. Public ordinary HTTP(S) document custom ports such as
+8080/8443 remain compatible. HTTPS-to-HTTP downgrade is forbidden even with a grant.
+Each redirect is independently admitted; a changed origin/port cannot inherit
+another origin's private authorization. Same-origin ordinary document redirects
+remain supported, including checks when an existing socket is reused.
+
+Loopback (including mapped/translated forms), localhost, link-local/metadata,
+unspecified, multicast, limited broadcast and other reserved/special destinations
+remain blocked before any dial. Known metadata names/addresses and mixed answers
+containing a special address are blocked; an ordinary document grant cannot override
+these classes. A finite named sensitive-service port set also cannot use document
+fallback: SSH/Telnet, LDAP/SMB, Docker, RDP/VNC, and the standard MSSQL, Oracle,
+MySQL, PostgreSQL, Redis, Elasticsearch, Memcached and MongoDB ports. This is a
+document-scope refusal, not an assertion that an attack occurred. A future specific
+management-service task needs its own target/action/permission assessment.
+
+Source requests do not store or send cookies and do not use automatic origin
+login, saved authentication or client certificates. The policy transport also
+rejects origin Cookie/Authorization/Proxy-Authorization headers before DNS. Obvious authentication/
+management endpoints and mutating action queries are not document fallbacks.
+These finite checks are not proof that arbitrary GET requests have no side
+effects; acquisition still stays within the requested document task. Successful
+responses retain destination policy and numeric-connection evidence as collection
+provenance, never as approval of claims or a permit to retry an old denied target.
+New document_finished events bind run, original episode, operation and a hash of
+the complete outcome before normal event redaction. Cache verification checks that
+full hash, not redacted policy labels. Existing events without this hash retain the
+original strict full-outcome path; no old event, dispatch or HTTP status is fabricated.
+
 ## 公共研究资料的可选 HTTPS DNS JSON
 
 `research_resolver` 缺省或 null 时沿用原 system resolver，序列化不新增该默认键。显式 `https_json` 配置只进入 Workflow 的 research 采集服务，不进入 provider transport、需求 URL 下载或 PreviewProxy，不改原生配置或整机 DNS。该采集路由不进入 Native invocation identity；实际配置修订和内容变更仍遵循原有身份规则。已经保存的采集证据不回填新策略，只有新成功采集附带非秘密 policy/hash 和 TCP 绑定记录，不将其当作 DNSSEC 或资料声明正确性的证明。

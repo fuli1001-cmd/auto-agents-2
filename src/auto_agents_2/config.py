@@ -124,6 +124,18 @@ class ResearchResolverConfig(Record):
         return self
 
 
+class ResearchDocumentAuthorization(Record):
+    origin: str
+    path_prefix: str
+
+    @model_validator(mode="after")
+    def validate_document_scope(self):
+        from .research_destinations import normalize_document_authorization
+        normalized = normalize_document_authorization(self.model_dump())
+        self.origin, self.path_prefix = normalized["origin"], normalized["path_prefix"]
+        return self
+
+
 class Config(Record):
     schema_version: Literal[1] = 1
     config_revision: int = 0
@@ -143,12 +155,15 @@ class Config(Record):
     sensitive_paths: list[str] = []
     prompting: dict[str, str] = {"model_adaptation": "auto"}
     research_resolver: ResearchResolverConfig | None = None
+    research_document_authorizations: list[ResearchDocumentAuthorization] = []
 
     @model_serializer(mode="wrap")
     def omit_disabled_research_resolver(self, handler):
         value = handler(self)
         if self.research_resolver is None:
             value.pop("research_resolver", None)
+        if not self.research_document_authorizations:
+            value.pop("research_document_authorizations", None)
         return value
 
     @model_validator(mode="before")

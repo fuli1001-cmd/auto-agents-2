@@ -139,7 +139,7 @@ async def test_real_collection_and_review_context_receive_body_but_not_verified_
     def respond(request):
         requests.append(str(request.url))
         return httpx.Response(200, headers={"content-type": "text/html"}, content=html(data))
-    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda: httpx.MockTransport(respond))
+    monkeypatch.setattr("auto_agents_2.research.PublicHTTPTransport", lambda **kwargs: httpx.MockTransport(respond))
     artifacts = ArtifactStore(Store(tmp_path).root)
     rows = await ResearchService(artifacts).verify([SourceEvidence(url=URL, claim="Unknown submissions need reconciliation", version="candidate")])
     assert requests == [URL]

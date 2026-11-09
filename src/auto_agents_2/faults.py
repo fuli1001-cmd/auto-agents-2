@@ -15,6 +15,7 @@ from .errors import (
     PolicyViolation,
     ProviderError,
     ResearchDestinationRejected,
+    ResearchDocumentAuthorizationRequired,
     ResearchResolverUnavailable,
     ResearchSourceExcluded,
     RetryableInfrastructureError,
@@ -105,6 +106,11 @@ def known_exception(error, phase):
         return HumanIntervention(HumanRequirement(kind="external_input", reason=str(error),
             action="保留旧来源的拒绝和问题，提供不接触被排除主机的独立替代资料。",
             resume_condition="新来源重新采集、逐项核对原需求并独立审核；不得重试被排除来源。",
+            evidence=error.evidence), reason_code=error.code, phase=phase)
+    if isinstance(error, ResearchDocumentAuthorizationRequired):
+        return HumanIntervention(HumanRequirement(kind="authorization", reason=str(error),
+            action="Provide an owner-approved document grant matching the exact origin and document path, or choose independent authorized evidence.",
+            resume_condition="Only the matching local scope gap is resolved. Remote refusals, special destinations, existing budgets and independent review remain unchanged.",
             evidence=error.evidence), reason_code=error.code, phase=phase)
     if isinstance(error, ResearchDestinationRejected):
         return HumanIntervention(HumanRequirement(kind="external_input", reason=str(error),

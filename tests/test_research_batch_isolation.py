@@ -284,7 +284,7 @@ async def test_each_http_deadline_starts_after_queue_not_at_batch_start(monkeypa
         return acquisition_deadline(.03, label, source_url=source_url)
 
     monkeypatch.setattr(research, "acquisition_deadline", deadline)
-    monkeypatch.setattr(research, "PublicHTTPTransport", lambda: httpx.MockTransport(
+    monkeypatch.setattr(research, "PublicHTTPTransport", lambda **kwargs: httpx.MockTransport(
         lambda request: httpx.Response(200, stream=StalledBody())))
     before = asyncio.all_tasks()
     with pytest.raises(DocumentAcquisitionTimeout) as observed:
@@ -316,7 +316,7 @@ async def test_slow_refusal_cleanup_keeps_strong_boundary_and_sibling_success(mo
 
     monkeypatch.setattr(research, "acquisition_deadline",
         lambda timeout, label, *, source_url: acquisition_deadline(.03, label, source_url=source_url))
-    monkeypatch.setattr(research, "PublicHTTPTransport", lambda: httpx.MockTransport(respond))
+    monkeypatch.setattr(research, "PublicHTTPTransport", lambda **kwargs: httpx.MockTransport(respond))
     monkeypatch.setattr("auto_agents_2.collection.run_collection", collect)
     artifacts = SimpleNamespace(store=SimpleNamespace(root=None))
     with pytest.raises(DocumentAcquisitionUnavailable) as observed:

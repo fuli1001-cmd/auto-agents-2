@@ -12,6 +12,7 @@ from .errors import (
     DocumentAcquisitionUnavailable,
     InvalidStructuredResponse,
     ResearchDestinationRejected,
+    ResearchDocumentAuthorizationRequired,
     ResearchResolverUnavailable,
     http_failure_classification,
 )
@@ -25,7 +26,8 @@ CONTEXT = "controller_research_acquisition"
 WAIT = "recovery/research-acquisition/prerequisite-wait"
 HARD = "recovery/research-acquisition/recording-error"
 CONSUMED = "recovery/research-acquisition/prerequisite-consumed/"
-SOURCE_CODES = {"DOCUMENT_ACQUISITION_UNAVAILABLE", "RESEARCH_RESOLVER_UNAVAILABLE", "RESEARCH_DESTINATION_REJECTED"}
+SOURCE_CODES = {"DOCUMENT_ACQUISITION_UNAVAILABLE", "RESEARCH_RESOLVER_UNAVAILABLE",
+                "RESEARCH_DESTINATION_REJECTED", "RESEARCH_DOCUMENT_AUTHORIZATION_REQUIRED"}
 
 
 class ClaimDisposition(Record):
@@ -56,7 +58,9 @@ def failure_observation(error):
                                ResearchResolverUnavailable, ResearchDestinationRejected))
     evidence = dict(error.evidence) if known else {}
     category, automatic = "unknown", False
-    if isinstance(error, ResearchDestinationRejected):
+    if isinstance(error, ResearchDocumentAuthorizationRequired):
+        category = "authorization_required"
+    elif isinstance(error, ResearchDestinationRejected):
         category = "security"
     elif isinstance(error, DocumentAcquisitionTimeout):
         category, automatic = "network", True
@@ -143,7 +147,8 @@ class ResearchAcquisitionRecovery:
             facts = ([row["failure"]] if row["status"] == "failed" else []) + row.get("observed_failures", [])
             selected = []
             for failure in facts:
-                if (failure["code"] in SOURCE_CODES and not failure["automatic"]
+                if (failure["code"] in SOURCE_CODES and failure["code"] != ResearchDocumentAuthorizationRequired.code
+                        and not failure["automatic"]
                         and failure not in selected and (not shared_only or shared_boundary(failure))):
                     selected.append(failure)
             if selected:
@@ -354,6 +359,81 @@ class ResearchAcquisitionRecovery:
                ("research.acquisition_dispatched", {"episode_id": record["id"], "dispatch": stamp}))
         return ResearchDocumentLedger(self, rid, key, stamp)
 
+    def document_grant_matches(self, rid, record):
+        """Only new typed, owned, unexecuted local scope gaps can match a grant."""
+        from .research_destinations import matching_document_grant
+        config = getattr(self.engine, "config", None)
+        grants = config.load().research_document_authorizations if config is not None else ()
+        if not grants:
+            return []
+        with self.store.connect() as db:
+            events = [json.loads(row[0]) for row in db.execute(
+                "SELECT data FROM events WHERE run_id=? AND kind=?", (rid, "research.acquisition_failed"))]
+        result = {}
+        for ordinal, attempt in enumerate(record["attempts"], 1):
+            if attempt.get("document_protocol") != 1:
+                continue
+            stamp = attempt.get("dispatch")
+            registered = next((row for row in record.get("dispatches", []) if row["stamp"] == stamp), None)
+            if not registered or stamp.get("run_id") != rid or stamp.get("binding") != record["binding"]:
+                continue
+            original = self.engine.artifacts.json(registered["candidate"])
+            if (digest(original) != stamp.get("candidate_hash") or original.get("sources") != attempt["sources"]
+                    or stamp.get("sources_hash") != digest(attempt["sources"])):
+                raise StateConflict("Local document scope lost its original registered candidate")
+            for index, row in enumerate(attempt["observations"]):
+                facts = ([row["failure"]] if row["status"] == "failed" else []) + row.get("observed_failures", [])
+                for fact in facts:
+                    grant = matching_document_grant(fact, grants)
+                    if grant is None:
+                        continue
+                    if not any(event.get("episode_id") == record["id"] and event.get("attempt") == ordinal
+                            and len(event.get("observations", [])) > index
+                            and event["observations"][index] == row for event in events):
+                        raise StateConflict("Local document scope lost its original mandatory observation")
+                    identity = digest([record["id"], fact["code"], fact["diagnostic"]["scope"]])
+                    result[identity] = {"id": identity, "attempt_id": attempt["id"], "source_url": row["url"],
+                        "scope": fact["diagnostic"]["scope"], "fact_hash": digest(fact), "grant": grant}
+        return list(result.values())
+
+    def validate_document_grant_receipts(self, rid, record):
+        receipts = record.get("document_grant_rechecks", [])
+        with self.store.connect() as db:
+            events = [json.loads(row[0]) for row in db.execute(
+                "SELECT data FROM events WHERE run_id=? AND kind=?", (rid, "research.document_grant_reentry"))]
+        own = [row for row in events if row.get("episode_id") == record["id"]]
+        if (len({row["id"] for row in receipts}) != len(receipts) or len(own) != len(receipts)
+                or any(not any(event.get("run_id") == rid and event.get("receipt") == receipt
+                               and event.get("receipt_hash") == digest(receipt) for event in own)
+                       for receipt in receipts)):
+            raise StateConflict("Local document grant re-entry lost its exact atomic receipt")
+
+    def reenter_document_grant(self, rid, record):
+        candidate = self.store.get(rid, "candidate/provider_research", {}).get("document")
+        if (not candidate or candidate.get("acquisition_resolution", {}).get("status") != "blocked"
+                or self.store.get(rid, "provider_research") is not None):
+            return
+        self.validate(rid, candidate)
+        used = {row["id"] for row in record.get("document_grant_rechecks", [])}
+        matched = next((row for row in self.document_grant_matches(rid, record) if row["id"] not in used), None)
+        if matched is None:
+            return
+        from .research_documents import commit
+        generation = self.store.run(rid)["data"].get("replans", 0)
+        receipt = {**matched, "run_id": rid, "episode_id": record["id"], "generation": generation,
+                   "candidate_hash": digest(candidate)}
+        reason = "An exact owner document grant resolves the recorded unexecuted local scope " + digest(matched["scope"])
+        updated = {**record, "document_grant_rechecks": [*record.get("document_grant_rechecks", []), receipt],
+                   "pending": {"generation": generation, "candidate_hash": digest(candidate), "reason": reason}}
+        # This is only a current-state CAS binding, never a registered HTTP dispatch.
+        stamp = self.dispatch_binding(rid, candidate)
+        commit(self.store, rid, stamp, {CURRENT: {"id": record["id"], "key": PREFIX + record["id"]},
+               PREFIX + record["id"]: record}, {PREFIX + record["id"]: updated},
+               ("research.document_grant_reentry", {"run_id": rid, "episode_id": record["id"],
+                                                   "receipt": receipt, "receipt_hash": digest(receipt)}))
+        from .engine import Replan
+        raise Replan("provider_research", reason)
+
     def context(self, rid):
         record = self.active(rid)
         if not record:
@@ -367,6 +447,8 @@ class ResearchAcquisitionRecovery:
                      "requirement_assessment": replacement["request"]["requirement_assessment"]}}
                    if replacement else {}),
                 "original_candidate": record["original_candidate"], "attempts": record["attempts"],
+                "document_grant_updates": self.document_grant_matches(rid, record),
+                "document_grant_rechecks": record.get("document_grant_rechecks", []),
                 **({"documents": record["documents"], "retry_policy": {
                     "max_attempts_per_file_cause": 3,
                     "scope": "Same run and URL, across restarts, replans and providers; 404/410 never retried",
@@ -376,7 +458,10 @@ class ResearchAcquisitionRecovery:
                 "instruction": "The source failed, not necessarily the fact or the project. Assess necessity against "
                     "the original requirements. Successful document receipts are reusable collection, not approved facts. "
                     "Never retry a terminal/exhausted URL, reword it, change fragments, or use aliases/routes of a denied "
-                    "host to bypass its boundary. For a target refusal choose an independent authority; a shared "
+                    "host to bypass its boundary. A new typed local authorization gap is not a remote refusal: "
+                    "document_grant_updates contains only verified owner grants for its unexecuted scope, and normal "
+                    "re-entry may reassess that document without clearing any other refusal or cause budget. Never "
+                    "create or widen a grant. For a target refusal choose an independent authority; a shared "
                     "resolver/proxy boundary needs its prerequisite resolved. Return a full research replacement and exactly one acquisition_resolution "
                     "row per original claim. Choose first-party authoritative alternatives with equivalent coverage; "
                     "a new URL or download is not proof. Controller collection or validated same-run reuse and independent review are mandatory even for "
@@ -394,6 +479,7 @@ class ResearchAcquisitionRecovery:
         record = self.active(rid)
         if not record:
             return
+        self.validate_document_grant_receipts(rid, record)
         pending = record.get("pending", {})
         generation = self.store.run(rid)["data"].get("replans", 0)
         if pending and pending["generation"] == generation:
@@ -415,6 +501,7 @@ class ResearchAcquisitionRecovery:
                     "status": "gate_reset", "stage": "provider_research"}
                     or permit.get("outcome_hash") != digest(permit["outcome"])):
                 raise StateConflict("Research acquisition re-entry has no completed gate-reset receipt")
+        self.reenter_document_grant(rid, record)
 
     def recording_failed(self, rid, document, original, error):
         raw = document.model_dump() if hasattr(document, "model_dump") else document

@@ -312,7 +312,7 @@ async def test_redirect_to_excluded_source_stops_before_second_request(tmp_path,
     def respond(request):
         calls.append(str(request.url))
         return httpx.Response(302, headers={"location": OLD})
-    monkeypatch.setattr(research, "PublicHTTPTransport", lambda: httpx.MockTransport(respond))
+    monkeypatch.setattr(research, "PublicHTTPTransport", lambda **kwargs: httpx.MockTransport(respond))
     service = ResearchService(case.artifacts, excluded_hosts=guard_network(case.store, case.rid))
     with pytest.raises(ResearchSourceExcluded) as observed:
         await service.capture(NEW)
@@ -334,7 +334,7 @@ async def test_independent_new_source_still_uses_normal_controller_capture(tmp_p
         assert root == case.store.root and request["source"] == NEW
         return {"artifact": case.artifacts.put("Independent original facts", "research"),
                 "excerpt": "Independent original facts", "url": NEW, "final_url": request["final_url"]}
-    monkeypatch.setattr(research, "PublicHTTPTransport", lambda: httpx.MockTransport(respond))
+    monkeypatch.setattr(research, "PublicHTTPTransport", lambda **kwargs: httpx.MockTransport(respond))
     monkeypatch.setattr("auto_agents_2.collection.run_collection", collect)
     evidence = await ResearchService(case.artifacts, excluded_hosts=guard_network(case.store, case.rid)).verify(
         [SourceEvidence.model_validate(row) for row in case.value["proposal"]["sources"]])
