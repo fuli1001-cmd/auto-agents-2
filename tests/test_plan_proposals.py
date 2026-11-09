@@ -16,6 +16,7 @@ from auto_agents_2.plan_proposals import (
     PROTOCOL_KEY, AmendEvidence, EvidencePlanPatch, PreserveEvidence, materialize, protocol,
 )
 from auto_agents_2.plan_revision import PlanPatch, apply_patch
+from auto_agents_2.state_codec import checkpoint_query_db
 from auto_agents_2.util import digest
 from auto_agents_2.workspace import tree_hash
 
@@ -339,8 +340,7 @@ async def test_protocol_upgrade_preserves_old_human_question_and_permit(tmp_path
         _, permit = await authorize(workflow, rid, work, plan, record, force_decision=True)
         prior = workflow.store.get(rid, permit)
     with workflow.store.connect() as db:
-        snapshots = {r["key"]: json.loads(r["data"]) for r in db.execute(
-            "SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'recovery/request-snapshots/%'", (rid,))}
+        snapshots = {r["key"]: json.loads(r["data"]) for r in checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'recovery/request-snapshots/%'", (rid,), wire_index=1)}
     assert snapshots and all(PROTOCOL_KEY not in s["request"]["evidence"] for s in snapshots.values())
     monkeypatch.setattr(proposals, "decision_protocol", current)
     if state == "pending":

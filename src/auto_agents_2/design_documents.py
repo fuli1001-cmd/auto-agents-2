@@ -8,6 +8,7 @@ from .faults import StateConflict
 from .models import Change, DocumentResult, Record, ReviewResult, UserQuestion
 from .readview import public_files
 from .source_history import SourceHistory
+from .state_codec import checkpoint_query_db
 from .util import digest
 from .workspace import (
     apply_prepared,
@@ -99,8 +100,7 @@ class DesignDocuments:
             "invocation/design/review": store.get(rid, "invocation/design/review", {})}),
             ("design/review-receipt", {"candidate/design": store.get(rid, "design/review-receipt", {})})]
         with store.connect() as db:
-            histories = db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE "
-                                   "'recovery/gate-history/%' ORDER BY rowid DESC", (rid,)).fetchall()
+            histories = checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'recovery/gate-history/%' ORDER BY rowid DESC", (rid,), wire_index=1).fetchall()
         candidates.extend((key, json.loads(raw).get("checkpoints", {})) for key, raw in histories)
         records = []
         for origin, checkpoints in candidates:

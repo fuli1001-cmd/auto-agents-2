@@ -317,7 +317,7 @@ async def test_controller_pause_preserves_interrupted_batch_and_final_gc(tmp_pat
         assert workflow.artifacts.read(saved["current"])
         with workflow.store.connect() as db:
             keys = [r[0] for r in db.execute(
-                "SELECT key FROM checkpoints WHERE run_id=? AND key LIKE 'verification/batches/%'", (rid,))]
+                "SELECT key FROM checkpoint_records WHERE run_id=? AND key LIKE 'verification/batches/%'", (rid,))]
         assert len(keys) == 1
         batch = workflow.store.get(rid, keys[0])
         assert batch["phase"] == "interrupted"

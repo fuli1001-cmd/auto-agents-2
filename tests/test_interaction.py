@@ -90,19 +90,17 @@ async def test_multiline_editing_paste_and_ctrl_d_submission():
             await asyncio.gather(task, return_exceptions=True)
 
 
-def test_store_migrates_old_questions_without_losing_text(tmp_path):
+def test_old_questions_without_meta_are_rejected_without_losing_original_text(tmp_path):
+    # Retired: implicit no-meta question-column upgrade and subsequent superseding.
+    from test_recovery_contracts import assert_legacy_format_rejected
     root = tmp_path / ".aa2"
     root.mkdir()
     with sqlite3.connect(root / "state.sqlite") as db:
         db.execute("CREATE TABLE questions(id TEXT PRIMARY KEY,run_id TEXT,key TEXT,prompt TEXT,artifact_hash TEXT,answer TEXT,created REAL, UNIQUE(run_id,key,artifact_hash))")
         db.execute("INSERT INTO questions VALUES('q','r','prototype','old question','v1',NULL,1)")
-    store = Store(tmp_path)
-    store.migrate()
-    assert store.pending("r")[0]["prompt"] == "old question"
-    store.supersede_questions("r", "prototype")
-    assert store.pending("r") == []
-    with store.connect() as db:
-        assert db.execute("SELECT prompt,answer FROM questions WHERE id='q'").fetchone()[:] == ("old question", None)
+    before = assert_legacy_format_rejected(tmp_path, no_meta=True)
+    assert before["rows"]["questions"] == [(1, "q", "r", "prototype", "old question", "v1", None, 1.0)]
+    assert set(before["rows"]) == {"questions"}
 
 
 def test_external_choice_validation_version_binding_and_multiline_file(tmp_path):

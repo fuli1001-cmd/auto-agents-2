@@ -18,6 +18,7 @@ from auto_agents_2.output_limit_recovery import (
 )
 from auto_agents_2.providers import invocation_identity
 from auto_agents_2.resources import ResourceManager
+from auto_agents_2.state_codec import checkpoint_query_db
 from auto_agents_2.store import Store
 from auto_agents_2.util import digest, file_lock
 from auto_agents_2.workspace import apply_prepared, prepare_changes, tree_hash
@@ -363,7 +364,7 @@ async def test_correction_prompt_and_prepared_postimage_are_bound(tmp_path, monk
     monkeypatch.setattr(f.router.compiler, "compile", capture)
     assert await invoke(f) == RESULT
     with f.store.connect() as db:
-        rows = db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'materials/%/output-limit/%'", (f.rid,)).fetchall()
+        rows = checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'materials/%/output-limit/%'", (f.rid,), wire_index=1).fetchall()
     assert len(rows) == len(prompts) == 1
     assert json.loads(rows[0][1])["prompt_hash"] == digest(prompts[0] + "\n\n" + CORRECTION)
     patch = prepare_changes(f.project, RESULT.changes, ["app.py"])

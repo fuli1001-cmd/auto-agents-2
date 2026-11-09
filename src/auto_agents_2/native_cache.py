@@ -16,6 +16,7 @@ from pathlib import Path
 from .artifacts import ArtifactStore
 from .errors import AA2Error
 from .safe_files import directory_fd
+from .state_codec import checkpoint_query_db
 from .util import digest, file_lock, now
 
 VERSION = 1
@@ -203,7 +204,7 @@ def seal(manager, handle, process):
 
 
 def _checkpoint(db, run_id, key):
-    row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (run_id, key)).fetchone()
+    row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (run_id, key), wire_index=0).fetchone()
     return json.loads(row[0]) if row else None
 
 

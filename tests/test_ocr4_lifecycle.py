@@ -24,6 +24,8 @@ from auto_agents_2.providers import ProviderRouter
 from auto_agents_2.recovery import Diagnosis
 from auto_agents_2.resources import ResourceManager
 from auto_agents_2.sandbox import SandboxRunner, process_start
+from auto_agents_2.state_codec import delete_query_db, update_wire_db
+from auto_agents_2.state_connection import StateConnection
 from auto_agents_2.store import Store
 from auto_agents_2.task_batch import collect_batch
 from auto_agents_2.util import digest, write_json
@@ -51,7 +53,7 @@ def test_held_diagnostic_root_retains_its_whole_dependency_closure(tmp_path):
     store.checkpoint(old, 'child', child)
     store.update(old, status='SUCCEEDED')
     with store.connect() as db:
-        db.execute('DELETE FROM checkpoints WHERE run_id=?', (old,))
+        delete_query_db(db, 'SELECT slot_order FROM checkpoint_records WHERE run_id=?', (old,))
     current = store.admit('current', {})['id']
     parent = artifacts.put({'child': child}, 'dependency_log')
     resources = ResourceManager(store, Cleanup())
@@ -343,7 +345,7 @@ def test_corrupt_receipt_protects_resources_without_blocking_other_delivery_clea
     store.checkpoint(old, 'delivery/receipt', receipt)
     if receipt == 'malformed-json':
         with store.connect() as db:
-            db.execute("UPDATE checkpoints SET data='broken-json' WHERE run_id=? AND key='delivery/receipt'", (old,))
+            update_wire_db(db, old, 'delivery/receipt', 'broken-json')
     store.update(old, status='SUCCEEDED', cleanup_pending=True)
     resources.recover_disposable()
     resources.finish_pending()
@@ -352,36 +354,45 @@ def test_corrupt_receipt_protects_resources_without_blocking_other_delivery_clea
     assert store.admit('new', {})['id'] != old
 
 
-def test_partial_schema_v5_is_repaired_without_changing_budgets(tmp_path):
-    store = Store(tmp_path)
-    rid = store.admit('fixture', {})['id']
-    store.checkpoint(rid, 'rounds/T', {'round': 4})
-    with store.connect() as db:
+def test_old_partial_v5_schema_is_rejected_without_changing_budgets_or_missing_columns(tmp_path):
+    # Retired: runtime v5 question-column repair, answer-after-upgrade and backup.
+    from test_recovery_contracts import (
+        assert_legacy_format_rejected,
+        frozen_legacy_state,
+        frozen_state_snapshot,
+    )
+    state, rid = frozen_legacy_state(tmp_path, "5", {"rounds/T": json.dumps({"round": 4})})
+    with sqlite3.connect(state / "state.sqlite") as db:
         db.execute('ALTER TABLE questions DROP COLUMN interaction')
         db.execute('ALTER TABLE questions DROP COLUMN superseded')
-        db.execute("UPDATE meta SET value='5' WHERE key='schema_version'")
-    reopened = Store(tmp_path)
-    with reopened.connect() as db:
-        assert 'interaction' not in {row[1] for row in db.execute('PRAGMA table_info(questions)')}
-    reopened.migrate()
-    assert reopened.get(rid, 'rounds/T') == {'round': 4}
-    question = reopened.request(rid, 'test', 'Prompt', '')
-    reopened.answer(question['id'], 'answer', '')
-    with reopened.connect() as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == '8'
-    assert (reopened.root / 'state-v5.backup.sqlite').exists()
+        db.execute("INSERT INTO questions VALUES(?,?,?,?,?,?,?)", ("q", rid, "test", "Prompt", "", "answer", 1))
+    before = assert_legacy_format_rejected(tmp_path)
+    raw = {row[2]: row[3] for row in before["rows"]["checkpoints"]}
+    assert json.loads(raw["rounds/T"]) == {"round": 4}
+    assert before["rows"]["questions"][0][4:7] == ("Prompt", "", "answer")
+    with sqlite3.connect(state / "state.sqlite") as db:
+        columns = {row[1] for row in db.execute('PRAGMA table_info(questions)')}
+    assert 'interaction' not in columns and 'superseded' not in columns
+    assert before["rows"]["meta"] == [(1, "schema_version", "5")]
+    assert frozen_state_snapshot(tmp_path) == before
 
 
 def test_failed_initial_schema_is_never_published_and_can_retry(tmp_path, monkeypatch):
     original = sqlite3.connect
-    class Fault(sqlite3.Connection):
+    reached = []
+    class Fault(StateConnection):
         def execute(self, sql, *args):
             if 'CREATE TABLE IF NOT EXISTS questions' in sql:
+                reached.append(True)
                 raise sqlite3.OperationalError('fixture schema fault')
             return super().execute(sql, *args)
-    monkeypatch.setattr(sqlite3, 'connect', lambda *a, **k: original(*a, **k, factory=Fault))
-    with pytest.raises(sqlite3.OperationalError):
+    def fault_connect(*args, **kwargs):
+        kwargs['factory'] = Fault
+        return original(*args, **kwargs)
+    monkeypatch.setattr(sqlite3, 'connect', fault_connect)
+    with pytest.raises(sqlite3.OperationalError, match='fixture schema fault'):
         Store(tmp_path)
+    assert reached == [True]
     assert not (tmp_path / '.aa2/state.sqlite').exists()
     monkeypatch.setattr(sqlite3, 'connect', original)
     store = Store(tmp_path)

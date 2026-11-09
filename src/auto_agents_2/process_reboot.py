@@ -24,6 +24,7 @@ from xml.etree import ElementTree
 from .errors import AA2Error, BusyProject, PolicyViolation
 from .process_records import require_identity, valid_path
 from .sandbox import process_start
+from .state_connection import MIGRATION_INTENT, require_format
 from .util import digest
 
 LIMIT = 256 * 1024
@@ -209,25 +210,29 @@ def request_data(raw, expected_hash, project):
     return request
 
 
+def database_identities(state_fd):
+    """Reject unsafe main/sidecar metadata before opening SQLite."""
+    result = {}
+    for name in ('state.sqlite', 'state.sqlite-wal', 'state.sqlite-shm', 'state.sqlite-journal'):
+        try:
+            info = os.stat(name, dir_fd=state_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if name == 'state.sqlite':
+                raise
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            reject('unsafe state database or sidecar')
+        result[name] = (info.st_dev, info.st_ino)
+    return result
+
+
 def events(state_fd, request):
     # Opening via the pinned directory keeps SQLite's DB/WAL lookup in that
     # directory. No Store construction, migration, run update or permit write.
-    def database_identities():
-        result = {}
-        for name in ('state.sqlite', 'state.sqlite-wal', 'state.sqlite-shm', 'state.sqlite-journal'):
-            try:
-                info = os.stat(name, dir_fd=state_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                if name == 'state.sqlite':
-                    raise
-                continue
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
-                reject('unsafe state database or sidecar')
-            result[name] = (info.st_dev, info.st_ino)
-        return result
-    before = database_identities()
+    before = database_identities(state_fd)
     with closing(sqlite3.connect(f'file:/proc/self/fd/{state_fd}/state.sqlite?mode=ro', uri=True)) as db:
         db.row_factory = sqlite3.Row
+        require_format(db)
         db.execute('PRAGMA query_only=ON')
         db.execute('BEGIN')
         encoding = db.execute('PRAGMA encoding').fetchone()[0]
@@ -245,7 +250,7 @@ def events(state_fd, request):
             if row is not None and (not isinstance(row['data'], str) or len(row['data'].encode('utf-8')) > LIMIT):
                 reject('original provider event exceeds its evidence size bound')
             rows.append(row)
-        after = database_identities()
+        after = database_identities(state_fd)
         if any(after.get(name) != identity for name, identity in before.items()):
             reject('database files changed while reading provider evidence')
     if any(row is None for row in rows):
@@ -349,13 +354,30 @@ def reconcile(project, request_path, expected_hash, *, confirm_local_host_reboot
     receipt_path = None
     try:
         with ExitStack() as stack:
-            request_fd = stack.enter_context(directory(request_path.parent))
-            request_raw, _ = owned_file(request_fd, request_path.name)
-            request = request_data(request_raw, expected_hash, project)
+            # Preserve the operator's no-link/PolicyViolation boundary before any
+            # format lookup, request read, O_CREAT lock or archive side effect.
             state = project / '.aa2'
             state_fd = stack.enter_context(directory(state))
             if os.fstat(state_fd).st_uid != os.getuid():
                 reject('state directory is not owned by the operator')
+            try:
+                os.stat(MIGRATION_INTENT, dir_fd=state_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                reject('offline state migration is incomplete')
+            database = database_identities(state_fd)['state.sqlite']
+            with closing(sqlite3.connect(f'file:/proc/self/fd/{state_fd}/state.sqlite?mode=ro', uri=True)) as db:
+                try:
+                    require_format(db)
+                except AA2Error as exc:
+                    raise PolicyViolation(str(exc)) from exc
+            current_database = os.stat('state.sqlite', dir_fd=state_fd, follow_symlinks=False)
+            if (current_database.st_dev, current_database.st_ino) != database:
+                reject('state database changed during format validation')
+            request_fd = stack.enter_context(directory(request_path.parent))
+            request_raw, _ = owned_file(request_fd, request_path.name)
+            request = request_data(request_raw, expected_hash, project)
             lock = os.open('controller.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=state_fd)
             stack.callback(os.close, lock)
             info = os.fstat(lock)

@@ -23,6 +23,7 @@ from .providers import ProviderRouter
 from .requirements import validate_requirements_text
 from .resources import ResourceManager
 from .sandbox import SandboxRunner
+from .state_connection import check_project_format, migration_gate
 from .store import Store
 from .toolchain import ToolchainPreflight
 from .util import file_lock, write_json
@@ -36,6 +37,7 @@ Project = Annotated[Path, typer.Option("--project", "-p", help="目标项目目�
 
 
 def configuration(project: Path):
+    check_project_format(project)
     if not ConfigStore(project).path.is_file():
         raise AA2Error(f"项目尚未初始化。执行：aa2 init --project {shlex.quote(str(project))}")
     return ConfigStore(project)
@@ -51,6 +53,7 @@ def init(project: Project = Path("."), from_config: Annotated[Path | None, typer
     """初始化项目配置，不安装目标依赖或改动全局设置。"""
     try:
         project = project.resolve()
+        check_project_format(project, allow_missing=True)
         project.mkdir(parents=True, exist_ok=True)
         config = ConfigStore(project)
         if from_config:
@@ -479,11 +482,14 @@ def gc(project: Project = Path("."), dry_run: bool = False, shared: bool = False
 @provider_app.command("use")
 def provider_use(name: str, project: Project = Path(".")):
     try:
-        config = configuration(project)
-        config.resolve("clarify", name)
-        old, new = config.activate(name)
-        Store(project).event(None, "provider.changed", {"from": old, "to": new, "reason": "explicit"})
-        console.print(f"active_provider = {new}")
+        check_project_format(project)
+        with migration_gate(project.resolve() / ".aa2"):
+            config = configuration(project)
+            config.resolve("clarify", name)
+            store = Store(project)  # format is checked before activate changes configuration
+            old, new = config.activate(name)
+            store.event(None, "provider.changed", {"from": old, "to": new, "reason": "explicit"})
+            console.print(f"active_provider = {new}")
     except AA2Error as exc:
         fail(exc)
 

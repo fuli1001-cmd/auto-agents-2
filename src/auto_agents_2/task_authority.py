@@ -11,6 +11,7 @@ from .errors import AA2Error
 from .faults import StateConflict
 from .recovery import FailureRecord
 from .recovery_identity import action_contract, binding_matches_failure
+from .state_codec import checkpoint_query_db
 from .util import digest
 from .workspace import tree_hash
 
@@ -52,6 +53,7 @@ def _historical_consumption(engine, rid, key, permit, previous, revision):
     if permit.get("resolution_diagnosis") or permit.get("recording") or permit.get("authority_patch"):
         return False  # Specialized recovery keeps its own reconciliation path.
     from types import SimpleNamespace
+
     from .recovery_policy import RecoveryPolicy
     from .workflow_authority import WorkflowAuthority
 
@@ -171,7 +173,7 @@ def plan_reassessment(engine, rid, task, saved):
     if digest(plan) != after["plan"] or task.model_dump() not in plan.get("tasks", []):
         return None
     with store.connect() as db:
-        rows = db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'plan_revision/journal/%'", (rid,)).fetchall()
+        rows = checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'plan_revision/journal/%'", (rid,), wire_index=1).fetchall()
     journals = [(name, json.loads(raw)) for name, raw in rows]
     matches = [(name, value) for name, value in journals if value.get("phase") == "activated"
                and value.get("plan") == plan and digest(value.get("previous_plan")) == before["plan"]]

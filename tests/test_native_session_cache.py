@@ -17,6 +17,7 @@ from auto_agents_2.models import DocumentResult
 from auto_agents_2.providers import ProviderRouter
 from auto_agents_2.resources import ResourceManager
 from auto_agents_2.sandbox import SandboxRunner
+from auto_agents_2.state_codec import delete_query_db
 from auto_agents_2.transports import CodexTransport
 from auto_agents_2.util import digest, file_lock, write_json
 
@@ -114,7 +115,7 @@ def test_unfinished_unknown_or_referenced_cache_is_retained(tmp_path, case):
         scene.store.checkpoint(scene.rid, "session/fixture", "different-native-session")
     elif case == "missing-infra":
         with scene.store.connect() as db:
-            db.execute("DELETE FROM checkpoints WHERE run_id=? AND key='infra/fixture/codex'", (scene.rid,))
+            delete_query_db(db, "SELECT slot_order FROM checkpoint_records WHERE run_id=? AND key='infra/fixture/codex'", (scene.rid,))
     elif case == "hold":
         scene.manager.hold(scene.root, "explicit recovery consumer", scene.rid)
     elif case == "pin":

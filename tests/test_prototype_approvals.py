@@ -245,8 +245,7 @@ async def test_approval_recovery_is_restartable_and_atomic(tmp_path, monkeypatch
         error = asyncio.CancelledError
     else:
         with workflow.store.connect() as db:
-            db.execute("CREATE TRIGGER fail_recovery BEFORE DELETE ON checkpoints "
-                       "WHEN OLD.key='replanning/pending' BEGIN SELECT RAISE(ABORT,'injected'); END")
+            db.execute("CREATE TRIGGER fail_recovery BEFORE DELETE ON checkpoint_records WHEN OLD.key='replanning/pending' BEGIN SELECT RAISE(ABORT,'injected'); END")
         error = sqlite3.IntegrityError
     with pytest.raises(error):
         await workflow._refresh_legacy_approval_context(rid)

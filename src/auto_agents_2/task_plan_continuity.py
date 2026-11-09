@@ -6,7 +6,6 @@ check source/environment identities and cumulative budgets remain immutable.
 from __future__ import annotations
 
 import hashlib
-import json
 import subprocess
 from pathlib import PurePosixPath
 
@@ -20,6 +19,66 @@ from .util import digest
 from .workspace import git, git_environment, path_allowed, source_manifest, source_manifest_hash
 
 REASSESSMENT = {"authority_reassessment": "Retain accepted implementation; obtain a current grounded verdict."}
+
+
+_MISSING = object()
+
+
+class _StateReadFailure(Exception):
+    """Keep storage failures outside the proof validator's business fallbacks."""
+
+    def __init__(self, error):
+        self.error, self.traceback = error, error.__traceback__
+
+
+def _read(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except Exception as error:
+        raise _StateReadFailure(error) from error
+
+
+class _CheckpointView:
+    """One transaction's exact-key decoded values, never a full-run snapshot."""
+
+    def __init__(self, store, db, rid):
+        self.store, self.db, self.rid = store, db, rid
+        self.reader = _read(store.checkpoint_reader, db)
+        self.write_epoch = db.write_epoch
+        self.values = {}
+        self.journal_keys = None
+
+    def _check(self):
+        _read(self.reader.check)
+        if self.write_epoch != self.db.write_epoch:
+            self.values.clear()
+            self.journal_keys = None
+            self.write_epoch = self.db.write_epoch
+
+    def get(self, key, default=None):
+        self._check()
+        if key not in self.values:
+            if key == "authority/submitted-answers":
+                value = _read(self.store._submitted_answers, self.db, self.rid)
+            else:
+                value = _read(self.store.checkpoint_get_db, self.db, self.rid, key,
+                              _MISSING, reader=self.reader)
+            self.values[key] = value
+        value = self.values[key]
+        return default if value is _MISSING else value
+
+    def __getitem__(self, key):
+        value = self.get(key, _MISSING)
+        if value is _MISSING:
+            raise KeyError(key)
+        return value
+
+    def journal_items(self):
+        self._check()
+        if self.journal_keys is None:
+            self.journal_keys = _read(lambda: list(self.store.checkpoint_keys_db(
+                self.db, self.rid, prefix="plan_revision/journal/", order="rowid", reader=self.reader)))
+        return [(key, self[key]) for key in self.journal_keys]
 
 
 def retained_record(saved):
@@ -45,7 +104,10 @@ def _receipt(rows, raw, scope):
     return record
 
 
-def _chain(rows, identity, task, saved, basis):
+def _chain(rows, identity, task, saved, basis, *, journal_items=None):
+    if journal_items is None:
+        def journal_items():
+            return ((key, value) for key, value in rows.items() if key.startswith("plan_revision/journal/"))
     current = rows["plan"]
     tasks = {t.id: t for t in PlanResult.model_validate(current).tasks}
     if task.model_dump() != tasks[task.id].model_dump():
@@ -58,9 +120,8 @@ def _chain(rows, identity, task, saved, basis):
     revision = rows["plan_revision/current"]["revision"]
     links = []
     while identity != before and revision > 1:
-        matches = [(key, j) for key, j in rows.items() if key.startswith("plan_revision/journal/")
-                   and j.get("phase") == "activated" and j.get("base_revision") == revision - 1
-                   and j.get("plan") == current]
+        matches = [(key, j) for key, j in journal_items() if j.get("phase") == "activated"
+                   and j.get("base_revision") == revision - 1 and j.get("plan") == current]
         if len(matches) != 1:
             return None
         key, journal = matches[0]
@@ -86,9 +147,13 @@ def _chain(rows, identity, task, saved, basis):
             if journal.get("version") != 3:
                 return None
             from .contract_corrections import validate_contract_journal
-            historical = {**rows, "plan": previous,
-                          "plan_revision/current": {"version": 1, "revision": revision - 1}}
-            validate_contract_journal(journal, historical.get)
+            def historical_get(key, default=None):
+                if key == "plan":
+                    return previous
+                if key == "plan_revision/current":
+                    return {"version": 1, "revision": revision - 1}
+                return rows.get(key, default)
+            validate_contract_journal(journal, historical_get)
         old = PlanResult.model_validate(previous)
         patch = PlanPatch.model_validate(journal["patch"])
         candidate, affected, reopen = apply_patch(old, patch, revision - 1, set(patch.failure_ids),
@@ -170,6 +235,15 @@ def _source(engine, work, task, saved, closure, tasks):
 
 def retain(engine, rid, task, saved, work):
     """Prove and publish acceptance continuity under one state transaction."""
+    try:
+        return _retain(engine, rid, task, saved, work)
+    except _StateReadFailure as failure:
+        error, traceback = failure.error, failure.traceback
+    # Restore outside the handler and after Store.connect has rolled back.
+    raise error.with_traceback(traceback)
+
+
+def _retain(engine, rid, task, saved, work):
     if work is None:
         return None
     original = retained_record(saved) or saved
@@ -178,8 +252,7 @@ def retain(engine, rid, task, saved, work):
     store, key = engine.store, "develop/task/" + task.id
     with store.connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        rows = {row["key"]: json.loads(row["data"]) for row in db.execute(
-            "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
+        rows = _CheckpointView(store, db, rid)
         if rows.get(key) != saved:
             raise StateConflict("Task acceptance changed during continuity assessment")
         state = rows.get("task_state/" + task.id, {})
@@ -187,7 +260,6 @@ def retain(engine, rid, task, saved, work):
         if (state.get("implementation") != "accepted" or state.get("evidence") != ("stale" if restoring else "valid")
                 or not restoring and task.id not in rows.get("develop/done", [])):
             return None
-        rows["authority/submitted-answers"] = store._submitted_answers(db, rid)
         identity = source_identity(rows.get)
         try:
             record = _receipt(rows, original.get("review", {}), "implementation")
@@ -197,7 +269,7 @@ def retain(engine, rid, task, saved, work):
                     or basis["observations"].get("checks") != digest(original.get("checks"))
                     or basis["observations"].get("implementation") != digest(original.get("implementation"))):
                 return None
-            chain = _chain(rows, identity, task, original, basis)
+            chain = _chain(rows, identity, task, original, basis, journal_items=rows.journal_items)
             if chain is None:
                 return None
             links, closure, tasks = chain

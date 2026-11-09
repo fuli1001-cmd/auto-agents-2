@@ -12,6 +12,7 @@ from auto_agents_2.output_limit_recovery import (
     HANDOFF_HISTORY, HANDOFF_KEY, KEY, Incident, authorize_handoff, normal_recovery_handoff,
     prepare_handoff, raw_hash,
 )
+from auto_agents_2.state_codec import checkpoint_query_db, delete_query_db, update_wire_db
 from auto_agents_2.util import digest, file_lock
 from test_output_limit_recovery import OP, admit, invoke, setup
 
@@ -137,16 +138,16 @@ def test_unfinished_previous_repair_cannot_be_consumed_as_a_new_permission(tmp_p
     key, cycle_key = closed_repair(f)
     with f.store.connect() as db:
         if state == "missing":
-            db.execute("DELETE FROM checkpoints WHERE run_id=? AND key=?", (f.rid, key))
+            delete_query_db(db, 'SELECT slot_order FROM checkpoint_records WHERE run_id=? AND key=?', (f.rid, key))
         else:
             target = cycle_key if state == "cycle-open" else key
-            value = json.loads(db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (f.rid, target)).fetchone()[0])
+            value = json.loads(checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (f.rid, target), wire_index=0).fetchone()[0])
             if state in {"started", "cycle-open"}:
                 value["phase"] = "started"
             else:
                 value["outcome"]["tasks"] = {}
                 value["outcome_hash"] = digest(value["outcome"])
-            db.execute("UPDATE checkpoints SET data=? WHERE run_id=? AND key=?", (json.dumps(value), f.rid, target))
+            update_wire_db(db, f.rid, target, json.dumps(value))
     with pytest.raises(AA2Error, match="(repair permission|recovery cycle)"):
         request_file(f)
     assert f.store.get(f.rid, HANDOFF_KEY) is None
@@ -166,11 +167,11 @@ def test_handoff_and_archive_are_immutable_and_damaged_receipts_fail_closed(tmp_
                     {**receipt, "archive_sha256": "0" * 64},
                     {**receipt, "request": {**receipt["request"], "incident_request_hash": "0" * 64}}]:
         with f.store.connect() as db:
-            db.execute("UPDATE checkpoints SET data=? WHERE run_id=? AND key=?", (json.dumps(altered), f.rid, HANDOFF_KEY))
+            update_wire_db(db, f.rid, HANDOFF_KEY, json.dumps(altered))
         with pytest.raises(AA2Error, match="handoff is missing or changed"):
             f.incident.active()
     with f.store.connect() as db:
-        db.execute("UPDATE checkpoints SET data=? WHERE run_id=? AND key=?", (json.dumps(receipt), f.rid, HANDOFF_KEY))
+        update_wire_db(db, f.rid, HANDOFF_KEY, json.dumps(receipt))
     assert not f.incident.active()
     other = json.loads(path.read_text())
     other["authorization_reference"] = "a different authorization"
@@ -193,7 +194,7 @@ def test_cas_failure_does_not_publish_half_a_handoff(tmp_path, monkeypatch):
         publish(f, path, sha)
     assert f.store.get(f.rid, HANDOFF_KEY) is None
     with f.store.connect() as db:
-        assert db.execute("SELECT COUNT(*) FROM checkpoints WHERE run_id=? AND key LIKE ?",
+        assert db.execute('SELECT COUNT(*) FROM checkpoint_records WHERE run_id=? AND key LIKE ?',
                           (f.rid, HANDOFF_HISTORY + "%")).fetchone()[0] == 0
     assert f.incident.active()
 

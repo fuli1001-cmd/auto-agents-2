@@ -5,6 +5,7 @@ the copy. Approvals, budgets, source, refs, proposals and check outcomes are pre
 Use the normal aa2 CLI on the printed project to perform the real recovery run.
 """
 import argparse
+import copy
 import fcntl
 import fnmatch
 import hashlib
@@ -18,6 +19,8 @@ from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 
 from auto_agents_2.safe_files import directory_fd, regular_exists
+from auto_agents_2.state_codec import checkpoint_query_db, update_wire_db
+from auto_agents_2.store import Store
 from auto_agents_2.util import digest
 from auto_agents_2.workspace import git, input_entry, isolated_git, tree_hash
 
@@ -271,7 +274,8 @@ def _snapshot(source, destination):
                 else:
                     value[first] = relocate(value[first], external=external)
 
-        with closing(sqlite3.connect(state / "state.sqlite")) as db, db:
+        with Store(destination).connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             current = db.execute("SELECT id,status FROM runs ORDER BY created DESC LIMIT 1").fetchone()
             if not current or current[1] not in {"PAUSED", "WAITING_USER"}:
                 raise ValueError("Snapshot requires a paused or waiting run")
@@ -298,18 +302,26 @@ def _snapshot(source, destination):
                     continue
                 for rowid, path in db.execute(f'SELECT rowid,path FROM "{table}"').fetchall():
                     db.execute(f'UPDATE "{table}" SET path=? WHERE rowid=?', (relocate(path), rowid))
-            for owner, key, data in db.execute("SELECT run_id,key,data FROM checkpoints").fetchall():
+            rows = checkpoint_query_db(db,
+                "SELECT run_id,key,slot_order AS data FROM checkpoint_records ORDER BY slot_order",
+                wire_index=2).fetchall()
+            for owner, key, data in rows:
                 value = json.loads(data)
                 fields = [p for pattern, paths in CHECKPOINT_PATHS.items() if fnmatch.fnmatchcase(key, pattern) for p in paths]
                 if not fields:
                     continue
+                previous = copy.deepcopy(value)
                 for pattern in fields:
                     field(value, pattern)
                 new_key = key
                 if key.startswith("recovery/task-baselines/") and isinstance(value, dict) and "workspace" in value and "base" in value:
                     new_key = key.rsplit("/", 1)[0] + "/" + digest([value["workspace"], value["base"]])[:16]
-                db.execute("UPDATE checkpoints SET key=?,data=? WHERE run_id=? AND key=?",
-                           (new_key, json.dumps(value, ensure_ascii=False), owner, key))
+                if value != previous:
+                    update_wire_db(db, owner, key, json.dumps(value, ensure_ascii=False))
+                if new_key != key:
+                    # Only the root key changes. Keep slot_order and fail on a
+                    # unique-key collision so the complete transaction rolls back.
+                    db.execute("UPDATE checkpoint_records SET key=? WHERE run_id=? AND key=?", (new_key, owner, key))
         # Immutable artifact bodies, events, questions, receipts and run provenance
         # are never rewritten. Only an instance locator is mutable here.
         for path in (state / "recovery").glob("build_*/journal.json"):

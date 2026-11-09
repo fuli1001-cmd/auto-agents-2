@@ -18,6 +18,8 @@ from auto_agents_2 import cli
 from auto_agents_2 import process_reboot as recovery
 from auto_agents_2.errors import AA2Error, BusyProject, PolicyViolation
 from auto_agents_2.sandbox import SandboxRunner
+from auto_agents_2.state_codec import checkpoint_query_db, put_wire_db
+from auto_agents_2.store import Store
 from auto_agents_2.util import digest
 
 
@@ -70,10 +72,11 @@ def scene(tmp_path, monkeypatch, request):
          'data': {'attempt': aid, 'pid': 12345}},
     ]
     database = state / 'state.sqlite'
-    with closing(sqlite3.connect(database)) as db, db:
-        db.execute('CREATE TABLE events(seq INTEGER PRIMARY KEY,run_id TEXT,time REAL,kind TEXT,data TEXT)')
-        db.execute('CREATE TABLE checkpoints(key TEXT PRIMARY KEY,data TEXT)')
-        db.execute('INSERT INTO checkpoints VALUES (?,?)', ('infra/fixture', '{"pending":true,"failures":5,"grant":12}'))
+    store = Store(project)
+    with store.connect() as db:
+        db.execute('INSERT INTO runs VALUES(?,?,?,?,?,?)', (rid, 'RUNNING', 'decision', boot - 1000, boot - 1000, '{}'))
+        assert not db.execute("SELECT 1 FROM checkpoint_records WHERE run_id=? AND key='infra/fixture'", (rid,)).fetchone()
+        put_wire_db(db, rid, 'infra/fixture', '{"pending":true,"failures":5,"grant":12}')
         for row in events:
             db.execute('INSERT INTO events VALUES (?,?,?,?,?)',
                        (row['seq'], row['run_id'], row['time'], row['kind'], json.dumps(row['data'])))
@@ -173,7 +176,7 @@ def test_original_controller_and_attempt_are_not_replaceable_by_assertions(scene
             row['run_id'] = 'run_' + '6' * 16
         else:
             row['time'] = scene.boot + 1
-        with closing(sqlite3.connect(scene.database)) as db, db:
+        with scene.store.connect() as db:
             db.execute('UPDATE events SET run_id=?,time=?,data=? WHERE seq=11',
                        (row['run_id'], row['time'], json.dumps(row['data'])))
         # Even a freshly reviewed hash cannot turn the wrong event into proof.
@@ -272,7 +275,7 @@ def test_final_recheck_rejects_changes_after_durable_archive(scene, monkeypatch,
         elif change == 'boot':
             scene.kernel['boot_id'] = 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb'
         elif change == 'events':
-            with closing(sqlite3.connect(scene.database)) as db, db:
+            with scene.store.connect() as db:
                 db.execute('UPDATE events SET time=time+1 WHERE seq=11')
         elif change == 'controller':
             scene.controller.write_text(scene.controller.read_text() + ' ')
@@ -415,7 +418,7 @@ def test_last_identity_inspection_cannot_hide_record_drift(scene, monkeypatch):
 
 
 def test_live_wal_evidence_is_read_without_business_state_writes(scene):
-    with closing(sqlite3.connect(scene.database)) as writer, writer:
+    with scene.store.connect() as writer:
         writer.execute('PRAGMA journal_mode=WAL')
         writer.execute('UPDATE events SET data=? WHERE seq=10',
                        (json.dumps({**scene.events[0]['data'], 'detail': 'committed only in WAL'}),))
@@ -426,7 +429,7 @@ def test_live_wal_evidence_is_read_without_business_state_writes(scene):
         before = {name: (scene.state / name).read_bytes() for name in ('state.sqlite', 'state.sqlite-wal')}
         apply(scene)
         assert {name: (scene.state / name).read_bytes() for name in before} == before
-        assert writer.execute('SELECT data FROM checkpoints').fetchone()[0] == '{"pending":true,"failures":5,"grant":12}'
+        assert checkpoint_query_db(writer, 'SELECT slot_order AS data FROM checkpoint_records', wire_index=0).fetchone()[0] == '{"pending":true,"failures":5,"grant":12}'
 
 
 def test_atomic_receipt_publication_can_resume_after_directory_sync_interruption(scene, monkeypatch):
@@ -693,7 +696,7 @@ def test_provider_event_limit_counts_utf8_bytes_before_materialization(scene):
     row['data']['padding'] = '\u00e9' * (recovery.LIMIT // 2)
     raw = json.dumps(row['data'], ensure_ascii=False)
     assert len(raw) < recovery.LIMIT < len(raw.encode())
-    with closing(sqlite3.connect(scene.database)) as db, db:
+    with scene.store.connect() as db:
         db.execute('UPDATE events SET data=? WHERE seq=10', (raw,))
     scene.request['events_sha256'] = digest(scene.events)
     scene.expected = scene.save_request()
@@ -705,29 +708,43 @@ def test_provider_event_limit_counts_utf8_bytes_before_materialization(scene):
 
 @pytest.mark.parametrize('encoding', ['UTF-16le', 'UTF-16be'])
 @pytest.mark.parametrize('oversized', [False, True])
-def test_original_event_utf8_bound_survives_sqlite_text_encodings(scene, encoding, oversized):
-    with closing(sqlite3.connect(scene.database)) as db:
-        script = '\n'.join(db.iterdump())
-    scene.database.unlink()
+def test_utf16_state_is_rejected_before_reboot_side_effects(scene, encoding, oversized, monkeypatch):
+    # Retired: UTF16 under-limit acceptance/replay. All UTF16 sizes now fail at format preflight.
+    # The valid UTF8 multibyte provider-event boundary remains a separate unchanged test.
+    from test_recovery_contracts import frozen_state_snapshot
+
+    from auto_agents_2.state_connection import APPLICATION_ID
     row = scene.events[0]
     row['data']['padding'] = '\u6c49' * (recovery.LIMIT // 2) if oversized else 'x' * (200 * 1024)
     raw = json.dumps(row['data'], ensure_ascii=False)
+    with scene.store.connect() as db:
+        db.execute('UPDATE events SET data=? WHERE seq=10', (raw,))
+    with closing(sqlite3.connect(scene.database)) as db:
+        script = '\n'.join(db.iterdump())
+    scene.database.unlink()
     with closing(sqlite3.connect(scene.database)) as db, db:
         db.execute(f"PRAGMA encoding='{encoding}'")
         db.executescript(script)
-        db.execute('UPDATE events SET data=? WHERE seq=10', (raw,))
+        db.execute(f"PRAGMA application_id={APPLICATION_ID}")
         stored = db.execute('SELECT length(CAST(data AS BLOB)) FROM events WHERE seq=10').fetchone()[0]
         assert recovery.LIMIT < stored <= 2 * recovery.LIMIT
     scene.request['events_sha256'] = digest(scene.events)
     scene.expected = scene.save_request()
     if oversized:
         assert len(raw.encode()) > recovery.LIMIT
-        with pytest.raises(PolicyViolation, match='provider event exceeds'):
-            apply(scene)
-        assert scene.record.read_bytes() == scene.original
     else:
         assert len(raw.encode()) < recovery.LIMIT
-        result = apply(scene)
-        archived = Path(result['receipt']).read_bytes()
-        assert apply(scene)['already_absent'] is True
-        assert Path(result['receipt']).read_bytes() == archived
+    before = frozen_state_snapshot(scene.project)
+    request_before, controller_before = scene.request_path.read_bytes(), scene.controller.read_bytes()
+    def forbidden(*args, **kwargs):
+        pytest.fail('UTF16 state reached host/process inspection before encoding rejection')
+    monkeypatch.setattr(recovery, 'kernel_identity', forbidden)
+    monkeypatch.setattr(recovery, 'windows_boot', forbidden)
+    monkeypatch.setattr(recovery, 'process_start', forbidden)
+    with pytest.raises(AA2Error, match='^State format 9 requires UTF-8 database encoding; no implicit transcoding$'):
+        apply(scene)
+    assert frozen_state_snapshot(scene.project) == before
+    assert scene.request_path.read_bytes() == request_before and scene.controller.read_bytes() == controller_before
+    assert scene.record.read_bytes() == scene.original
+    assert not (scene.state / 'controller.lock').exists()
+    assert not (scene.state / 'process-reboot-recovery').exists()

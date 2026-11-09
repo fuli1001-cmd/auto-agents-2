@@ -14,7 +14,6 @@ from auto_agents_2.issues import IssueLedger
 from auto_agents_2.models import Command
 from auto_agents_2.recovery import Diagnosis, RecoveryNeeded, RepairTarget, adjudicate
 from auto_agents_2.replanning import assess
-from auto_agents_2.store import Store
 from auto_agents_2.util import write_json
 from auto_agents_2.workspace import tree_hash
 
@@ -103,37 +102,35 @@ async def test_diagnosis_budget_is_shared_across_different_failure_kinds(tmp_pat
     assert not workflow.store.pending(rid)
 
 
-def test_v2_migration_preserves_active_recovery_and_is_transactional(tmp_path):
-    store = Store(tmp_path)
-    rid = store.admit("legacy", {})["id"]
+def test_old_v2_state_is_rejected_with_active_recovery_and_fault_trigger_intact(tmp_path):
+    # Retired: runtime v2 upgrade/retry, derived identity/budget conversion and backup.
+    import json
+
+    from test_recovery_contracts import (
+        assert_legacy_format_rejected,
+        frozen_legacy_state,
+        frozen_state_snapshot,
+    )
     active = {"version": 1, "failure": failure().model_dump(), "attempt": 1, "diagnosis_round": 2}
-    store.checkpoints(rid, {"plan": plan().model_dump(), "plan_revision/current": {"revision": 5},
+    records = {"plan": plan().model_dump(), "plan_revision/current": {"revision": 5},
         "task_state/T3": {"implementation": "needs_repair", "revision": 4}, "recovery/active": active,
         "recovery/failures/" + failure().id + "/1": failure().model_dump(),
-        "recovery/diagnosis/" + failure().id: {"round": 2}, "rounds/T3": {"round": 4}})
-    with store.connect() as db:
-        db.execute("UPDATE meta SET value='2' WHERE key='schema_version'")
+        "recovery/diagnosis/" + failure().id: {"round": 2}, "rounds/T3": {"round": 4}}
+    state, _rid = frozen_legacy_state(tmp_path, "2", {k: json.dumps(v, ensure_ascii=True) for k, v in records.items()}, source="legacy")
+    with sqlite3.connect(state / "state.sqlite") as db:
         db.execute("CREATE TRIGGER fail_upgrade BEFORE UPDATE ON meta BEGIN SELECT RAISE(ABORT,'fault'); END")
-    with pytest.raises(sqlite3.IntegrityError, match="fault"):
-        store.migrate()
-    assert store.get(rid, "migration/v2") is None
-    with store.connect() as db:
-        db.execute("DROP TRIGGER fail_upgrade")
-    store.migrate()
-    before = store.get(rid, "migration/v2")
-    store.migrate()
-    assert store.get(rid, "migration/v2") == before
-    from auto_agents_2.recovery_identity import failure_contract
-    upgraded = store.get(rid, "recovery/active")
-    assert upgraded["version"] == 2 and upgraded["attempt"] == active["attempt"]
-    assert upgraded["diagnosis_round"] == active["diagnosis_round"]
-    assert failure_contract(upgraded["failure"]) == failure_contract(active["failure"])
-    assert before["records"]["recovery/active"] == active
-    assert store.get(rid, "task_state/T3")["revision"] == 4
-    assert store.get(rid, "plan_revision/current")["revision"] == 5
-    assert store.get(rid, "recovery/budgets/diagnosis/T3")["round"] == 2
-    with sqlite3.connect(tmp_path / ".aa2/state-v2.backup.sqlite") as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2"
+    before = assert_legacy_format_rejected(tmp_path)
+    raw = {row[2]: row[3] for row in before["rows"]["checkpoints"]}
+    assert {k: json.loads(v) for k, v in raw.items()} == records
+    assert json.loads(raw["recovery/active"]) == active
+    assert json.loads(raw["task_state/T3"])["revision"] == 4
+    assert json.loads(raw["plan_revision/current"])["revision"] == 5
+    assert json.loads(raw["recovery/diagnosis/" + failure().id])["round"] == 2
+    assert json.loads(raw["rounds/T3"])["round"] == 4
+    assert "migration/v2" not in raw and "recovery/budgets/diagnosis/T3" not in raw
+    assert any(row[0:2] == ("trigger", "fail_upgrade") for row in before["schema"])
+    assert before["rows"]["meta"] == [(1, "schema_version", "2")]
+    assert frozen_state_snapshot(tmp_path) == before
 
 
 def test_stale_scope_is_deferred_not_regressed_or_awarded_progress():

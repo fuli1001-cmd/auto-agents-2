@@ -58,8 +58,8 @@ def test_failed_required_event_rolls_back_new_pending_not_just_memory(tmp_path, 
     def event(db, run_id, kind, data):
         if kind == "research.acquisition_failed":
             # Both checkpoints were actually written in this same transaction.
-            assert db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
-            assert db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, CURRENT)).fetchone()
+            assert db.execute('SELECT 1 FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key)).fetchone()
+            assert db.execute('SELECT 1 FROM checkpoint_records WHERE run_id=? AND key=?', (rid, CURRENT)).fetchone()
             reached.append(True)
             if window == "after_event_insert":
                 original(db, run_id, kind, data)

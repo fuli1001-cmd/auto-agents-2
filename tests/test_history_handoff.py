@@ -7,13 +7,15 @@ from test_recovery_policy import ready
 
 from auto_agents_2.faults import StateConflict
 from auto_agents_2.source_history import SourceHistory
+from auto_agents_2.state_codec import checkpoint_query_db
 from auto_agents_2.workspace import tree_hash
 
 
 def history_records(workflow, rid):
     with workflow.store.connect() as db:
-        return db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND "
-                          "key LIKE 'review-evidence/source-history/%' ORDER BY key", (rid,)).fetchall()
+        return [tuple(row) for row in checkpoint_query_db(db,
+            "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND "
+            "key LIKE 'review-evidence/source-history/%' ORDER BY key", (rid,), wire_index=1)]
 
 
 def test_omitted_scope_cannot_silently_drop_planned_configuration(tmp_path):

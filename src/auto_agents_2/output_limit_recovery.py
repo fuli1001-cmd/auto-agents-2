@@ -11,6 +11,7 @@ from pathlib import Path
 from .config import ConfigStore
 from .errors import AA2Error, PostCommitError, RecoveryPathExhausted
 from .models import ImplementationResult, ReviewResult, strict_schema
+from .state_codec import checkpoint_query_db
 from .store import Store
 from .util import digest, file_lock
 from .workspace import tree_hash
@@ -173,7 +174,7 @@ def prepare(project, *, run_id, operation, failed_attempt, question_id, resource
                 "develop/done", "rounds/" + origin_id, "recovery/active", "replanning/pending", "control/cancel"]
         request["guards"] = {}
         for key in keys:
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (run_id, key)).fetchone()
+            row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (run_id, key), wire_index=0).fetchone()
             request["guards"][key] = raw_hash(row[0]) if row else None
             if key in {"recovery/active", "replanning/pending", "control/cancel"} and row and json.loads(row[0]):
                 raise AA2Error("Another recovery or control transition is pending")
@@ -216,16 +217,16 @@ def authorize(project, path, expected_sha256, *, confirm_one_call=False, confirm
 def normal_recovery_handoff(store, rid, record=None):
     """A new explicit lifecycle receipt retires execution limits, never the old evidence."""
     with store.connect() as db:
-        row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, HANDOFF_KEY)).fetchone()
+        row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, HANDOFF_KEY), wire_index=0).fetchone()
         if row is None:
             return None
         try:
             receipt = json.loads(row[0])
             request = receipt["request"]
-            parent = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, KEY)).fetchone()
+            parent = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, KEY), wire_index=0).fetchone()
             request_hash = digest(request)
             archive_key = HANDOFF_HISTORY + request_hash
-            archive = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, archive_key)).fetchone()
+            archive = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, archive_key), wire_index=0).fetchone()
             parent_record = json.loads(parent[0]) if parent else None
             if (receipt["version"] != HANDOFF_VERSION or receipt["mode"] != "normal_recovery"
                     or request["version"] != HANDOFF_VERSION or request["run_id"] != rid
@@ -305,12 +306,13 @@ def _handoff_pending(store, rid, db):
     from .artifacts import ArtifactStore
     artifacts = ArtifactStore(store.root)
     accounted = {}
-    for row in db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'infra/%' "
-                          "AND json_extract(data,'$.pending')=1 ORDER BY key", (rid,)):
+    for row in checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'infra/%' ORDER BY key", (rid,), wire_index=1):
+        if db.execute("SELECT json_extract(?,'$.pending')=1", (row[1],)).fetchone()[0] != 1:
+            continue
         operation, provider = row[0][len("infra/"):].rsplit("/", 1)
         values = {}
         for prefix in ("invocation/", "provider-result/"):
-            value = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, prefix + operation)).fetchone()
+            value = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, prefix + operation), wire_index=0).fetchone()
             values[prefix] = json.loads(value[0]) if value else {}
         saved, result = values["invocation/"], values["provider-result/"]
         attempt = saved.get("attempt")
@@ -394,14 +396,12 @@ def prepare_handoff(project, *, run_id, authorization_reference):
         processes = _handoff_processes(store)
         for key, evidence in pending.items():
             keys.update({key, "invocation/" + evidence["operation"], "provider-result/" + evidence["operation"]})
-        keys.update(row[0] for row in db.execute("SELECT key FROM checkpoints WHERE run_id=? AND "
-            "(key LIKE 'recovery/count/%' OR key LIKE 'recovery/budgets/%' OR key LIKE 'automation/%' "
-            "OR key LIKE 'budget_grants/%' OR key LIKE 'recovery/diagnosis_grants/%')", (run_id,)))
+        keys.update(row[0] for row in db.execute("SELECT key FROM checkpoint_records WHERE run_id=? AND (key LIKE 'recovery/count/%' OR key LIKE 'recovery/budgets/%' OR key LIKE 'automation/%' OR key LIKE 'budget_grants/%' OR key LIKE 'recovery/diagnosis_grants/%')", (run_id,)))
         for claim in record.get("calls", {}).values():
             keys.update({"invocation/" + claim["operation"], "provider-result/" + claim["operation"]})
         guards = {}
         for key in sorted(keys):
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (run_id, key)).fetchone()
+            row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (run_id, key), wire_index=0).fetchone()
             guards[key] = raw_hash(row[0]) if row else None
         run_row = db.execute("SELECT status,stage,data FROM runs WHERE id=?", (run_id,)).fetchone()
         answers_hash = digest(store._submitted_answers(db, run_id))
@@ -445,6 +445,7 @@ def authorize_handoff(project, path, expected_sha256, *, confirm_normal_recovery
         if current != request:
             raise AA2Error("Handoff inputs changed after review; preserve the current candidate")
         from types import SimpleNamespace
+
         from .artifacts import ArtifactStore
         from .models import TaskSpec
         from .source_history import SourceHistory
@@ -496,7 +497,7 @@ class Incident:
                  "recovery/active", "replanning/pending", "control/cancel"}
         with self.store.connect() as db:
             for key in fixed:
-                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (self.rid, key)).fetchone()
+                row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (self.rid, key), wire_index=0).fetchone()
                 if (raw_hash(row[0]) if row else None) != request["guards"][key]:
                     raise self.stop("original_authority_or_budget_changed")
         if self.store.get(self.rid, "rounds/" + request["origin_id"], {}).get("round") != request["round"]:
@@ -588,8 +589,7 @@ class Incident:
                                                   digest(saved["result"]))
         keys = ["invocation/" + operation, "provider-result/" + operation, key]
         with self.store.connect() as db:
-            rows = {name: db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?",
-                                    (self.rid, name)).fetchone() for name in keys}
+            rows = {name: checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (self.rid, name), wire_index=0).fetchone() for name in keys}
         expected_rows = {name: raw_hash(row[0]) if row else None for name, row in rows.items()}
         if expected_rows[key] != challenge["capability_before_sha256"]:
             raise self.stop("probe_capability_changed_before_confirmation")
@@ -627,8 +627,7 @@ class Incident:
         with self.store.connect() as db:
             keys = [request["operation"], "invocation/" + request["operation"],
                     "provider-result/" + request["operation"]]
-            rows = {key: db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?",
-                                   (self.rid, key)).fetchone() for key in keys}
+            rows = {key: checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (self.rid, key), wire_index=0).fetchone() for key in keys}
         if any(row is None for row in rows.values()):
             raise self.stop("correction_publication_missing")
         task, invocation, result = (json.loads(rows[key][0]) for key in keys)
@@ -798,7 +797,7 @@ class ModelCall:
             raise self.incident.stop("material_probe_already_occupied")
         key = "material-capability/" + capability
         with self.incident.store.connect() as db:
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (self.incident.rid, key)).fetchone()
+            row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (self.incident.rid, key), wire_index=0).fetchone()
         before = raw_hash(row[0]) if row else None
         artifacts = ArtifactStore(self.incident.store.root)
         resources = ResourceManager(self.incident.store, router.config.load().cleanup)

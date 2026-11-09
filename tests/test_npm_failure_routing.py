@@ -65,7 +65,7 @@ async def test_npm_resolution_failure_retains_inputs_logs_and_no_readiness(tmp_p
     assert {p.name: p.read_bytes() for p in work.iterdir()} == before
     assert not list((store.root / 'node-records').glob('*.json'))
     with store.connect() as db:
-        rows = db.execute("SELECT key FROM checkpoints WHERE run_id=? AND key LIKE 'environment/logs/%'", (rid,)).fetchall()
+        rows = db.execute("SELECT key FROM checkpoint_records WHERE run_id=? AND key LIKE 'environment/logs/%'", (rid,)).fetchall()
     logs = [ref for row in rows for ref in store.get(rid, row[0])['logs']]
     assert any(message in ArtifactStore(store.root).read(ref) for ref in logs)
 
@@ -225,7 +225,7 @@ async def test_npm_solver_error_keeps_sanitized_diagnostics(tmp_path):
     with pytest.raises(DependencyResolutionError) as caught:
         await manager._command([str(environment.prefix / 'bin/npm')], tmp_path, env, [tmp_path], npm_resolution=True)
     with store.connect() as db:
-        keys = db.execute("SELECT key FROM checkpoints WHERE run_id=? AND key LIKE 'environment/logs/%'", (rid,)).fetchall()
+        keys = db.execute("SELECT key FROM checkpoint_records WHERE run_id=? AND key LIKE 'environment/logs/%'", (rid,)).fetchall()
     archived = ''.join(ArtifactStore(store.root).read(ref) for key in keys for ref in store.get(rid, key[0])['logs'])
     assert CRASH in archived
     for secret in ('fixture-password', 'fixture-token', 'fixture-secret-value'):

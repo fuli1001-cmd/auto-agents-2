@@ -36,7 +36,7 @@ from auto_agents_2.recovery import FailureRecord, RecoveryNeeded
 from auto_agents_2.research import request_documents
 from auto_agents_2.resources import ResourceManager
 from auto_agents_2.sandbox import SandboxRunner
-from auto_agents_2.store import SCHEMA, Store
+from auto_agents_2.store import Store
 from auto_agents_2.util import digest, write_json
 from auto_agents_2.verification import VerificationService
 from auto_agents_2.workspace import (
@@ -493,39 +493,34 @@ def test_initialization_rejects_subdirectory_and_patch_rejects_conflicting_files
 
 @pytest.mark.parametrize("version", ["1", "2", "3", "4"])
 @pytest.mark.parametrize("fail", [False, True])
-def test_actual_missing_table_schema_migration_is_atomic(tmp_path, version, fail):
-    state = tmp_path / ".aa2"
-    state.mkdir()
+def test_old_missing_table_schema_is_rejected_without_mutating_evidence(tmp_path, version, fail):
+    # Retired: v1-v4 automatic upgrade, failure/retry migration and backup creation.
+    from test_recovery_contracts import (
+        assert_legacy_format_rejected,
+        frozen_legacy_state,
+        frozen_state_snapshot,
+    )
     sha = digest("legacy document")
+    state, _rid = frozen_legacy_state(tmp_path, version,
+        {"rounds/T": '{"round":4}', "proof": json.dumps({"hash": sha, "kind": "document", "bytes": len("legacy document")})},
+        omitted=("artifact_edges", "artifact_kinds", "diagnostic_holds", "retired_diagnostics", "resource_holds"),
+        status="PAUSED", stage="verify", run_data={})
     document = state / "artifacts" / sha[:2] / sha
     document.parent.mkdir(parents=True)
     document.write_text("legacy document")
-    # Historical schemas predate these tables; do not initialize a modern Store first.
-    statements = [s for s in SCHEMA.split(";") if not any(name in s for name in (
-        "artifact_edges", "artifact_kinds", "diagnostic_holds", "retired_diagnostics", "resource_holds"))]
     with sqlite3.connect(state / "state.sqlite") as db:
-        db.executescript(";".join(statements))
-        db.execute("UPDATE meta SET value=? WHERE key='schema_version'", (version,))
-        db.execute("INSERT INTO runs VALUES(?,?,?,?,?,?)", ("old", "PAUSED", "verify", 0, 0, "{}"))
-        db.execute("INSERT INTO checkpoints VALUES(?,?,?)", ("old", "rounds/T", '{"round":4}'))
-        db.execute("INSERT INTO checkpoints VALUES(?,?,?)", ("old", "proof", json.dumps({
-            "hash": sha, "kind": "document", "bytes": len("legacy document")})))
         if fail:
             db.execute("CREATE TRIGGER fault BEFORE UPDATE ON meta BEGIN SELECT RAISE(ABORT,'fault'); END")
-    store = Store(tmp_path)
-    if fail:
-        with pytest.raises(sqlite3.IntegrityError):
-            store.migrate()
-        with store.connect() as db:
-            assert not db.execute("SELECT 1 FROM sqlite_master WHERE name='diagnostic_holds'").fetchone()
-            db.execute("DROP TRIGGER fault")
-    store.migrate()
-    store.migrate()
-    with store.connect() as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "8"
-        assert db.execute("SELECT 1 FROM sqlite_master WHERE name='diagnostic_holds'").fetchone()
-    assert store.get("old", "rounds/T") == {"round": 4}
-    assert (state / f"state-v{version}.backup.sqlite").is_file()
+    before = assert_legacy_format_rejected(tmp_path)
+    raw = {row[2]: row[3] for row in before["rows"]["checkpoints"]}
+    assert raw["rounds/T"] == '{"round":4}' and json.loads(raw["rounds/T"]) == {"round": 4}
+    assert json.loads(raw["proof"]) == {"hash": sha, "kind": "document", "bytes": len("legacy document")}
+    assert before["rows"]["runs"] == [(1, "old", "PAUSED", "verify", 0.0, 0.0, "{}")]
+    assert before["rows"]["meta"] == [(1, "schema_version", version)]
+    assert not set(before["rows"]) & {"artifact_edges", "artifact_kinds", "diagnostic_holds", "retired_diagnostics", "resource_holds"}
+    assert any(row[0:2] == ("trigger", "fault") for row in before["schema"]) is fail
+    assert document.read_bytes() == b"legacy document"
+    assert frozen_state_snapshot(tmp_path) == before
 
 
 def test_mixed_role_parent_keeps_nested_diagnostics_during_read(tmp_path):

@@ -10,6 +10,7 @@ import pytest
 
 from auto_agents_2 import artifact_gc
 from auto_agents_2.artifacts import ArtifactStore
+from auto_agents_2.state_codec import checkpoint_query_db, put_wire_db
 from auto_agents_2.store import Store
 
 
@@ -17,6 +18,13 @@ def setup(tmp_path):
     store = Store(tmp_path)
     rid = store.admit("synthetic checkpoint collection", {})["id"]
     return store, rid, ArtifactStore(store.root)
+
+
+def insert_raw_checkpoint(db, rid, key, wire):
+    # Preserve INSERT-only uniqueness; put_wire_db must not mask a duplicate fixture.
+    if db.execute("SELECT 1 FROM checkpoint_records WHERE run_id=? AND key=?", (rid, key)).fetchone():
+        raise sqlite3.IntegrityError("duplicate raw checkpoint fixture")
+    put_wire_db(db, rid, key, wire)
 
 
 def peak_collection(store):
@@ -41,8 +49,8 @@ def test_checkpoint_body_peak_memory_stays_bounded_as_history_grows(tmp_path, re
 
     def append_history(start, stop):
         with store.connect() as db:
-            db.executemany("INSERT INTO checkpoints VALUES(?,?,?)",
-                           ((rid, f"history/{index:04d}", body) for index in range(start, stop)))
+            for index in range(start, stop):
+                insert_raw_checkpoint(db, rid, f"history/{index:04d}", body)
             # Model already published legacy checkpoints, without producer holds
             # that could mask a missing checkpoint root.
             db.execute("DELETE FROM diagnostic_holds")
@@ -69,9 +77,9 @@ def test_checkpoint_body_peak_memory_stays_bounded_as_history_grows(tmp_path, re
     assert artifacts.read(report) == "<testsuite tests='1'/>"
     assert artifacts.released(obsolete)
     with store.connect() as db:
-        assert db.execute("SELECT COUNT(*) FROM checkpoints WHERE key LIKE 'history/%'").fetchone()[0] == 96
-        assert {row[0] for row in db.execute(
-            "SELECT data FROM checkpoints WHERE key LIKE 'history/%'")} == {body}
+        assert db.execute("SELECT COUNT(*) FROM checkpoint_records WHERE key LIKE 'history/%'").fetchone()[0] == 96
+        assert {row[0] for row in checkpoint_query_db(db,
+            "SELECT slot_order AS data FROM checkpoint_records WHERE key LIKE 'history/%'", wire_index=0)} == {body}
 
 
 def test_metadata_writes_during_scan_keep_every_root_and_the_writer_lock(tmp_path, monkeypatch):
@@ -114,9 +122,8 @@ def test_mid_scan_failure_rolls_back_metadata_and_keeps_artifacts(tmp_path, monk
     store, rid, artifacts = setup(tmp_path)
     logs = [artifacts.put(f"synthetic terminal root {index}", "check_log") for index in range(2)]
     with store.connect() as db:
-        db.executemany("INSERT INTO checkpoints VALUES(?,?,?)", (
-            (rid, f"gc-root/{index}", json.dumps({"gc-root": index, "logs": [ref]}))
-            for index, ref in enumerate(logs)))
+        for index, ref in enumerate(logs):
+            insert_raw_checkpoint(db, rid, f"gc-root/{index}", json.dumps({"gc-root": index, "logs": [ref]}))
         db.execute("DELETE FROM artifact_kinds")
         before_holds = [tuple(row) for row in db.execute("SELECT * FROM diagnostic_holds ORDER BY id")]
     store.update(rid, status="SUCCEEDED")

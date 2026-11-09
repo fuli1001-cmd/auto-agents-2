@@ -19,6 +19,7 @@ from auto_agents_2.prototype_reentry import PrototypeReentry
 from auto_agents_2.providers import ProviderRouter
 from auto_agents_2.recovery import FailureRecord
 from auto_agents_2.sandbox import SandboxRunner
+from auto_agents_2.state_codec import delete_query_db
 from auto_agents_2.util import digest, write_json
 from auto_agents_2.workspace import tree_hash
 
@@ -419,7 +420,7 @@ async def test_successor_cannot_replace_missing_or_mismatched_transition_approva
         workflow.store.checkpoint(rid, key, {**old, "review": {"approved": False, "summary": "Unbound body"}})
     else:
         with workflow.store.connect() as db:
-            db.execute("DELETE FROM checkpoints WHERE run_id=? AND key=?", (rid, key))
+            delete_query_db(db, 'SELECT slot_order FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key))
         if damage == "wrong_key":
             workflow.store.checkpoint(rid, "candidate/prototype-approval-history/" + "f" * 64, old)
     context = workflow._prototype_review_context(rid, tmp_path, review_context(workflow, document, tmp_path))

@@ -10,6 +10,7 @@ from pathlib import Path
 from .errors import AA2Error
 from .faults import StateConflict
 from .readview import public_files, sensitive
+from .state_codec import checkpoint_query_db
 from .util import digest
 from .workspace import EXCLUDED, PROTECTED_NAMES, git, git_environment, path_allowed, tree_hash
 
@@ -20,10 +21,7 @@ class SourceHistory:
 
     def _records(self, rid):
         with self.store.connect() as db:
-            rows = db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND "
-                "(key LIKE 'recovery/gate-history/%' OR key LIKE 'recovery/task-baselines/%' "
-                "OR key LIKE 'plan_revision/journal/%' OR key LIKE 'plan_revision/history/%' "
-                "OR key='replan_feedback') ORDER BY rowid", (rid,)).fetchall()
+            rows = checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND (key LIKE 'recovery/gate-history/%' OR key LIKE 'recovery/task-baselines/%' OR key LIKE 'plan_revision/journal/%' OR key LIKE 'plan_revision/history/%' OR key='replan_feedback') ORDER BY rowid", (rid,), wire_index=1).fetchall()
         return [(key, json.loads(raw)) for key, raw in rows]
 
     def _anchors(self, rid, records):
@@ -131,8 +129,7 @@ class SourceHistory:
         observation cannot invalidate the cache indefinitely.
         """
         with self.store.connect() as db:
-            rows = db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND "
-                "key LIKE 'review-evidence/source-history/%' ORDER BY rowid", (rid,)).fetchall()
+            rows = checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'review-evidence/source-history/%' ORDER BY rowid", (rid,), wire_index=1).fetchall()
         observed = {}
         for origin, raw in rows:
             try:

@@ -13,6 +13,7 @@ from test_recovery_policy import ready
 from auto_agents_2.models import ImplementationResult, PlanResult, ReviewResult
 from auto_agents_2.plan_revision import PlanPatch, materialize_plan
 from auto_agents_2.recovery import Diagnosis
+from auto_agents_2.state_codec import checkpoint_query_db
 from auto_agents_2.util import digest
 from auto_agents_2.workspace import git, tree_hash
 
@@ -209,8 +210,7 @@ async def test_failed_publication_rolls_back_then_normal_retry_recovers(tmp_path
     workflow, rid, work, plan, records = await amended(tmp_path)
     saved = invalidate(workflow, rid, plan.tasks[0], records["T1"])
     with workflow.store.connect() as db:
-        db.execute("CREATE TRIGGER fail_continuity BEFORE INSERT ON checkpoints WHEN NEW.key='develop/done' "
-                   "BEGIN SELECT RAISE(ABORT, 'injected continuity interruption'); END")
+        db.execute("CREATE TRIGGER fail_continuity BEFORE INSERT ON checkpoint_records WHEN NEW.key='develop/done' BEGIN SELECT RAISE(ABORT, 'injected continuity interruption'); END")
     with pytest.raises(sqlite3.IntegrityError, match="continuity interruption"):
         workflow.authority.retain_task(rid, plan.tasks[0], saved, work=work)
     assert workflow.store.get(rid, "develop/task/T1") == saved
@@ -269,8 +269,7 @@ async def test_unknown_input_boundary_in_original_contract_requires_reverificati
     workflow, rid, work, plan, records = await amended(tmp_path, "")
     from auto_agents_2.task_plan_continuity import _chain
     with workflow.store.connect() as db:
-        rows = {row["key"]: json.loads(row["data"]) for row in db.execute(
-            "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
+        rows = {row["key"]: json.loads(row["data"]) for row in checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=?', (rid,), wire_index=1)}
     assert _chain(rows, workflow.authority.identity(rid), plan.tasks[1], records["T2"],
                   workflow.authority.receipt(rid, records["T2"]["review"])["basis"])
     result = workflow.authority.retain_task(rid, plan.tasks[1], records["T2"], work=work)

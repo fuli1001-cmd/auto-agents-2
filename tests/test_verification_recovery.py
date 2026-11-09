@@ -105,8 +105,7 @@ async def test_recovery_interruption_retries_without_losing_pending_state(tmp_pa
         error = asyncio.CancelledError
     else:
         with workflow.store.connect() as db:
-            db.execute("CREATE TRIGGER fail_recovery BEFORE DELETE ON checkpoints "
-                       "WHEN OLD.key='replanning/pending' BEGIN SELECT RAISE(ABORT,'injected'); END")
+            db.execute("CREATE TRIGGER fail_recovery BEFORE DELETE ON checkpoint_records WHEN OLD.key='replanning/pending' BEGIN SELECT RAISE(ABORT,'injected'); END")
         error = sqlite3.IntegrityError
     with pytest.raises(error):
         await workflow._refresh_legacy_task_checks(rid)

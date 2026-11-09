@@ -131,7 +131,7 @@ def test_tree_read_failure_cannot_publish_a_complete_inventory(tmp_path, monkeyp
     with pytest.raises(AA2Error, match="historical tree unavailable"):
         SourceHistory(workflow).collect_protected(rid, tmp_path)
     with workflow.store.connect() as db:
-        assert not db.execute("SELECT 1 FROM checkpoints WHERE run_id=? AND key LIKE 'review-evidence/source-history/%'", (rid,)).fetchall()
+        assert not db.execute("SELECT 1 FROM checkpoint_records WHERE run_id=? AND key LIKE 'review-evidence/source-history/%'", (rid,)).fetchall()
 
 
 def test_new_collection_does_not_reuse_or_overwrite_a_frozen_v2_manifest(tmp_path):

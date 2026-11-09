@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .config import Cleanup
 from .errors import AA2Error, PolicyViolation
+from .state_codec import delete_query_db, update_wire_db
 from .store import Store
 from .util import file_lock, identifier, now
 
@@ -141,11 +142,11 @@ class ResourceManager:
                 # Keep compact task verdicts; remove proposal bodies and duplicate contexts.
                 for key, value in receipt["evidence"].items():
                     if key.startswith("develop/task/"):
-                        db.execute("UPDATE checkpoints SET data=? WHERE run_id=? AND key=?", (json.dumps(value), rid, key))
+                        update_wire_db(db, rid, key, json.dumps(value))
                 for prefix in ("candidate/", "invocation/", "provider-result/", "materials/", "presentation/", "proposal-recovery/requests/", "environment/logs/"):
-                    db.execute("DELETE FROM checkpoints WHERE run_id=? AND key LIKE ?", (rid, prefix + "%"))
+                    delete_query_db(db, 'SELECT slot_order FROM checkpoint_records WHERE run_id=? AND key LIKE ?', (rid, prefix + '%'))
                 for prefix in ("clarify_context", "replan_feedback", "readme", "delivery/journal"):
-                    db.execute("DELETE FROM checkpoints WHERE run_id=? AND key=?", (rid, prefix))
+                    delete_query_db(db, 'SELECT slot_order FROM checkpoint_records WHERE run_id=? AND key=?', (rid, prefix))
             self.collect_artifacts()
         except (OSError, AA2Error, sqlite3.Error) as exc:
             errors.append(str(exc))

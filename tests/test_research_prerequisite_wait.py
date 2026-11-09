@@ -398,7 +398,7 @@ def test_wait_consumption_event_failure_rolls_back_counter_receipt_and_wait(tmp_
             # The confirmation writes occurred, but none may escape a failed
             # required event, even when that event was already inserted.
             reached.append(True)
-            assert db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?",
+            assert db.execute('SELECT 1 FROM checkpoint_records WHERE run_id=? AND key=?',
                               (rid, CONSUMED + wait["id"])).fetchone()
             if window == "after_event":
                 original(db, run_id, kind, data)

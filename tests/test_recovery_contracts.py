@@ -1,11 +1,10 @@
-from plan_proposal_fixtures import EvidencePlanPatch, proposal_response
-import copy
 import sqlite3
 import sys
 
 import pytest
 from authority_review_fixtures import authority_review, seed_original
 from evidence_test_fixtures import empty_contract, seed_check_production, seed_requirements
+from plan_proposal_fixtures import EvidencePlanPatch, proposal_response
 from test_workflow import CodingAgent, engine
 
 from auto_agents_2.errors import AA2Error
@@ -22,6 +21,130 @@ from auto_agents_2.recovery import (
 )
 from auto_agents_2.store import Store
 from auto_agents_2.workspace import git
+
+# Frozen physical fixtures from e01167ac8b9702467c38a386a5e3f83d9f7547fa:
+# src/auto_agents_2/store.py:17-54, blob b369be9e3e3f9fa289e0d383358363c812523a79.
+# Whole historical file SHA256 edd7bdac88c8a88e3d95045bd6a0b45402309c52691ed1eac4dd3f64b28d7b06.
+# Runtime tests never execute Git or import an old reader/converter.
+FROZEN_SCHEMA8 = """
+            CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT OR IGNORE INTO meta VALUES('schema_version','8');
+            CREATE TABLE IF NOT EXISTS runs(
+                id TEXT PRIMARY KEY, status TEXT NOT NULL, stage TEXT NOT NULL,
+                created REAL NOT NULL, updated REAL NOT NULL, data TEXT NOT NULL);
+            CREATE UNIQUE INDEX IF NOT EXISTS one_unfinished ON runs((1))
+                WHERE status NOT IN ('SUCCEEDED','CANCELLED');
+            CREATE TABLE IF NOT EXISTS checkpoints(
+                run_id TEXT NOT NULL REFERENCES runs(id), key TEXT NOT NULL, data TEXT NOT NULL,
+                PRIMARY KEY(run_id,key));
+            CREATE TABLE IF NOT EXISTS events(
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, time REAL NOT NULL,
+                kind TEXT NOT NULL, data TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS questions(
+                id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), key TEXT NOT NULL,
+                prompt TEXT NOT NULL, artifact_hash TEXT NOT NULL, answer TEXT,
+                created REAL NOT NULL, interaction TEXT NOT NULL DEFAULT '{}',
+                superseded INTEGER NOT NULL DEFAULT 0, UNIQUE(run_id,key,artifact_hash));
+            CREATE TABLE IF NOT EXISTS usage(
+                event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
+                provider TEXT NOT NULL, attempt TEXT NOT NULL, data TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS resources(
+                id TEXT PRIMARY KEY, run_id TEXT, kind TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
+                state TEXT NOT NULL, refs INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL,
+                touched REAL NOT NULL, data TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS delivery_pins(path TEXT PRIMARY KEY, run_id TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS resource_holds(
+                id TEXT PRIMARY KEY, path TEXT NOT NULL, run_id TEXT, purpose TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS artifact_owners(hash TEXT NOT NULL, run_id TEXT NOT NULL,
+                PRIMARY KEY(hash,run_id));
+            CREATE TABLE IF NOT EXISTS artifact_edges(parent TEXT, child TEXT, PRIMARY KEY(parent,child));
+            CREATE TABLE IF NOT EXISTS artifact_kinds(hash TEXT, kind TEXT, PRIMARY KEY(hash,kind));
+            CREATE TABLE IF NOT EXISTS diagnostic_holds(
+                id TEXT PRIMARY KEY, hash TEXT NOT NULL, run_id TEXT, purpose TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS retired_diagnostics(
+                hash TEXT PRIMARY KEY, retired REAL NOT NULL, reason TEXT NOT NULL);
+"""
+
+
+def frozen_legacy_state(project, version, wires, *, omitted=(), source="fixture",
+                        status="RUNNING", stage="capture", run_data=None):
+    import json
+    state = project / ".aa2"
+    state.mkdir()
+    rid = "old"
+    data = ({"source": source, "config": {}, "outcome": "", "replans": 0}
+            if run_data is None else run_data)
+    with sqlite3.connect(state / "state.sqlite") as db:
+        db.executescript(";".join(s for s in FROZEN_SCHEMA8.split(";") if not any(t in s for t in omitted)))
+        db.execute("UPDATE meta SET value=? WHERE key='schema_version'", (version,))
+        db.execute("INSERT INTO runs VALUES(?,?,?,?,?,?)", (rid, status, stage, 0, 0, json.dumps(data)))
+        for key, wire in wires.items():
+            db.execute("INSERT INTO checkpoints VALUES(?,?,?)", (rid, key, wire))
+    return state, rid
+
+
+def frozen_state_snapshot(project):
+    from contextlib import closing
+    database = project / ".aa2/state.sqlite"
+    with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db:
+        schema = list(db.execute("SELECT type,name,tbl_name,rootpage,sql FROM sqlite_master ORDER BY rowid"))
+        rows = {}
+        for name, in db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY rowid"):
+            quoted = name.replace('"', '""')
+            rows[name] = list(db.execute(f'SELECT rowid,* FROM "{quoted}" ORDER BY rowid'))
+    paths = {}
+    for path in sorted(project.rglob("*")):
+        info = path.lstat()
+        name = path.relative_to(project).as_posix()
+        if path.is_symlink():
+            paths[name] = ("link", path.readlink())
+        elif path.is_dir():
+            paths[name] = ("directory", info.st_mode & 0o777)
+        else:
+            paths[name] = ("file", info.st_mode & 0o777, info.st_mtime_ns, path.read_bytes())
+    return {"schema": schema, "rows": rows, "paths": paths}
+
+
+def assert_legacy_format_rejected(project, *, no_meta=False):
+    from typer.testing import CliRunner
+
+    from auto_agents_2 import cli
+    from auto_agents_2.state_connection import check_project_format
+    message = ("State format is unreadable; preserve it for offline diagnosis" if no_meta else
+               "State schema 9 is required. Existing state needs separately supplied offline conversion; no automatic upgrade.")
+    before = frozen_state_snapshot(project)
+    for _ in range(2):
+        with pytest.raises(AA2Error) as failed:
+            check_project_format(project)
+        assert str(failed.value) == message and failed.value.code == "AA2_ERROR"
+        if no_meta:
+            assert isinstance(failed.value.__cause__, sqlite3.OperationalError)
+        assert frozen_state_snapshot(project) == before
+    for readonly in (False, True):
+        if no_meta:
+            with pytest.raises(sqlite3.OperationalError, match="no such table: meta"):
+                Store(project, readonly=readonly)
+        else:
+            with pytest.raises(AA2Error) as failed:
+                Store(project, readonly=readonly)
+            assert str(failed.value) == message
+        assert frozen_state_snapshot(project) == before
+    def forbidden(*args, **kwargs):
+        pytest.fail("Old physical state reached configuration/provider/workspace setup")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(cli, "ConfigStore", forbidden)
+        patch.setattr(cli, "WorkflowEngine", forbidden)
+        for command in ("run", "resume"):
+            result = CliRunner().invoke(cli.app, [command, "--project", str(project)])
+            assert result.exit_code == 2
+            assert "AA2_ERROR" in result.output
+            assert " ".join(message.split()) in " ".join(result.output.split())
+            assert frozen_state_snapshot(project) == before
+    # These constructor/preflight/CLI paths never enter Store.connect, whose
+    # normal maintenance gate may create migration.lock before validating.
+    assert not list((project / ".aa2").glob("*backup*"))
+    assert not list((project / ".aa2").glob("*.lock"))
+    return before
 
 
 def plan():
@@ -170,37 +293,27 @@ def test_patch_rejects_invalid_or_budget_evading_changes(defect):
         apply(original, patch)
 
 
-def test_migration_is_explicit_idempotent_and_preserves_raw_unapplied_proposals(tmp_path):
-    # Build the historical v1 schema, including its genuinely absent v5 table.
-    from auto_agents_2.store import SCHEMA
-    state = tmp_path / ".aa2"
-    state.mkdir()
-    with sqlite3.connect(state / "state.sqlite") as db:
-        db.executescript(";".join(s for s in SCHEMA.replace("'schema_version','8'", "'schema_version','1'").split(";")
-                                 if "resource_holds" not in s))
-    store = Store(tmp_path)
-    rid = store.admit("requirements", {})["id"]
+def test_old_v1_state_is_rejected_without_rewriting_unapplied_proposals(tmp_path):
+    # Retired: old Store.migrate upgrade, derived task states, backup and migration/v1 snapshot.
+    import json
     proposal = {"changes": [{"path": "README.md", "operation": "replace", "old_text": "old", "content": "unapplied"}],
                 "replan_stage": "plan", "replan_reason": "build order"}
-    store.checkpoints(rid, {"plan": plan().model_dump(), "develop/done": ["T1", "T2"],
+    records = {"plan": plan().model_dump(), "develop/done": ["T1", "T2"],
         "invocation/develop/task/T3": {"result": proposal}, "rounds/T3": {"round": 3},
-        "replanning/pending": {"stage": "plan", "decision": {"stalled": 7}}})
-    before = Store(tmp_path, readonly=True).get(rid, "invocation/develop/task/T3")
-    assert before["result"] == proposal
-    with store.connect() as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "1"
-    store.migrate()
-    snapshot = copy.deepcopy(store.get(rid, "migration/v1"))
-    assert snapshot["records"]["invocation/develop/task/T3"] == before
-    assert store.get(rid, "rounds/T3") == {"round": 3}
-    assert store.get(rid, "replanning/pending")["decision"]["stalled"] == 7
-    assert store.get(rid, "task_state/T1") == {"version": 1, "revision": 1, "implementation": "accepted", "evidence": "stale"}
-    store.migrate()
-    assert store.get(rid, "migration/v1") == snapshot
-    with sqlite3.connect(store.root / "state-v1.backup.sqlite") as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "1"
-    with pytest.raises(sqlite3.OperationalError):
-        Store(tmp_path, readonly=True).checkpoint(rid, "forbidden", {})
+        "replanning/pending": {"stage": "plan", "decision": {"stalled": 7}}}
+    frozen_legacy_state(tmp_path, "1", {k: json.dumps(v, ensure_ascii=True) for k, v in records.items()},
+                                     omitted=("resource_holds",), source="requirements")
+    before = assert_legacy_format_rejected(tmp_path)
+    raw = {row[2]: row[3] for row in before["rows"]["checkpoints"]}
+    assert json.loads(raw["invocation/develop/task/T3"])["result"] == proposal
+    assert json.loads(raw["rounds/T3"]) == {"round": 3}
+    assert json.loads(raw["replanning/pending"])["decision"]["stalled"] == 7
+    assert json.loads(raw["plan"]) == plan().model_dump()
+    assert json.loads(raw["develop/done"]) == ["T1", "T2"]
+    assert "task_state/T1" not in raw and "migration/v1" not in raw
+    assert "resource_holds" not in before["rows"]
+    assert before["rows"]["meta"] == [(1, "schema_version", "1")]
+    assert frozen_state_snapshot(tmp_path) == before
 
 
 def prepare_activation(tmp_path):
@@ -220,7 +333,7 @@ def prepare_activation(tmp_path):
 def test_activation_is_transactional_and_replay_does_not_charge_or_reopen_again(tmp_path):
     store, rid = prepare_activation(tmp_path)
     with store.connect() as db:
-        db.execute("CREATE TRIGGER fail_activation BEFORE INSERT ON checkpoints WHEN NEW.key='task_state/T4' BEGIN SELECT RAISE(ABORT,'injected'); END")
+        db.execute("CREATE TRIGGER fail_activation BEFORE INSERT ON checkpoint_records WHEN NEW.key='task_state/T4' BEGIN SELECT RAISE(ABORT,'injected'); END")
     with pytest.raises(sqlite3.IntegrityError, match="injected"):
         store.activate_plan_patch(rid, "patch")
     assert store.get(rid, "develop/done") == ["T1", "T2", "T3", "T4"]

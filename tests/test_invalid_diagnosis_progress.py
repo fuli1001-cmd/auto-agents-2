@@ -10,6 +10,7 @@ from test_recovery_policy import ready
 
 from auto_agents_2.errors import InvalidStructuredResponse, PostCommitError, RecoveryPathExhausted
 from auto_agents_2.recovery import Diagnosis
+from auto_agents_2.state_codec import checkpoint_query_db
 
 class InvalidAgent(LoopAgent):
     def __init__(self, semantic=False, alternative="repair"):
@@ -27,8 +28,7 @@ class InvalidAgent(LoopAgent):
 
 def ledgers(workflow, rid):
     with workflow.store.connect() as db:
-        return [json.loads(r[0]) for r in db.execute(
-            "select data from checkpoints where run_id=? and key like 'recovery/no-progress/diagnose/%'", (rid,))]
+        return [json.loads(r[0]) for r in checkpoint_query_db(db, "SELECT slot_order AS data FROM checkpoint_records where run_id=? and key like 'recovery/no-progress/diagnose/%'", (rid,), wire_index=0)]
 
 @pytest.mark.parametrize("semantic", [False, True])
 async def test_two_rejected_completed_diagnoses_exclude_repetition(tmp_path, semantic):

@@ -13,6 +13,7 @@ from auto_agents_2.models import Change, ImplementationResult, PlanResult, TaskS
 from auto_agents_2.output_limit_recovery import CALL, KEY, code_identity, raw_hash
 from auto_agents_2.providers import PROMPT_VERSION, VIEW_VERSION, ProviderRouter, invocation_identity
 from auto_agents_2.replanning import check_criteria
+from auto_agents_2.state_codec import checkpoint_query_db
 from auto_agents_2.util import digest, write_json
 from auto_agents_2.workspace import tree_hash
 
@@ -122,7 +123,7 @@ def attach_incident(workflow, agent, rid, *, prior_comparable=False):
     guards = {}
     with workflow.store.connect() as db:
         for key in keys:
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+            row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
             guards[key] = raw_hash(row[0]) if row else None
     request = {"run_id": rid, "operation": operation, "task_id": task["id"], "origin_id": origin,
         "task_spec_hash": digest(task), "round": 28, "infra_key": infra, "guards": guards,

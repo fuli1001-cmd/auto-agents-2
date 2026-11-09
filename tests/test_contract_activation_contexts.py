@@ -11,6 +11,7 @@ from auto_agents_2.contract_corrections import contract_review_binding
 from auto_agents_2.errors import AA2Error
 from auto_agents_2.evidence_refs import controller_context_catalog
 from auto_agents_2.plan_revision import EvidencePatchReview, PlanPatch
+from auto_agents_2.state_codec import checkpoint_query_db
 from auto_agents_2.util import digest
 from auto_agents_2.workspace import tree_hash
 
@@ -371,8 +372,7 @@ async def test_legacy_prepared_replay_requires_original_frozen_evidence(tmp_path
         workflow.store.checkpoint(rid, 'invocation/recovery/patch-review/' + identity, {})
     elif bad in {'presentation_missing', 'artifact_changed'}:
         with workflow.store.connect() as db:
-            entries = list(db.execute('SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE ?',
-                (rid, 'presentation/recovery/patch-review/' + identity + '/%')))
+            entries = list(checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE ?', (rid, 'presentation/recovery/patch-review/' + identity + '/%'), wire_index=1))
         import json
         for name, data in entries:
             ref = json.loads(data)['artifact']

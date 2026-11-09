@@ -16,6 +16,7 @@ from auto_agents_2.engine import WorkflowEngine
 from auto_agents_2.environment import Environment, EnvironmentManager
 from auto_agents_2.faults import HumanIntervention
 from auto_agents_2.models import Change, ImplementationResult
+from auto_agents_2.state_codec import delete_query_db, update_wire_db
 
 UNKNOWN = "npm error Unable to resolve reference $vitest"
 
@@ -442,7 +443,7 @@ async def test_dispatched_action_rejects_missing_or_damaged_diagnosis_proof(tmp_
     # Fault injection is deliberately below the production immutable-record guard.
     with workflow.store.connect() as db:
         if fault == "missing":
-            db.execute("DELETE FROM checkpoints WHERE run_id=? AND key=?", (rid, diagnosis_key))
+            delete_query_db(db, 'SELECT slot_order FROM checkpoint_records WHERE run_id=? AND key=?', (rid, diagnosis_key))
         else:
             raw = workflow.store.get(rid, diagnosis_key)
             if fault == "stale_plan":
@@ -453,10 +454,7 @@ async def test_dispatched_action_rejects_missing_or_damaged_diagnosis_proof(tmp_
                 raw["outcome"]["diagnosis"]["action"] = "recheck"
             elif fault == "wrong_cycle":
                 raw["cycle_id"] = "another-cycle"
-            db.execute(
-                "UPDATE checkpoints SET data=? WHERE run_id=? AND key=?",
-                (json.dumps(raw), rid, diagnosis_key),
-            )
+            update_wire_db(db, rid, diagnosis_key, json.dumps(raw))
     with pytest.raises(StateConflict):
         workflow.recovery_policy.validate_consumption(rid, permit_key)
 
@@ -789,11 +787,9 @@ async def test_new_wait_cannot_consume_invalid_previous_repair(tmp_path, damage)
     # Deliberate durable-state damage, never used to authorize a production run.
     with workflow.store.connect() as db:
         if damage == "missing":
-            db.execute("DELETE FROM checkpoints WHERE run_id=? AND key=?", (rid, key))
+            delete_query_db(db, 'SELECT slot_order FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key))
         else:
-            db.execute(
-                "UPDATE checkpoints SET data=? WHERE run_id=? AND key=?", (json.dumps(value), rid, key)
-            )
+            update_wire_db(db, rid, key, json.dumps(value))
     with pytest.raises(StateConflict):
         await workflow._wait_prerequisite(rid, failure.value)
     assert not workflow.store.get(rid, "recovery/active")

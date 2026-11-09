@@ -13,6 +13,7 @@ from auto_agents_2.errors import AA2Error, PostCommitError
 from auto_agents_2.interaction import choice_spec
 from auto_agents_2.recovery import Diagnosis, adjudicate, evidence_references
 from auto_agents_2.recovery_identity import legacy_failure_records
+from auto_agents_2.state_codec import update_wire_db
 from auto_agents_2.util import digest, write_json
 from auto_agents_2.workspace import tree_hash
 
@@ -323,7 +324,7 @@ async def test_completed_diagnosis_cannot_bypass_changed_inputs_or_missing_proof
         # Simulate disk corruption, bypassing the normal immutable receipt writer.
         import json
         with workflow.store.connect() as db:
-            db.execute("UPDATE checkpoints SET data=? WHERE run_id=? AND key=?", (json.dumps(permit), rid, permit_key))
+            update_wire_db(db, rid, permit_key, json.dumps(permit))
     async def no_call(*args, **kwargs):
         pytest.fail("Changed inputs require preserving the existing result, not another provider call")
     workflow.agent.invoke = no_call

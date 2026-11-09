@@ -8,6 +8,7 @@ from test_task_plan_continuity import LocalPatchAgent, amended, invalidate
 from auto_agents_2.contract_corrections import ContractCorrection
 from auto_agents_2.models import PlanResult
 from auto_agents_2.plan_revision import PlanPatch
+from auto_agents_2.state_codec import update_wire_db
 from auto_agents_2.util import digest
 
 
@@ -84,8 +85,7 @@ async def test_local_contract_correction_requires_its_complete_historical_proof(
         # Deliberate persisted damage: never treat it as authority.
         with store.connect() as db:
             import json
-            db.execute("UPDATE checkpoints SET data=? WHERE run_id=? AND key=?",
-                       (json.dumps(permit), rid, permit_key))
+            update_wire_db(db, rid, permit_key, json.dumps(permit))
     elif damage == "legacy_context":
         journal["version"] = 2
     elif damage == "upstream":

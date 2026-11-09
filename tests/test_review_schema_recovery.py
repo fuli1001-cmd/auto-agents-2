@@ -15,6 +15,7 @@ from auto_agents_2.errors import RecoveryPathExhausted
 from auto_agents_2.models import DocumentResult, ReviewResult
 from auto_agents_2.preview_evidence import PreviewComparison
 from auto_agents_2.sandbox import SandboxRunner
+from auto_agents_2.state_codec import checkpoint_query_db
 from auto_agents_2.util import write_json
 from auto_agents_2.workspace import tree_hash
 
@@ -121,8 +122,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":11,"output_tok
 
 def requests(workflow, rid):
     with workflow.store.connect() as db:
-        return [json.loads(row[0]) for row in db.execute(
-            "SELECT data FROM checkpoints WHERE run_id=? AND key LIKE 'proposal-recovery/requests/%'", (rid,))]
+        return [json.loads(row[0]) for row in checkpoint_query_db(db, "SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'proposal-recovery/requests/%'", (rid,), wire_index=0)]
 
 
 @pytest.mark.parametrize("kind,responses", [

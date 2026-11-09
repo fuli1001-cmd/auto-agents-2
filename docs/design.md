@@ -1084,3 +1084,24 @@ proposals never advance the research gate or replace human prototype approval.
 A/AAAA 并行且全部成功才交付结果，NOERROR 且匹配 Question 的 NODATA 可为空，失败或截断不能视为空；严格核 JSON 重复键、记录类型、地址字符串、问题身份及有界 CNAME owner 链。任一 IPv4/IPv6 地址不公开则整体拒绝；实际连接只能拨整个已校验集合中的 numeric 地址，代理 CONNECT 同样固定 numeric，原域名 TLS 和 Host 不变。每次采集冻结解析策略与现有 proxy snapshot，使用独立 pool；同 origin 已绑定 socket 可复用，新增 origin/连接继续解析检验，不跨策略复用 pool。
 
 解析响应原始/解压后各最多 64 KiB、最多 256 Answer 与 8 CNAME，保留正文原始/解压后各 4 MiB、最多 5 次重定向及共享 30 秒 HTTP acquisition deadline；解析、bootstrap、代理 CONNECT、TLS 与资料正文都消耗同一 deadline，不逐层刷新总预算。任何失败取消并排空同轮 A/AAAA 任务，不发布部分采集。配置改变前须由操作者确认解析器信任、域名隐私和网络可达性；不得用该路由绕过明确的资源拒绝。
+
+## Controller-private state format 9
+
+Normal storage creates and reads schema 9 only. Older versions are rejected before
+configuration, provider or project-write side effects; aa2 has no automatic legacy
+converter or migration command.
+
+Only the four known request wrapper paths and frozen permit versions in
+request.evidence.history.recent are shared. Original wire bytes, SQLite source
+type, row ordering, raw CAS hashes, unknown fields, approval rules and business
+history are preserved. References remain controller-private, never model material.
+
+Store and checkpoint consumers resolve values through the codec. Key/count
+queries remain body-free. Readers bind to an explicit connection transaction
+epoch, cache immutable wire bytes, and decode independent logical values.
+Same-connection writes and transaction completion invalidate the proper scope.
+New writes deduplicate only the established frozen request/permit objects.
+
+Schema/writer guards and the maintenance HOLD/shared-lock protocol remain runtime
+protections. A separately supplied offline operator tool may use that protocol;
+normal tasks must not enter state left under an unfinished maintenance barrier.

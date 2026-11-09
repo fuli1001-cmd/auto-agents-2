@@ -12,6 +12,7 @@ from .evidence import input_identity, reusable, runtime_configuration
 from .faults import StateConflict
 from .models import CheckResult, PreviewSpec, Record, ReviewResult
 from .recovery import FailureRecord
+from .state_codec import checkpoint_query_db
 from .util import digest
 from .verification import passed
 from .workspace import tree_hash
@@ -40,9 +41,7 @@ class PreviewEvidence:
         current = plan.preview.model_dump()
         records = []
         with self.store.connect() as db:
-            rows = db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND "
-                "(key LIKE 'plan_revision/history/%' OR key LIKE 'recovery/gate-history/%') ORDER BY rowid",
-                (rid,)).fetchall()
+            rows = checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND (key LIKE 'plan_revision/history/%' OR key LIKE 'recovery/gate-history/%') ORDER BY rowid", (rid,), wire_index=1).fetchall()
         for key, raw in rows:
             saved = json.loads(raw)
             previous = saved.get("checkpoints", {}).get("plan") if key.startswith("recovery/") else saved.get("plan")

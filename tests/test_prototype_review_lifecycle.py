@@ -170,4 +170,4 @@ async def test_superseded_review_remains_reachable_after_delivery_cleanup(tmp_pa
     assert workflow.store.get(rid, "prototype_approval")["human"] == human
     workflow.approvals.archive_review(rid, saved)
     with workflow.store.connect() as db:
-        assert db.execute("SELECT count(*) FROM checkpoints WHERE run_id=? AND key=?",(rid,history_key)).fetchone()[0] == 1
+        assert db.execute('SELECT count(*) FROM checkpoint_records WHERE run_id=? AND key=?',(rid,history_key)).fetchone()[0] == 1

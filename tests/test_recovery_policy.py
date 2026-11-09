@@ -238,25 +238,28 @@ def test_precheck_failure_is_not_missing_evidence_and_milestones_do_not_repeat(t
     assert workflow.convergence.state(rid, "T1") == state
 
 
-def test_v6_migration_preserves_counts_pause_and_answers(tmp_path):
-    workflow, rid = setup(tmp_path)
-    store = workflow.store
-    store.checkpoints(rid, {"rounds/T1": {"round": 21, "stalled": 20}, "plan": plan().model_dump()})
-    question = store.request(rid, "fixture", "answer")
-    store.answer(question["id"], "y")
-    store.update(rid, status="PAUSED")
-    with store.connect() as db:
-        db.execute("UPDATE meta SET value='6' WHERE key='schema_version'")
-    store.migrate()
-    store.migrate()
-    assert store.run(rid)["status"] == "PAUSED"
-    assert store.get(rid, "rounds/T1") == {"round": 21, "stalled": 20}
-    assert store.question(question["id"])["answer"] == "y"
-    assert store.get(rid, "automation/engineering/T1")["legacy_baseline"]
-    with sqlite3.connect(store.root / "state-v6.backup.sqlite") as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "6"
-    with store.connect() as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "8"
+def test_old_v6_state_is_rejected_without_changing_counts_pause_or_answer(tmp_path):
+    # Retired: runtime v6 upgrade, derived engineering baseline and backup.
+    import json
+
+    from test_recovery_contracts import (
+        assert_legacy_format_rejected,
+        frozen_legacy_state,
+        frozen_state_snapshot,
+    )
+    records = {"rounds/T1": {"round": 21, "stalled": 20}, "plan": plan().model_dump()}
+    state, rid = frozen_legacy_state(tmp_path, "6", {k: json.dumps(v, ensure_ascii=True) for k, v in records.items()}, status="PAUSED")
+    with sqlite3.connect(state / "state.sqlite") as db:
+        db.execute("INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,?)", ("q", rid, "fixture", "answer", "", "y", 1, "{}", 0))
+    before = assert_legacy_format_rejected(tmp_path)
+    raw = {row[2]: row[3] for row in before["rows"]["checkpoints"]}
+    assert before["rows"]["runs"][0][2] == "PAUSED"
+    assert json.loads(raw["rounds/T1"]) == {"round": 21, "stalled": 20}
+    assert json.loads(raw["plan"]) == plan().model_dump()
+    assert before["rows"]["questions"][0][4:7] == ("answer", "", "y")
+    assert "automation/engineering/T1" not in raw
+    assert before["rows"]["meta"] == [(1, "schema_version", "6")]
+    assert frozen_state_snapshot(tmp_path) == before
 
 
 async def test_task_reaches_verified_result_after_twenty_failed_rounds(tmp_path):

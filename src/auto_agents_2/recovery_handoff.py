@@ -3,6 +3,7 @@ import copy
 import json
 
 from .faults import StateConflict
+from .state_codec import checkpoint_query_db
 from .util import digest
 
 HANDOFF_FIELDS = ('diagnosis_request', 'history', 'previous_failure_observations', 'current_task_results')
@@ -35,11 +36,9 @@ def diagnosis_handoff(engine, rid, failure, permit_key, operation, source_hash=N
     # Scope is determined from controller checkpoints, never from model paths or
     # requested hashes. These are historical observations, not current acceptance.
     with store.connect() as db:
-        rows = db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE ? ORDER BY rowid",
-                          (rid, f'recovery/failures/{failure.id}/%')).fetchall()
+        rows = checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE ? ORDER BY rowid', (rid, f'recovery/failures/{failure.id}/%'), wire_index=1).fetchall()
         if failure.origin_id == 'delivery' and failure.component == 'delivery':
-            rows += db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND (key LIKE 'recovery/delivery-policy/%' OR key LIKE 'recovery/delivery/%') ORDER BY rowid",
-                               (rid,)).fetchall()
+            rows += checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND (key LIKE 'recovery/delivery-policy/%' OR key LIKE 'recovery/delivery/%') ORDER BY rowid", (rid,), wire_index=1).fetchall()
     previous, seen = [], set()
     for row in rows:
         original = json.loads(row['data'])

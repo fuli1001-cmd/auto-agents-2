@@ -100,7 +100,7 @@ async def test_budget_survives_restart_and_repeated_retry(tmp_path):
         await prepare(restarted, rid, tmp_path, changes)
     assert len(agent.repairs) == 2
     with workflow.store.connect() as db:
-        key = db.execute("SELECT key FROM checkpoints WHERE key LIKE 'patch-repair/%'").fetchone()[0]
+        key = db.execute("SELECT key FROM checkpoint_records WHERE key LIKE 'patch-repair/%'").fetchone()[0]
     state = workflow.store.get(rid, key)
     assert state["phase"] == "blocked" and len(state["attempts"]) == 2
     assert workflow.artifacts.json(state["original"]) == [c.model_dump() for c in changes]

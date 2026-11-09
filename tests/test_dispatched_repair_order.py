@@ -15,6 +15,7 @@ from auto_agents_2.models import Change, Command, ImplementationResult, PlanResu
 from auto_agents_2.plan_revision import PlanPatch
 from auto_agents_2.planning import ready_batch
 from auto_agents_2.recovery import Diagnosis, RepairTarget
+from auto_agents_2.state_codec import checkpoint_query_db
 from auto_agents_2.task_repair_order import dispatched_repair
 from auto_agents_2.util import digest
 from auto_agents_2.workspace import git
@@ -245,7 +246,7 @@ async def test_repair_priority_requires_current_permit_and_accepted_input(tmp_pa
             store.checkpoint(rid, permit_key, permit)
     else:
         with store.connect() as db:
-            rows = [(k, json.loads(v)) for k,v in db.execute('SELECT key,data FROM checkpoints WHERE run_id=?', (rid,))]
+            rows = [(k, json.loads(v)) for k,v in checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=?', (rid,), wire_index=1)]
         for key, value in rows:
             if invalid == 'missing_receipt' and key.startswith('authority/reviews/') and value.get('operation') == 'develop/task/P/review':
                 store.checkpoint(rid, key, None)

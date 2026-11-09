@@ -281,7 +281,7 @@ async def test_failed_preview_restarts_whole_contract_under_a_new_permit(tmp_pat
     assert workflow.store.get(rid, "recovery/active") is None
     assert len(browsers) == 2 and browsers[0] == browsers[1]
     with workflow.store.connect() as db:
-        rows = db.execute("SELECT key FROM checkpoints WHERE run_id=? AND key LIKE 'recovery/preview-rechecks/%'", (rid,)).fetchall()
+        rows = db.execute("SELECT key FROM checkpoint_records WHERE run_id=? AND key LIKE 'recovery/preview-rechecks/%'", (rid,)).fetchall()
     assert len(rows) == 2
     records = [workflow.store.get(rid, row[0]) for row in rows]
     assert {record["phase"] for record in records} == {"recorded", "completed"}

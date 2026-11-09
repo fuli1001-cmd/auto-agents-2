@@ -19,6 +19,7 @@ from auto_agents_2.evidence_admission import admission_context, admission_record
 from auto_agents_2.faults import StateConflict
 from auto_agents_2.models import EvidencePlanReview, ReviewResult, strict_schema
 from auto_agents_2.review_authority import InvalidAuthorityReview, review_schema, validate_review
+from auto_agents_2.state_codec import checkpoint_query_db
 from auto_agents_2.util import digest
 
 
@@ -453,8 +454,7 @@ def test_same_requirement_can_legitimately_withdraw_one_acceptance_leaf(tmp_path
 def legacy_records(workflow, rid):
     import json
     with workflow.store.connect() as db:
-        records = {k: json.loads(v) for k, v in db.execute(
-            "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
+        records = {k: json.loads(v) for k, v in checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=?', (rid,), wire_index=1)}
     return {k: v for k, v in records.items() if not k.startswith(ROOT)}
 
 

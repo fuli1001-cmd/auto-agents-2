@@ -200,7 +200,7 @@ async def test_decision_return_rechecks_material_and_human_before_permit_or_stop
         await authorize(workflow, rid, tmp_path, contract, record)
     assert all(not path.exists() for path in removed)
     with workflow.store.connect() as db:
-        assert not db.execute("SELECT 1 FROM checkpoints WHERE run_id=? AND (key LIKE 'recovery/permits/%' OR key LIKE 'recovery/stopped-selection/%')", (rid,)).fetchone()
+        assert not db.execute("SELECT 1 FROM checkpoint_records WHERE run_id=? AND (key LIKE 'recovery/permits/%' OR key LIKE 'recovery/stopped-selection/%')", (rid,)).fetchone()
     assert workflow.store.run(rid)["data"]["replans"] == 26
 
 
@@ -315,7 +315,7 @@ async def test_material_is_rechecked_after_the_last_manual_wait(tmp_path, monkey
     with pytest.raises(StateConflict, match="Approved action"):
         await authorize(workflow, rid, tmp_path, contract, record)
     with workflow.store.connect() as db:
-        assert not db.execute("SELECT 1 FROM checkpoints WHERE run_id=? AND key LIKE 'recovery/permits/%'", (rid,)).fetchone()
+        assert not db.execute("SELECT 1 FROM checkpoint_records WHERE run_id=? AND key LIKE 'recovery/permits/%'", (rid,)).fetchone()
     if change == "delete":
         assert not path.exists()
 

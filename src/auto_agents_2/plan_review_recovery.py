@@ -10,6 +10,7 @@ from .evidence_admission import admission_context, validate_obligations
 from .faults import StateConflict
 from .models import EvidencePlanReview, PlanResult
 from .stage_responsibilities import GATES, validate_correction_request
+from .state_codec import checkpoint_query_db
 from .util import digest
 from .workspace import tree_hash
 
@@ -219,8 +220,7 @@ class PlanReviewRecovery:
         if self.store.get(rid, "replanning/pending") != pending:
             raise StateConflict("Upstream re-entry pending state changed before completion")
         with self.store.connect() as db:
-            archived = {row["key"]: json.loads(row["data"]) for row in db.execute(
-                "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))
+            archived = {row["key"]: json.loads(row["data"]) for row in checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=?', (rid,), wire_index=1)
                 if self._invalidated(row["key"], pending["stage"])}
         feedback = {"stage": pending["stage"], "reason": pending["reason"], "recovery_refs": recovery_refs,
                     "correction_request": pending["correction_request"],
@@ -273,8 +273,7 @@ class PlanReviewRecovery:
                 or self.store.get(rid, "replanning/pending") is not None):
             raise StateConflict("Upstream completion does not match the latest committed gate reset")
         with self.store.connect() as db:
-            if any(self._invalidated(row[0], pending["stage"]) for row in db.execute(
-                    "SELECT key FROM checkpoints WHERE run_id=?", (rid,))):
+            if any(self._invalidated(row[0], pending["stage"]) for row in db.execute('SELECT key FROM checkpoint_records WHERE run_id=?', (rid,))):
                 raise StateConflict("Upstream gate has already advanced beyond its uncompleted receipt")
         work = self.store.root / "worktrees" / rid / "integration"
         if not work.is_dir():

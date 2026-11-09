@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -11,8 +12,11 @@ from manual_research_presentation import RULES, Decision, Verdicts, citations_va
 from manual_support import finalize
 
 from auto_agents_2.artifacts import ArtifactStore
-from auto_agents_2.config import ConfigStore
+from auto_agents_2.config import Cleanup, ConfigStore
+from auto_agents_2.resources import ResourceManager
+from auto_agents_2.state_codec import checkpoint_query_db, put_wire_db
 from auto_agents_2.store import Store
+from auto_agents_2.util import digest
 
 
 def paused_project(tmp_path):
@@ -151,3 +155,81 @@ def test_citation_oracle_requires_correct_version_and_exact_rule():
         altered = answer.model_copy(deep=True)
         altered.verdicts[4].evidence = evidence
         assert not citations_valid(altered)
+
+
+def test_snapshot_preserves_unmodified_wire_and_root_slots_when_rebinding_a_key(tmp_path):
+    source, store, rid = paused_project(tmp_path)
+    work = source / "work"
+    work.mkdir()
+    target = tmp_path / "copy"
+    base = "frozen-base"
+    key = "recovery/task-baselines/T/" + digest([str(work), base])[:16]
+    new_key = "recovery/task-baselines/T/" + digest([str(target / "work"), base])[:16]
+    feedback = "Original approval mentioning " + str(source)
+    wires = {"z/non-whitelist": ' { "kept" : true }\n',
+             "invocation/no-locator": ' { "result" : { "approved" : true } }\n',
+             key: json.dumps({"workspace": str(work), "base": base, "feedback": feedback})}
+    with store.connect() as db:
+        for name, wire in wires.items():
+            assert not db.execute("SELECT 1 FROM checkpoint_records WHERE run_id=? AND key=?", (rid, name)).fetchone()
+            put_wire_db(db, rid, name, wire)
+        before = [tuple(row) for row in checkpoint_query_db(db,
+            "SELECT slot_order,key,slot_order AS data FROM checkpoint_records WHERE run_id=? ORDER BY slot_order",
+            (rid,), wire_index=2)]
+    original = store.path.read_bytes()
+    result = snapshot(source, target)
+    copied = Store(target)
+    with copied.connect() as db:
+        after = [tuple(row) for row in checkpoint_query_db(db,
+            "SELECT slot_order,key,slot_order AS data FROM checkpoint_records WHERE run_id=? ORDER BY slot_order",
+            (rid,), wire_index=2)]
+    assert [(slot, name) for slot, name, _ in after] == [(slot, new_key if name == key else name) for slot, name, _ in before]
+    after_wire = {name: wire for _, name, wire in after}
+    assert key not in after_wire and new_key in after_wire
+    assert after_wire["z/non-whitelist"] == wires["z/non-whitelist"]
+    assert after_wire["invocation/no-locator"] == wires["invocation/no-locator"]
+    assert json.loads(after_wire[new_key]) == {"workspace": str(target / "work"), "base": base, "feedback": feedback}
+    assert Path(result["original_database"]).read_bytes() == original == store.path.read_bytes()
+
+
+@pytest.mark.parametrize("damage", ["non-whitelist-bad-json", "key-collision"])
+def test_snapshot_root_failure_rolls_back_all_target_metadata(tmp_path, damage):
+    source, store, rid = paused_project(tmp_path)
+    work = store.root / "worktrees" / "fixture"
+    work.mkdir(parents=True)
+    ResourceManager(store, Cleanup()).register(work, "temporary", rid)
+    target = tmp_path / "copy"
+    base = "frozen-base"
+    key = "recovery/task-baselines/T/original"
+    collision = "recovery/task-baselines/T/" + digest([str(target / work.relative_to(source)), base])[:16]
+    wires = {"develop/task/T": json.dumps({"workspace": str(work), "feedback": str(source)})}
+    if damage == "non-whitelist-bad-json":
+        wires["outside/whitelist"] = '{"broken":'
+    else:
+        wires[key] = json.dumps({"workspace": str(work), "base": base})
+        wires[collision] = ' { "preserve" : true } '
+    with store.connect() as db:
+        for name, wire in wires.items():
+            assert not db.execute("SELECT 1 FROM checkpoint_records WHERE run_id=? AND key=?", (rid, name)).fetchone()
+            put_wire_db(db, rid, name, wire)
+        before = [tuple(row) for row in checkpoint_query_db(db,
+            "SELECT slot_order,key,slot_order AS data FROM checkpoint_records WHERE run_id=? ORDER BY slot_order",
+            (rid,), wire_index=2)]
+        resources_before = [tuple(row) for row in db.execute("SELECT * FROM resources ORDER BY id")]
+    original = store.path.read_bytes()
+    if damage == "non-whitelist-bad-json":
+        with pytest.raises(json.JSONDecodeError):
+            snapshot(source, target)
+    else:
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+            snapshot(source, target)
+    copied = Store(target)
+    with copied.connect() as db:
+        after = [tuple(row) for row in checkpoint_query_db(db,
+            "SELECT slot_order,key,slot_order AS data FROM checkpoint_records WHERE run_id=? ORDER BY slot_order",
+            (rid,), wire_index=2)]
+        assert [tuple(row) for row in db.execute("SELECT * FROM resources ORDER BY id")] == resources_before
+    assert after == before
+    assert store.path.read_bytes() == original
+    assert (tmp_path / "copy-original-state.sqlite").read_bytes() == original
+    assert (tmp_path / "copy-snapshot.json").read_bytes() == b""

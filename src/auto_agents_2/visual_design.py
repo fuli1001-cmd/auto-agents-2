@@ -8,6 +8,7 @@ from importlib.resources import files
 
 from .errors import InvalidStructuredResponse
 from .faults import StateConflict
+from .state_codec import checkpoint_query_db
 from .util import digest
 
 VERSION = 1
@@ -235,8 +236,7 @@ class UIDesign:
         pending = self.store.get(rid, "prototype/pending", {})
         candidates = [("prototype/pending", pending)]
         with self.store.connect() as db:
-            history = [(row[0], json.loads(row[1])) for row in db.execute(
-                "SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'recovery/gate-history/%'", (rid,))]
+            history = [(row[0], json.loads(row[1])) for row in checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'recovery/gate-history/%'", (rid,), wire_index=1)]
         history.sort(key=lambda item: int(item[0].rsplit("/", 1)[1]), reverse=True)
         candidates.extend((key, value.get("checkpoints", {}).get("prototype/pending", {})) for key, value in history)
         for key, value in candidates:

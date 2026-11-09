@@ -8,6 +8,7 @@ from .approvals import prototype_identity
 from .faults import StateConflict
 from .models import DocumentResult
 from .stage_responsibilities import validate_correction_request
+from .state_codec import checkpoint_query_db
 from .util import digest
 from .workspace import tree_hash
 
@@ -165,10 +166,8 @@ class PrototypeReentry:
         if not self._transition(rid, work, latest, generation, feedback):
             return {**base, "status": "unverified_transition"}
         with self.store.connect() as db:
-            histories = [(r["key"], json.loads(r["data"])) for r in db.execute(
-                "SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'recovery/gate-history/%'", (rid,))]
-            reviews = [(r["key"], json.loads(r["data"])) for r in db.execute(
-                "SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'authority/prototype-reviews/%'", (rid,))]
+            histories = [(r["key"], json.loads(r["data"])) for r in checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'recovery/gate-history/%'", (rid,), wire_index=1)]
+            reviews = [(r["key"], json.loads(r["data"])) for r in checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'authority/prototype-reviews/%'", (rid,), wire_index=1)]
         histories = sorted([(k, h) for k, h in histories if re.fullmatch(r"recovery/gate-history/\d+", k)
                             and int(k.rsplit("/", 1)[1]) <= generation and self._document(h)],
                            key=lambda row: int(row[0].rsplit("/", 1)[1]), reverse=True)

@@ -11,6 +11,7 @@ from auto_agents_2.models import ReviewResult
 from auto_agents_2.prompts import PromptCompiler
 from auto_agents_2.providers import ProviderRouter, diagnostic_summary
 from auto_agents_2.sandbox import SandboxRunner
+from auto_agents_2.state_codec import checkpoint_query_db
 from auto_agents_2.transports import CodexTransport
 from auto_agents_2.util import atomic_write, digest, write_json
 
@@ -85,7 +86,7 @@ async def test_large_prompt_is_complete_read_only_and_probed_before_invocation(t
     assert result.approved and context == original
     manifest = store.get(rid, "materials/large")
     with store.connect() as db:
-        frozen = json.loads(db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key LIKE 'presentation/large/%'", (rid,)).fetchone()[0])
+        frozen = json.loads(checkpoint_query_db(db, "SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'presentation/large/%'", (rid,), wire_index=0).fetchone()[0])
     from auto_agents_2.artifacts import ArtifactStore
     payload = ArtifactStore(store.root).json(frozen["artifact"])["payload"]
     assert payload["mandatory"] == context["mandatory"] and payload["document"] == context["document"]

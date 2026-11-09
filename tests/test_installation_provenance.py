@@ -238,7 +238,7 @@ async def test_incomplete_install_never_publishes_ready_or_resolution(tmp_path, 
     assert not list((store.root / "environments").glob("*/aa2-ready.json"))
     assert not list((store.root / "environment-records").glob("*/resolution.json"))
     with store.connect() as db:
-        assert db.execute("SELECT 1 FROM checkpoints WHERE run_id=? AND key LIKE 'environment/logs/%'", (rid,)).fetchone()
+        assert db.execute("SELECT 1 FROM checkpoint_records WHERE run_id=? AND key LIKE 'environment/logs/%'", (rid,)).fetchone()
 
 
 async def test_conda_only_record_does_not_claim_a_pip_install(tmp_path, monkeypatch):

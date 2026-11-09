@@ -15,6 +15,7 @@ from test_storage_space import GIB, fake_platform, observation
 from auto_agents_2 import storage_space
 from auto_agents_2.engine import WorkflowEngine
 from auto_agents_2.faults import ResourceBoundary
+from auto_agents_2.state_codec import checkpoint_query_db
 from auto_agents_2.util import write_json
 
 STDERR = "<3>WSL (29113 - ) ERROR: UtilAcceptVsock:271: accept4 failed 110\n"
@@ -103,10 +104,7 @@ async def test_one_transient_failure_recovers_only_after_fresh_real_volume_proof
     with store.connect() as db:
         snapshots = {
             row[0]: json.loads(row[1])
-            for row in db.execute(
-                "SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'resources/storage-rechecks/%'",
-                (rid,),
-            )
+            for row in checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'resources/storage-rechecks/%'", (rid,), wire_index=1)
         }
         assert db.execute("SELECT COUNT(*) FROM questions WHERE run_id=?", (rid,)).fetchone()[0] == 0
     assert len(snapshots) == 2

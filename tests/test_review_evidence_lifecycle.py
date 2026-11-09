@@ -14,6 +14,7 @@ from auto_agents_2.faults import StateConflict
 from auto_agents_2.issues import IssueLedger
 from auto_agents_2.models import CheckResult, Command, Finding, ReviewResult, TaskSpec
 from auto_agents_2.review_evidence import ReviewEvidence, consumer_key, is_review_consumer, review_consumer
+from auto_agents_2.state_codec import checkpoint_query_db
 from auto_agents_2.verification import VerificationRefreshNeeded, verification_operation
 
 
@@ -87,8 +88,7 @@ def test_transaction_failure_keeps_previous_owner_and_result(tmp_path, transitio
     if transition == "consume":
         owners.retain(rid, key, checks)
     with store.connect() as db:
-        db.execute("CREATE TRIGGER fail_consumer BEFORE INSERT ON checkpoints "
-                   "WHEN NEW.key='verify/review-evidence' BEGIN SELECT RAISE(ABORT,'injected'); END")
+        db.execute("CREATE TRIGGER fail_consumer BEFORE INSERT ON checkpoint_records WHEN NEW.key='verify/review-evidence' BEGIN SELECT RAISE(ABORT,'injected'); END")
     with pytest.raises(sqlite3.IntegrityError, match="injected"):
         if transition == "publish":
             owners.retain(rid, key, checks, updates={"verification/batches/fixture": {"phase": "completed", "checks": checks}})
@@ -243,7 +243,7 @@ async def test_workflow_handoff_task_final_reuse_and_reintegration(tmp_path, mon
     assert all(workflow.artifacts.released(ref) for ref in captures)
     for rid in (first["id"], second["id"]):
         with workflow.store.connect() as db:
-            rows = list(db.execute("SELECT key,data FROM checkpoints WHERE run_id=?", (rid,)))
+            rows = list(checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=?', (rid,), wire_index=1))
         assert all(json.loads(row["data"])["phase"] == "consumed" for row in rows if is_review_consumer(row["key"]))
     assert review_consumer.get() is None and verification_operation.get() is None
 

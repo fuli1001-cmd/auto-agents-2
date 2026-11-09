@@ -29,6 +29,7 @@ from .resources import ResourceManager
 from .review_evidence import ReviewEvidence, review_consumer
 from .safe_files import read_regular
 from .sandbox import SandboxRunner
+from .state_codec import checkpoint_query_db
 from .store import Store
 from .test_reports import is_python, read_junit, report_command, test_runner
 from .util import SECRET, contained, digest, scrub_text
@@ -334,7 +335,7 @@ class VerificationService:
         import json
         store = self.resources.store
         with store.connect() as db:
-            rows = list(db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND substr(key,1,17)='evidence/capture/'", (rid,)))
+            rows = list(checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND substr(key,1,17)='evidence/capture/'", (rid,), wire_index=1))
         for row in rows:
             saved = json.loads(row["data"])
             if (saved.get("hold") and saved.get("command_hash") == result.command_hash

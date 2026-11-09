@@ -10,15 +10,14 @@ from pathlib import Path
 
 from .models import PlanResult
 from .planning import task_dependencies
+from .state_codec import checkpoint_query_db
 from .util import digest
 from .workspace import git, tree_hash
 
 
 def _history(store, rid):
     with store.connect() as db:
-        rows = db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND "
-            "(key LIKE 'plan_revision/history/%' OR key LIKE 'authority/task-history/%') ORDER BY rowid DESC",
-            (rid,)).fetchall()
+        rows = checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND (key LIKE 'plan_revision/history/%' OR key LIKE 'authority/task-history/%') ORDER BY rowid DESC", (rid,), wire_index=1).fetchall()
     return [(key, json.loads(raw)) for key, raw in rows]
 
 

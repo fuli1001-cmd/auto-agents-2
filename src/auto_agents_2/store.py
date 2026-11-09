@@ -11,81 +11,62 @@ from .errors import AA2Error, IncompleteIteration
 from .interaction import validate_answer
 from .recovery import implemented_candidate
 from .replanning import assess
+from .state_codec import (
+    checkpoint_get_db,
+    checkpoint_keys_db,
+    checkpoint_query_db,
+    checkpoint_reader,
+    checkpoint_rows_db,
+    checkpoint_wire_bytes_db,
+    checkpoint_wire_sha256_db,
+    delete_query_db,
+    put_wire_db,
+)
+from .state_connection import MIGRATION_INTENT, StateConnection, migration_gate, require_format
+from .state_format import SCHEMA as SCHEMA
+from .state_format import create_schema
 from .util import digest, file_lock, identifier, now, redact
 
 TERMINAL = ("SUCCEEDED", "CANCELLED")
-SCHEMA = """
-            CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            INSERT OR IGNORE INTO meta VALUES('schema_version','8');
-            CREATE TABLE IF NOT EXISTS runs(
-                id TEXT PRIMARY KEY, status TEXT NOT NULL, stage TEXT NOT NULL,
-                created REAL NOT NULL, updated REAL NOT NULL, data TEXT NOT NULL);
-            CREATE UNIQUE INDEX IF NOT EXISTS one_unfinished ON runs((1))
-                WHERE status NOT IN ('SUCCEEDED','CANCELLED');
-            CREATE TABLE IF NOT EXISTS checkpoints(
-                run_id TEXT NOT NULL REFERENCES runs(id), key TEXT NOT NULL, data TEXT NOT NULL,
-                PRIMARY KEY(run_id,key));
-            CREATE TABLE IF NOT EXISTS events(
-                seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, time REAL NOT NULL,
-                kind TEXT NOT NULL, data TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS questions(
-                id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), key TEXT NOT NULL,
-                prompt TEXT NOT NULL, artifact_hash TEXT NOT NULL, answer TEXT,
-                created REAL NOT NULL, interaction TEXT NOT NULL DEFAULT '{}',
-                superseded INTEGER NOT NULL DEFAULT 0, UNIQUE(run_id,key,artifact_hash));
-            CREATE TABLE IF NOT EXISTS usage(
-                event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
-                provider TEXT NOT NULL, attempt TEXT NOT NULL, data TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS resources(
-                id TEXT PRIMARY KEY, run_id TEXT, kind TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
-                state TEXT NOT NULL, refs INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL,
-                touched REAL NOT NULL, data TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS delivery_pins(path TEXT PRIMARY KEY, run_id TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS resource_holds(
-                id TEXT PRIMARY KEY, path TEXT NOT NULL, run_id TEXT, purpose TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS artifact_owners(hash TEXT NOT NULL, run_id TEXT NOT NULL,
-                PRIMARY KEY(hash,run_id));
-            CREATE TABLE IF NOT EXISTS artifact_edges(parent TEXT, child TEXT, PRIMARY KEY(parent,child));
-            CREATE TABLE IF NOT EXISTS artifact_kinds(hash TEXT, kind TEXT, PRIMARY KEY(hash,kind));
-            CREATE TABLE IF NOT EXISTS diagnostic_holds(
-                id TEXT PRIMARY KEY, hash TEXT NOT NULL, run_id TEXT, purpose TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS retired_diagnostics(
-                hash TEXT PRIMARY KEY, retired REAL NOT NULL, reason TEXT NOT NULL);
-"""
 
 
 class Store:
+    checkpoint_reader = staticmethod(checkpoint_reader)
+    checkpoint_get_db = staticmethod(checkpoint_get_db)
+    checkpoint_wire_bytes_db = staticmethod(checkpoint_wire_bytes_db)
+    checkpoint_wire_sha256_db = staticmethod(checkpoint_wire_sha256_db)
+    checkpoint_keys_db = staticmethod(checkpoint_keys_db)
+    checkpoint_rows_db = staticmethod(checkpoint_rows_db)
     def __init__(self, project: Path, *, readonly=False, _initialize=False):
         self.readonly = readonly
         self.root = project.resolve() / ".aa2"
         if self.root.is_symlink():
             raise AA2Error("Project state must be a local directory, not a symlink")
         self.path = self.root / "state.sqlite"
-        if self.path.exists() and not _initialize:
-            # Readers and engine construction must never perform a migration.
+        if (self.root / MIGRATION_INTENT).exists():
+            raise AA2Error("Offline state migration is incomplete; preserve files and follow its receipt")
+        if self.path.exists():
             with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)) as db:
-                meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
-                row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() if meta else None
-                version = row[0] if row else "0"
-                if version not in {"0", "1", "2", "3", "4", "5", "6", "7", "8"}:
-                    raise AA2Error("Unsupported state database version")
+                require_format(db)
             return
         if readonly:
             raise AA2Error("Project state database does not exist")
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.root.chmod(0o700)
         with file_lock(self.root / "initialize.lock"):
+            if (self.root / MIGRATION_INTENT).exists():
+                raise AA2Error("Offline state migration is incomplete")
             if self.path.exists():
+                with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)) as db:
+                    require_format(db)
                 return
             temporary = self.root / "state.initializing.sqlite"
             temporary.unlink(missing_ok=True)
             try:
-                with closing(sqlite3.connect(temporary)) as db:
+                with closing(sqlite3.connect(temporary, factory=StateConnection)) as db:
                     db.execute("PRAGMA synchronous=FULL")
                     db.execute("BEGIN IMMEDIATE")
-                    for statement in SCHEMA.split(";"):
-                        if statement.strip():
-                            db.execute(statement)
+                    create_schema(db)
                     db.commit()
                 with temporary.open("rb") as stream:
                     os.fsync(stream.fileno())
@@ -100,115 +81,35 @@ class Store:
 
     @contextmanager
     def connect(self):
-        db = (sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=15) if self.readonly
-              else sqlite3.connect(self.path, timeout=15))
-        try:
-            db.row_factory = sqlite3.Row
-            db.execute("PRAGMA foreign_keys=ON")
-            if not self.readonly:
-                db.execute("PRAGMA journal_mode=WAL")
-                db.execute("PRAGMA synchronous=FULL")
-            yield db
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-        finally:
-            db.close()
+        # Normal write entry points share this finite maintenance gate.
+        # It does not imply legacy processes/handles obey it.
+        with migration_gate(self.root):
+            if (self.root / MIGRATION_INTENT).exists():
+                raise AA2Error("Offline state migration is incomplete")
+            mode = "ro" if self.readonly else "rw"
+            db = sqlite3.connect(self.path.as_uri() + "?mode=" + mode, uri=True,
+                                 timeout=15, factory=StateConnection)
+            try:
+                db.row_factory = sqlite3.Row
+                require_format(db)  # before WAL PRAGMA or any project write
+                db.execute("PRAGMA foreign_keys=ON")
+                if not self.readonly:
+                    db.execute("PRAGMA journal_mode=WAL")
+                    db.execute("PRAGMA synchronous=FULL")
+                yield db
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+            finally:
+                db.close()
 
     def migrate(self):
-        """Called only by run while holding controller.lock, before dispatch/GC."""
+        """Schema 8 conversion is an explicit offline command, never a runtime side effect."""
         if self.readonly:
             raise AA2Error("Read-only state cannot migrate")
         with self.connect() as db:
-            meta = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
-            row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() if meta else None
-            version = row[0] if row else "0"
-            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            import re
-            required = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", SCHEMA))
-            columns = {row[1] for row in db.execute("PRAGMA table_info(questions)")}
-            if version == "8" and required <= tables and {"interaction", "superseded"} <= columns:
-                return
-            backup = self.root / f"state-v{version if version != '0' else '1'}.backup.sqlite"
-            if not backup.exists():
-                temporary = backup.with_suffix(".tmp")
-                with closing(sqlite3.connect(temporary)) as target:
-                    db.backup(target)
-                temporary.replace(backup)
-                with backup.open("rb") as stream:
-                    os.fsync(stream.fileno())
-                directory = os.open(self.root, os.O_DIRECTORY)
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
-            db.execute("BEGIN IMMEDIATE")
-            # executescript would commit before running DDL; keep schema and data atomic.
-            for statement in SCHEMA.split(";"):
-                if statement.strip():
-                    db.execute(statement)
-            columns = {row[1] for row in db.execute("PRAGMA table_info(questions)")}
-            if "interaction" not in columns:
-                db.execute("ALTER TABLE questions ADD COLUMN interaction TEXT NOT NULL DEFAULT '{}'")
-            if "superseded" not in columns:
-                db.execute("ALTER TABLE questions ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0")
-            for row in db.execute("SELECT id FROM runs").fetchall():
-                rid = row[0]
-                records = {r[0]: json.loads(r[1]) for r in db.execute(
-                    "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
-                self._put(db, rid, f"migration/v{version if version != '0' else '1'}",
-                          {"version": int(version), "records": records})
-                # Raw v1 records and answered questions remain authoritative. The
-                # active view is adapted; old hashes can still be verified exactly.
-                active = records.get("recovery/active")
-                if active:
-                    from .recovery import FailureRecord
-                    failure = FailureRecord.model_validate(active["failure"])
-                    failure = failure.model_copy(update={"version": 2,
-                        "phase": "task" if failure.task_id else "final",
-                        "observation_id": failure.observation_id or digest([rid, failure.id, active["attempt"]])})
-                    self._put(db, rid, "recovery/active", {**active, "version": 2, "failure": failure.model_dump()})
-                self._put(db, rid, "migration/recovery-contracts", {"version": 2, "from_state": int(version),
-                    "evidence_policy": "verification-v12", "reference_validation": 4})
-                for task in (records.get("plan") or {}).get("tasks", []):
-                    owner = task.get("origin_id") or task["id"]
-                    key = "automation/engineering/" + owner
-                    if key not in records:
-                        self._put(db, rid, key, {"legacy_baseline": True, "achieved": {}})
-                if "automation/engineering/final" not in records:
-                    self._put(db, rid, "automation/engineering/final", {"legacy_baseline": True, "achieved": {}})
-                if version in {"0", "1"}:
-                    if records.get("plan"):
-                        self._put(db, rid, "plan_revision/current", {"version": 1, "revision": 1})
-                    done = records.get("develop/done", [])
-                    for task in records.get("plan", {}).get("tasks", []):
-                        self._put(db, rid, "task_state/" + task["id"], {
-                            "version": 1, "revision": 1, "implementation": "accepted" if task["id"] in done else "pending",
-                            "evidence": "stale" if task["id"] in done else "absent"})
-                if version in {"3", "4", "5", "6", "7", "8"}:
-                    continue  # v3 data semantics are already current; only its schema needs repair.
-                owners = {}
-                for key, value in records.items():
-                    if key.startswith("recovery/failures/") and value:
-                        owners[value["id"]] = value["origin_id"]
-                    elif key.startswith("recovery/delivery/") and value.get("failure"):
-                        owners[value["failure"]["id"]] = "delivery"
-                budgets = {}
-                for key, value in records.items():
-                    if key.startswith("recovery/diagnosis/") and key.rsplit("/", 1)[-1] in owners:
-                        owner = owners[key.rsplit("/", 1)[-1]]
-                        budgets[owner] = budgets.get(owner, 0) + value.get("round", 0)
-                for owner, count in budgets.items():
-                    key = "recovery/budgets/diagnosis/" + owner
-                    if key not in records:
-                        self._put(db, rid, key, {"round": count})
-                for key, value in records.items():
-                    if key.startswith("replanning/evidence/") and key != "replanning/evidence/contracts":
-                        self._put(db, rid, key, {**value, "comparable": False,
-                                               "comparison_reason": "legacy evidence requires revalidation"})
-            db.execute("UPDATE meta SET value='8' WHERE key='schema_version'")
-            self._event(db, None, "state.migrated", {"version": 8, "backup": str(backup)})
+            require_format(db)
 
     def finish_recovery(self, rid, updates, pending, *, replan=None, successor=None):
         """Dispatch and retire the obsolete question together; retain raw history."""
@@ -224,7 +125,7 @@ class Store:
                 self._put(db, rid, "replanning/pending", {**next_plan, "controller_owned": True})
             if successor is not None:
                 count_key = "recovery/count/" + successor["id"]
-                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, count_key)).fetchone()
+                row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, count_key), wire_index=0).fetchone()
                 count = (json.loads(row[0]) if row else 0) + 1
                 self._put(db, rid, count_key, count)
                 self._put(db, rid, "recovery/active", {"version": 1, "failure": successor, "attempt": count})
@@ -234,26 +135,28 @@ class Store:
             self._event(db, rid, "recovery.dispatched", {"pending_issues_retained": True})
 
     def _put(self, db, rid, key, value):
+        from .state_codec import _transaction
+        _transaction(db, write=True)
         if key == "recovery/output-limit-handoff" or key.startswith("recovery/gate-history/output-limit-handoff/"):
             from .faults import StateConflict
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+            row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
             if row is not None and json.loads(row[0]) != value:
                 raise StateConflict("Normal recovery handoff records are immutable")
         if key.startswith("recovery/contract-reentry/") and key.endswith(("/base", "/accepted", "/closed")):
             from .faults import StateConflict
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+            row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
             if row is not None and json.loads(row[0]) != value:
                 raise StateConflict("Accepted rebuild source records are immutable")
         if key.startswith("verification/batches/"):
             from .faults import StateConflict
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+            row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
             previous = json.loads(row[0]) if row else None
             if previous and previous.get("phase") == "completed" and previous != value:
                 raise StateConflict("Completed verification observation cannot be overwritten")
         if key.startswith("recovery/permits/"):
             from .faults import StateConflict
             from .recovery_identity import action_contract
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+            row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
             previous = json.loads(row[0]) if row else None
             if previous and previous.get("outcome_hash") and previous["outcome_hash"] != digest(previous.get("outcome", {})):
                 raise StateConflict("Completed action result integrity mismatch")
@@ -265,8 +168,7 @@ class Store:
                     raise StateConflict("Completed action outcome cannot be overwritten")
             if value and value.get("phase") == "completed":
                 value = {**value, "outcome_hash": digest(value.get("outcome", {}))}
-        db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
-                   (rid, key, json.dumps(value, ensure_ascii=True)))
+        put_wire_db(db, *(rid, key, json.dumps(value, ensure_ascii=True)))
         adopt_logs(db, self.root, value)
 
     def prepare_recording_recovery(self, rid, key, record, guards, question_keys, questions, *,
@@ -279,7 +181,7 @@ class Store:
             if db.execute('SELECT status FROM runs WHERE id=?', (rid,)).fetchone()[0] not in {'RUNNING', 'WAITING_USER'}:
                 raise StateConflict('Recording admission requires the normal running recovery entry')
             for name, expected in {**guards, OWNER + record['task_id']: previous, observation_key: None}.items():
-                row = db.execute('SELECT data FROM checkpoints WHERE run_id=? AND key=?', (rid, name)).fetchone()
+                row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, name), wire_index=0).fetchone()
                 if (json.loads(row[0]) if row else None) != expected:
                     raise StateConflict('Recording admission inputs changed before publication')
             current = self._decision_questions(db, rid, question_keys)
@@ -295,7 +197,7 @@ class Store:
         """CAS activation. Git/files are snapshotted before this transaction, never called atomic with it."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            rows = {r[0]: json.loads(r[1]) for r in db.execute("SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
+            rows = {r[0]: json.loads(r[1]) for r in checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=?', (rid,), wire_index=1)}
             rows["authority/submitted-answers"] = self._submitted_answers(db, rid)
             key = "plan_revision/journal/" + journal_id
             journal = rows[key]
@@ -361,7 +263,7 @@ class Store:
             done &= {t["id"] for t in journal["plan"]["tasks"]}
             self._put(db, rid, "develop/done", sorted(done))
             for task_id in set(journal["affected"]) | set(journal.get("patch", {}).get("remove_tasks", [])):
-                db.execute("DELETE FROM checkpoints WHERE run_id=? AND key=?", (rid, "develop/review-evidence/" + task_id))
+                delete_query_db(db, 'SELECT slot_order FROM checkpoint_records WHERE run_id=? AND key=?', (rid, 'develop/review-evidence/' + task_id))
             for task_id in journal["affected"]:
                 predecessor = task_id
                 if task_id not in journal["reopen"] and task_id not in {t["id"] for t in journal["previous_plan"]["tasks"]}:
@@ -395,7 +297,7 @@ class Store:
                     "feedback": {"controller_recovery": journal["reason"]},
                     "previous_evidence": previous, "revision": state["revision"]})
             for prefix in ("readme", "candidate/readme", "verify"):
-                db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR substr(key,1,?)=?)", (rid, prefix, len(prefix) + 1, prefix + "/"))
+                delete_query_db(db, 'SELECT slot_order FROM checkpoint_records WHERE run_id=? AND (key=? OR substr(key,1,?)=?)', (rid, prefix, len(prefix) + 1, prefix + '/'))
             self._put(db, rid, key, {**journal, "phase": "activated"})
             self._event(db, rid, "plan.patch_activated", {"revision": revision + 1, "affected": journal["affected"], "journal": key})
 
@@ -474,7 +376,7 @@ class Store:
                            (digest([provider, attempt, "invocation"]), rid, provider, attempt, json.dumps(body)))
             for key, data in values.items():
                 if key.startswith("rounds/"):
-                    existing = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                    existing = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
                     if existing:
                         data = {**data, "round": max(data.get("round", 0), json.loads(existing[0]).get("round", 0))}
                 self._put(db, rid, key, data)
@@ -489,7 +391,7 @@ class Store:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             def get(key, default=None):
-                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
                 return json.loads(row[0]) if row else default
             stamp = expected["dispatch"]
             body = json.loads(db.execute("SELECT data FROM runs WHERE id=?", (rid,)).fetchone()[0])
@@ -526,7 +428,7 @@ class Store:
         rid = request["run_id"]
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            if db.execute("SELECT 1 FROM checkpoints WHERE run_id=? AND key=?", (rid, KEY)).fetchone():
+            if db.execute('SELECT 1 FROM checkpoint_records WHERE run_id=? AND key=?', (rid, KEY)).fetchone():
                 raise AA2Error("Output-limit authority already exists; it cannot be replenished")
             run = db.execute("SELECT status,stage FROM runs WHERE id=?", (rid,)).fetchone()
             if not run or tuple(run) != ("PAUSED", "implement"):
@@ -540,7 +442,7 @@ class Store:
                     or not finished or raw_hash(finished[0]) != request["finished_sha256"]):
                 raise AA2Error("Original native resource or terminal event changed before authorization")
             for key, expected in request["guards"].items():
-                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
                 if (raw_hash(row[0]) if row else None) != expected:
                     raise AA2Error("Correction checkpoint changed before authorization")
             question = db.execute("SELECT id,key,artifact_hash,answer,superseded FROM questions WHERE id=? AND run_id=?",
@@ -570,15 +472,22 @@ class Store:
         This operation does not dispatch, accept a candidate or change any counter.
         """
         from .config import ConfigStore
-        from .output_limit_recovery import (HANDOFF_HISTORY, HANDOFF_KEY, HANDOFF_VERSION, KEY,
-                                            _handoff_pending, _handoff_processes, code_identity, raw_hash)
+        from .output_limit_recovery import (
+            HANDOFF_HISTORY,
+            HANDOFF_KEY,
+            HANDOFF_VERSION,
+            KEY,
+            _handoff_pending,
+            _handoff_processes,
+            code_identity,
+            raw_hash,
+        )
         from .workspace import tree_hash
         rid, request_hash = request["run_id"], digest(request)
         archive_key = HANDOFF_HISTORY + request_hash
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            if db.execute("SELECT 1 FROM checkpoints WHERE run_id=? AND key IN (?,?)",
-                          (rid, HANDOFF_KEY, archive_key)).fetchone():
+            if db.execute('SELECT 1 FROM checkpoint_records WHERE run_id=? AND key IN (?,?)', (rid, HANDOFF_KEY, archive_key)).fetchone():
                 raise AA2Error("A normal recovery handoff already exists; read its original receipt")
             run = db.execute("SELECT status,stage,data FROM runs WHERE id=?", (rid,)).fetchone()
             if (not run or {"status": run[0], "stage": run[1], "data_sha256": raw_hash(run[2])} != request["run"]
@@ -589,7 +498,7 @@ class Store:
                 raise AA2Error("Handoff run, configuration or code changed before publication")
             archived = {}
             for key, expected in request["guards"].items():
-                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
                 if (raw_hash(row[0]) if row else None) != expected:
                     raise AA2Error("Handoff checkpoint changed before publication: " + key)
                 if row:
@@ -622,7 +531,7 @@ class Store:
             raise AA2Error("Unsupported output-limit transition fields")
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, KEY)).fetchone()
+            row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, KEY), wire_index=0).fetchone()
             state = json.loads(row[0]) if row else None
             if not state or digest(state["request"]) != request_hash:
                 raise AA2Error("Output-limit request identity changed")
@@ -639,7 +548,7 @@ class Store:
         from .config import ConfigStore
         from .output_limit_recovery import KEY, code_identity, raw_hash
         from .output_limit_runtime import budget_for_request
-        row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, KEY)).fetchone()
+        row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, KEY), wire_index=0).fetchone()
         state = json.loads(row[0]) if row else None
         if (not state or digest(state["request"]) != request_hash or state["state"] != "active"
                 or state.get("limits") != budget_for_request(state["request"])
@@ -652,11 +561,10 @@ class Store:
         fixed = {request["infra_key"], "plan", "plan_revision/current", "recovery/active",
                  "replanning/pending", "control/cancel"}
         for name in fixed:
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, name)).fetchone()
+            row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, name), wire_index=0).fetchone()
             if (raw_hash(row[0]) if row else None) != request["guards"][name]:
                 raise AA2Error("Original incident authority or budget changed")
-        rounds = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?",
-                            (rid, "rounds/" + request["origin_id"])).fetchone()
+        rounds = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, 'rounds/' + request['origin_id']), wire_index=0).fetchone()
         question = db.execute("SELECT answer,superseded,artifact_hash FROM questions WHERE id=? AND run_id=?",
                               (request["question_id"], rid)).fetchone()
         if (not rounds or json.loads(rounds[0]).get("round") != request["round"] or not question
@@ -711,7 +619,7 @@ class Store:
         from .output_limit_recovery import KEY
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, KEY)).fetchone()
+            row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, KEY), wire_index=0).fetchone()
             state = json.loads(row[0]) if row else None
             if not state or digest(state["request"]) != request_hash:
                 raise AA2Error("Runtime revocation request changed")
@@ -751,8 +659,7 @@ class Store:
                     raise AA2Error("Material probe parent is already occupied")
                 if group == "review":
                     correction = state["calls"].get("correction", {})
-                    task_row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?",
-                                          (rid, state["request"]["operation"])).fetchone()
+                    task_row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, state['request']['operation']), wire_index=0).fetchone()
                     task = json.loads(task_row[0]) if task_row else {}
                     expected_phase = "implementing" if challenge["parent_role"] == "protected_review" else "tested"
                     if (correction.get("state") != "completed" or task.get("phase") != expected_phase
@@ -773,8 +680,7 @@ class Store:
                     and state["calls"].get("correction", {}).get("state") != "completed"):
                 raise AA2Error("Acceptance cannot precede a complete correction response")
             if role in {"protected_review", "implementation_review"}:
-                task_row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?",
-                                      (rid, state["request"]["operation"])).fetchone()
+                task_row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, state['request']['operation']), wire_index=0).fetchone()
                 task = json.loads(task_row[0]) if task_row else {}
                 expected_source = state["request"]["source_hash"] if role == "protected_review" else state.get("applied_source")
                 if (task.get("phase") != ("implementing" if role == "protected_review" else "tested")
@@ -824,15 +730,13 @@ class Store:
             if set(expected) != keys:
                 raise AA2Error("Probe proof publication needs exact receipt CAS")
             for name, fingerprint in expected.items():
-                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, name)).fetchone()
+                row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, name), wire_index=0).fetchone()
                 if (raw_hash(row[0]) if row else None) != fingerprint:
                     raise AA2Error("Probe result/capability changed before proof publication")
                 if name != key and (not row or fingerprint is None):
                     raise AA2Error("Probe native result receipt is missing")
-            invocation = json.loads(db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?",
-                (rid, "invocation/" + claim["operation"])).fetchone()[0])
-            result = json.loads(db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?",
-                (rid, "provider-result/" + claim["operation"])).fetchone()[0])
+            invocation = json.loads(checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, 'invocation/' + claim['operation']), wire_index=0).fetchone()[0])
+            result = json.loads(checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, 'provider-result/' + claim['operation']), wire_index=0).fetchone()[0])
             if (invocation.get("attempt") != attempt or result.get("attempt") != attempt
                     or not invocation.get("artifact") or invocation["artifact"] != result.get("artifact")
                     or digest(invocation.get("result")) != claim["result_hash"]
@@ -850,7 +754,7 @@ class Store:
         from .output_limit_recovery import KEY, raw_hash
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, KEY)).fetchone()
+            row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, KEY), wire_index=0).fetchone()
             record = json.loads(row[0]) if row else None
             if not record or record["state"] != "active" or digest(record["request"]) != request_hash:
                 raise AA2Error("Output-limit proposal authority changed")
@@ -863,7 +767,7 @@ class Store:
                 raise AA2Error("Output-limit proposal receipt changed")
             values = {}
             for key, fingerprint in expected.items():
-                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
                 if not row or raw_hash(row[0]) != fingerprint:
                     raise AA2Error("Output-limit proposal publication lost its compare-and-set")
                 values[key] = json.loads(row[0])
@@ -880,7 +784,7 @@ class Store:
 
     def get(self, rid, key, default=None):
         with self.connect() as db:
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+            row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
             return json.loads(row[0]) if row else default
 
     @staticmethod
@@ -899,9 +803,7 @@ class Store:
     def decision_requests(self, rid, state_identity=None):
         """Find original decision snapshots for the same guarded controller state."""
         with self.connect() as db:
-            rows = [(row["key"], json.loads(row["data"])) for row in db.execute(
-                "SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'decisions/requests/%' ORDER BY rowid DESC",
-                (rid,))]
+            rows = [(row["key"], json.loads(row["data"])) for row in checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'decisions/requests/%' ORDER BY rowid DESC", (rid,), wire_index=1)]
         return [(key, value) for key, value in rows
                 if state_identity is None or value.get("request", {}).get("state_identity") == state_identity]
 
@@ -917,13 +819,13 @@ class Store:
         """CAS the state, human answers, grant and audit receipt in one transaction."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            if db.execute("SELECT 1 FROM checkpoints WHERE run_id=? AND key=?", (rid, receipt)).fetchone():
+            if db.execute('SELECT 1 FROM checkpoint_records WHERE run_id=? AND key=?', (rid, receipt)).fetchone():
                 return True
             status = db.execute("SELECT status FROM runs WHERE id=?", (rid,)).fetchone()[0]
             if status not in {"RUNNING", "WAITING_USER"}:
                 return False
             for key, expected in guards.items():
-                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
                 if (json.loads(row[0]) if row else None) != expected:
                     return False
             current = self._decision_questions(db, rid, question_keys)
@@ -945,8 +847,7 @@ class Store:
     def invalidate(self, rid, keys: list[str]):
         with self.connect() as db:
             for key in keys:
-                db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR substr(key,1,?)=?)",
-                           (rid, key, len(key) + 1, key + "/"))
+                delete_query_db(db, 'SELECT slot_order FROM checkpoint_records WHERE run_id=? AND (key=? OR substr(key,1,?)=?)', (rid, key, len(key) + 1, key + '/'))
             self._event(db, rid, "checkpoints.invalidated", {"keys": keys})
 
     def prepare_replan(self, rid, stage, reason):
@@ -956,8 +857,7 @@ class Store:
             return self._prepare_replan(db, rid, stage, reason)
 
     def _prepare_replan(self, db, rid, stage, reason):
-        rows = {r["key"]: json.loads(r["data"]) for r in db.execute(
-            "SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'replanning/%'", (rid,))}
+        rows = {r["key"]: json.loads(r["data"]) for r in checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'replanning/%'", (rid,), wire_index=1)}
         if rows.get("replanning/pending"):
             return rows["replanning/pending"]
         observations = {key.removeprefix("replanning/evidence/"): value for key, value in rows.items()
@@ -967,8 +867,7 @@ class Store:
         pending = {"stage": stage, "reason": reason, "decision": decision,
                    "evaluation": state["evaluations"], "generation": body.get("replans", 0), "granted": False}
         for key, data in (("replanning/progress", state), ("replanning/pending", pending)):
-            db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
-                       (rid, key, json.dumps(data, ensure_ascii=True)))
+            put_wire_db(db, *(rid, key, json.dumps(data, ensure_ascii=True)))
         self._event(db, rid, "replan.assessed", {"stage": stage, **decision})
         return pending
 
@@ -976,15 +875,14 @@ class Store:
         """Finish a journalled rollback atomically; crash recovery cannot double count."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key='replanning/pending'", (rid,)).fetchone()
+            row = checkpoint_query_db(db, "SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key='replanning/pending'", (rid,), wire_index=0).fetchone()
             if row is None:
                 return
             pending = json.loads(row[0])
             body = json.loads(db.execute("SELECT data FROM runs WHERE id=?", (rid,)).fetchone()[0])
             prior_generation = body.get("replans", 0)
             body["replans"] = pending["generation"] + 1
-            records = {r["key"]: json.loads(r["data"]) for r in db.execute(
-                "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
+            records = {r["key"]: json.loads(r["data"]) for r in checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=?', (rid,), wire_index=1)}
             request = pending.get("correction_request")
             if request:
                 from .stage_responsibilities import validate_correction_request
@@ -1033,21 +931,18 @@ class Store:
                 self._put(db, rid, "plan_revision/current", {"version": 1, "revision": revision + 1})
             for stage in stages:
                 for prefix in ("candidate/", "invocation/", "provider-result/"):
-                    db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR substr(key,1,?)=?)",
-                               (rid, prefix + stage, len(prefix + stage) + 1, prefix + stage + "/"))
-                db.execute("DELETE FROM checkpoints WHERE run_id=? AND (key=? OR substr(key,1,?)=?)",
-                           (rid, stage, len(stage) + 1, stage + "/"))
+                    delete_query_db(db, 'SELECT slot_order FROM checkpoint_records WHERE run_id=? AND (key=? OR substr(key,1,?)=?)', (rid, prefix + stage, len(prefix + stage) + 1, prefix + stage + '/'))
+                delete_query_db(db, 'SELECT slot_order FROM checkpoint_records WHERE run_id=? AND (key=? OR substr(key,1,?)=?)', (rid, stage, len(stage) + 1, stage + '/'))
             feedback = {"stage": pending["stage"], "reason": pending["reason"], "recovery_refs": recovery_refs}
             if request:
                 feedback.update(correction_request=request, preserved_specification=records.get("clarify"),
                                 preserved_plan=records.get("plan"))
             if pending.get("verification_recheck"):
                 feedback["verification_recheck"] = pending["verification_recheck"]
-            db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
-                       (rid, "replan_feedback", json.dumps(feedback, ensure_ascii=True)))
+            put_wire_db(db, *(rid, 'replan_feedback', json.dumps(feedback, ensure_ascii=True)))
             db.execute("UPDATE runs SET status='RUNNING',stage=?,updated=?,data=? WHERE id=?",
                        (pending["stage"], now(), json.dumps(body), rid))
-            db.execute("DELETE FROM checkpoints WHERE run_id=? AND key='replanning/pending'", (rid,))
+            delete_query_db(db, "SELECT slot_order FROM checkpoint_records WHERE run_id=? AND key='replanning/pending'", (rid,))
             self._event(db, rid, "replan.completed", {"stage": pending["stage"], "replans": body["replans"],
                                                     "recovery_refs": recovery_refs, "granted": pending["granted"]})
 
@@ -1056,8 +951,7 @@ class Store:
         from .contract_reentry import ACTIVE, legacy_baseline, state
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            rows = {row[0]: json.loads(row[1]) for row in db.execute(
-                "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
+            rows = {row[0]: json.loads(row[1]) for row in checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=?', (rid,), wire_index=1)}
             if rows.get(ACTIVE):
                 state(rows.get)
                 return
@@ -1077,8 +971,7 @@ class Store:
         from .faults import StateConflict
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            rows = {row[0]: json.loads(row[1]) for row in db.execute(
-                "SELECT key,data FROM checkpoints WHERE run_id=?", (rid,))}
+            rows = {row[0]: json.loads(row[1]) for row in checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=?', (rid,), wire_index=1)}
             rows["authority/submitted-answers"] = self._submitted_answers(db, rid)
             review_key = "authority/reviews/" + digest(review)
             active = rows.get(ACTIVE)
@@ -1122,7 +1015,7 @@ class Store:
             for key, value in {**updates, **new}.items():
                 self._put(db, rid, key, value)
             if action == "close":
-                db.execute("DELETE FROM checkpoints WHERE run_id=? AND key=?", (rid, ACTIVE))
+                delete_query_db(db, 'SELECT slot_order FROM checkpoint_records WHERE run_id=? AND key=?', (rid, ACTIVE))
             self._event(db, rid, "contract.accepted", {"owner": owner, "document_hash": digest(document),
                 "rebuild": bool(active), "rebuild_closed": action == "close"})
 
@@ -1135,14 +1028,13 @@ class Store:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             for key, expected in (("replanning/pending", pending), (task_key, previous)):
-                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
                 if row is None or json.loads(row[0]) != expected:
                     raise AA2Error("Task recovery state changed; preserve the candidate and retry")
             for key, value in ((recovery_key, {**record, "recovered": True}), (task_key, updated)):
-                db.execute("INSERT INTO checkpoints VALUES(?,?,?) ON CONFLICT(run_id,key) DO UPDATE SET data=excluded.data",
-                           (rid, key, json.dumps(value, ensure_ascii=True)))
+                put_wire_db(db, *(rid, key, json.dumps(value, ensure_ascii=True)))
                 adopt_logs(db, self.root, value)
-            db.execute("DELETE FROM checkpoints WHERE run_id=? AND key='replanning/pending'", (rid,))
+            delete_query_db(db, "SELECT slot_order FROM checkpoint_records WHERE run_id=? AND key='replanning/pending'", (rid,))
             db.execute("UPDATE questions SET superseded=1 WHERE run_id=? AND key=?",
                        (rid, f"replan-stalled/{pending['evaluation']}"))
             self._event(db, rid, event, {"task": task_key, "recovery": recovery_key})
@@ -1170,7 +1062,7 @@ class Store:
             if status not in {"RUNNING", "WAITING_USER"}:
                 raise StateConflict("Resolution admission requires the normal running controller")
             for key, expected in guards.items():
-                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
                 if (json.loads(row[0]) if row else None) != expected:
                     raise StateConflict("Resolution admission inputs changed; preserve the original wait")
             current = self._resolution_wait_questions(db, rid, question_keys)
@@ -1191,7 +1083,7 @@ class Store:
         """Publish a reconciled design proposal without losing concurrent human answers."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key='candidate/design'", (rid,)).fetchone()
+            row = checkpoint_query_db(db, "SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key='candidate/design'", (rid,), wire_index=0).fetchone()
             current = self._decision_questions(db, rid, keys)
             fingerprint = digest(previous["document"])
             if (not row or json.loads(row[0]) != previous or current != questions
@@ -1212,7 +1104,7 @@ class Store:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             def get(key):
-                row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+                row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
                 return json.loads(row[0]) if row else None
             previous = original["invocation"]
             fingerprint = digest(previous["result"])
@@ -1380,7 +1272,7 @@ class Store:
             db.execute("BEGIN IMMEDIATE")
             finished = db.execute("SELECT status FROM runs WHERE id=?", (rid,)).fetchone()
             if finished and finished[0] == "SUCCEEDED":
-                prior = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key='delivery/receipt'", (rid,)).fetchone()
+                prior = checkpoint_query_db(db, "SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key='delivery/receipt'", (rid,), wire_index=0).fetchone()
                 if not prior or json.loads(prior[0]) != receipt:
                     raise AA2Error("Completed delivery cannot be replaced by a different receipt")
                 return
@@ -1389,7 +1281,7 @@ class Store:
             body.update(outcome=receipt["outcome"], branch=receipt["target"],
                         delivery_commit=receipt["candidate"], verified_source_hash=receipt["source_hash"],
                         cleanup_pending=True, delivery_phase="complete")
-            db.execute("INSERT OR REPLACE INTO checkpoints VALUES(?,?,?)", (rid, "delivery/receipt", json.dumps(receipt)))
+            put_wire_db(db, *(rid, 'delivery/receipt', json.dumps(receipt)), replace=True)
             db.execute("INSERT OR REPLACE INTO meta VALUES('current_delivery',?)", (rid,))
             db.execute("DELETE FROM delivery_pins")
             db.executemany("INSERT INTO delivery_pins VALUES(?,?)", [(p, rid) for p in receipt["runtime"]["resources"]])
@@ -1400,8 +1292,7 @@ class Store:
     def task_origin_state(self, rid):
         """Read the registry and consumed task budgets from one database snapshot."""
         with self.connect() as db:
-            rows = {row["key"]: json.loads(row["data"]) for row in db.execute(
-                "SELECT key,data FROM checkpoints WHERE run_id=? AND (key='task_origins' OR key LIKE 'rounds/%')", (rid,))}
+            rows = {row["key"]: json.loads(row["data"]) for row in checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND (key='task_origins' OR key LIKE 'rounds/%')", (rid,), wire_index=1)}
         # Delivery repair has a separate budget, unrelated to task lineage.
         return {"origins": rows.get("task_origins", {}),
                 "budgets": {key.removeprefix("rounds/"): value for key, value in rows.items()
@@ -1409,17 +1300,12 @@ class Store:
 
     def recovery_budgets(self, rid):
         with self.connect() as db:
-            return {row["key"]: json.loads(row["data"]) for row in db.execute(
-                "SELECT key,data FROM checkpoints WHERE run_id=? AND "
-                "(key LIKE 'recovery/budgets/%' OR key LIKE 'rounds/%' OR key LIKE 'budget_grants/%' "
-                "OR key LIKE 'automation/%' OR key LIKE 'decisions/applied/%' OR key LIKE 'recovery/diagnosis_grants/%' "
-                "OR key LIKE 'recovery/cycles/%' OR key LIKE 'recovery/permits/%')", (rid,))}
+            return {row["key"]: json.loads(row["data"]) for row in checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND (key LIKE 'recovery/budgets/%' OR key LIKE 'rounds/%' OR key LIKE 'budget_grants/%' OR key LIKE 'automation/%' OR key LIKE 'decisions/applied/%' OR key LIKE 'recovery/diagnosis_grants/%' OR key LIKE 'recovery/cycles/%' OR key LIKE 'recovery/permits/%')", (rid,), wire_index=1)}
 
     def recovery_history(self, rid, owner):
         """Bound the decision context without discarding durable attempts or outcomes."""
         with self.connect() as db:
-            rows = [json.loads(row[0]) for row in db.execute(
-                "SELECT data FROM checkpoints WHERE run_id=? AND key LIKE 'recovery/permits/%' ORDER BY rowid", (rid,))]
+            rows = [json.loads(row[0]) for row in checkpoint_query_db(db, "SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'recovery/permits/%' ORDER BY rowid", (rid,), wire_index=0)]
         rows = [row for row in rows if row.get("owner") == owner]
         counts = {}
         for row in rows:
@@ -1431,7 +1317,7 @@ class Store:
     def delivery_evidence(self, rid):
         result = {}
         with self.connect() as db:
-            for row in db.execute("SELECT key,data FROM checkpoints WHERE run_id=?", (rid,)):
+            for row in checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=?', (rid,), wire_index=1):
                 key, value = row["key"], json.loads(row["data"])
                 if key.startswith("develop/task/"):
                     result[key] = {k: value[k] for k in ("commit", "checks", "review", "source_hash") if k in value}

@@ -14,6 +14,7 @@ from auto_agents_2.context_plan import ContextPlanner
 from auto_agents_2.errors import ProviderError
 from auto_agents_2.faults import StateConflict
 from auto_agents_2.models import ImplementationResult, ReviewResult
+from auto_agents_2.state_codec import checkpoint_query_db
 from auto_agents_2.util import digest
 
 
@@ -135,8 +136,7 @@ print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output
     assert receipt["browser_actions"]["artifact"]["hash"] in {r["hash"] for r in manifest["materials"]}
     assert manifest["omitted_mandatory_content"] == []
     with store.connect() as db:
-        frozen = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key LIKE 'presentation/approved-actions/%'",
-                            (rid,)).fetchall()
+        frozen = checkpoint_query_db(db, "SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'presentation/approved-actions/%'", (rid,), wire_index=0).fetchall()
     assert len(frozen) == 1
     stored = ArtifactStore(store.root).json(json.loads(frozen[0][0])["artifact"])
     assert stored["payload"]["prototype_approval"]["browser_actions"] == receipt["browser_actions"]

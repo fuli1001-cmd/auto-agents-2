@@ -6,6 +6,7 @@ from contextvars import ContextVar
 from .artifacts import ArtifactStore
 from .diagnostics import references
 from .faults import StateConflict
+from .state_codec import checkpoint_query_db
 from .util import digest
 
 review_consumer = ContextVar("review_consumer", default=None)
@@ -53,7 +54,7 @@ class ReviewEvidence:
         import json
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key=?", (rid, key)).fetchone()
+            row = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
             current = json.loads(row[0]) if row else {}
             if current and current.get("observation") != digest(checks):
                 raise StateConflict("Review consumer observation changed; preserve the replacement evidence")

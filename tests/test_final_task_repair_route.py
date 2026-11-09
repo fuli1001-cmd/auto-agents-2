@@ -142,7 +142,7 @@ async def test_old_pending_diagnosis_answer_is_preserved_then_new_call_can_targe
     old_permit_key = active["diagnosis_permit"]
     old_receipt = workflow.store.get(rid, old_permit_key)
     with workflow.store.connect() as db:
-        frozen_keys = [r[0] for r in db.execute("SELECT key FROM checkpoints WHERE run_id=? AND key LIKE 'recovery/invocation-inputs/%'", (rid,))]
+        frozen_keys = [r[0] for r in db.execute("SELECT key FROM checkpoint_records WHERE run_id=? AND key LIKE 'recovery/invocation-inputs/%'", (rid,))]
     frozen = {k: workflow.store.get(rid, k) for k in frozen_keys}
     assert old_receipt["phase"] == "completed"
     assert len(calls) == 2

@@ -64,7 +64,7 @@ async def test_conda_failure_classification_uses_manifest_and_actual_error(tmp_p
         assert "Conda manifest environment.yml" in str(caught.value)
     assert not list((store.root / "environments").glob("*/aa2-ready.json"))
     with store.connect() as db:
-        assert db.execute("SELECT COUNT(*) FROM checkpoints WHERE run_id=? AND key LIKE 'environment/logs/%'",
+        assert db.execute("SELECT COUNT(*) FROM checkpoint_records WHERE run_id=? AND key LIKE 'environment/logs/%'",
                           (rid,)).fetchone()[0]
 
 

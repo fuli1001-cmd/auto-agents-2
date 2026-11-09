@@ -9,6 +9,7 @@ from .approvals import prototype_identity
 from .faults import StateConflict
 from .models import IntakeResult
 from .stage_responsibilities import validate_correction_request
+from .state_codec import checkpoint_query_db
 from .util import digest
 from .workspace import tree_hash
 
@@ -156,9 +157,7 @@ class ClarificationReentry:
             "human_binding_matches": False,
         }
         with self.store.connect() as db:
-            histories = [(row["key"], json.loads(row["data"])) for row in db.execute(
-                "SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'recovery/gate-history/%'",
-                (rid,))]
+            histories = [(row["key"], json.loads(row["data"])) for row in checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'recovery/gate-history/%'", (rid,), wire_index=1)]
         candidates = [("prototype", self._get(rid, "prototype"))]
         histories = [(key, history) for key, history in histories if re.fullmatch(r"recovery/gate-history/\d+", key)]
         for key, history in sorted(histories, key=lambda row: int(row[0].rsplit("/", 1)[1]), reverse=True):

@@ -6,6 +6,7 @@ from contextlib import closing
 
 from .diagnostics import LOG_KINDS, references
 from .review_evidence import is_review_consumer
+from .state_codec import checkpoint_query_db
 from .util import digest, file_lock, now
 
 
@@ -78,7 +79,7 @@ def collect_artifacts(store):
             # root's diagnostic/non-diagnostic role or owner run status.
             from .resources import valid_receipt
             quarantined = set()
-            for rid, raw in db.execute("SELECT run_id,data FROM checkpoints WHERE key='delivery/receipt'"):
+            for rid, raw in checkpoint_query_db(db, "SELECT run_id,slot_order AS data FROM checkpoint_records WHERE key='delivery/receipt'", (), wire_index=1):
                 try:
                     receipt = json.loads(raw)
                 except ValueError:
@@ -97,8 +98,7 @@ def collect_artifacts(store):
                 mark_object(sha, True, True)
             # Keep raw checkpoint bodies bounded to the current row. The same
             # write transaction protects roots; marking only changes artifact metadata.
-            with closing(db.execute(
-                    "SELECT c.key,c.data,r.status FROM checkpoints c JOIN runs r ON r.id=c.run_id")) as rows:
+            with closing(checkpoint_query_db(db, 'SELECT c.key,c.slot_order AS data,r.status FROM checkpoint_records c JOIN runs r ON r.id=c.run_id', (), wire_index=1)) as rows:
                 for row in rows:
                     try:
                         value = json.loads(row["data"])

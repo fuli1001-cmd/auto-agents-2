@@ -16,6 +16,7 @@ from auto_agents_2.models import IntakeResult, ReviewResult
 from auto_agents_2.providers import ProviderRouter
 from auto_agents_2.sandbox import SandboxRunner
 from auto_agents_2.stage_responsibilities import GATES, prepare_reentry
+from auto_agents_2.state_codec import update_wire_db
 from auto_agents_2.util import digest, write_json
 from auto_agents_2.workspace import git, tree_hash
 
@@ -110,8 +111,7 @@ def test_unverified_transition_does_not_enable_refresh(tmp_path, monkeypatch, da
         # Fault injection deliberately bypasses completed-permit immutability.
         permit["outcome_hash"] = "corrupt" if damage == "outcome_hash" else digest(permit["outcome"])
         with store.connect() as db:
-            db.execute("UPDATE checkpoints SET data=? WHERE run_id=? AND key=?",
-                       (json.dumps(permit), rid, "recovery/permits/clarify"))
+            update_wire_db(db, rid, "recovery/permits/clarify", json.dumps(permit))
     elif damage in {"generation", "history"}:
         key = "recovery/gate-history/1"
         value = store.get(rid, key)

@@ -8,6 +8,7 @@ from test_recovery_policy import ready
 
 from auto_agents_2.faults import StateConflict
 from auto_agents_2.recovery import Diagnosis, RecoveryDecision, adjudicate
+from auto_agents_2.state_codec import checkpoint_query_db
 
 
 @pytest.mark.parametrize('owner', ['task', 'final'])
@@ -78,15 +79,14 @@ async def test_proposal_cannot_reserve_a_permit_or_consume_a_budget(tmp_path, en
     decision = adjudicate(failure)
     active = workflow.store.get(rid, 'recovery/active')
     with workflow.store.connect() as db:
-        before = list(db.execute('SELECT key,data FROM checkpoints WHERE run_id=? ORDER BY key', (rid,)))
+        before = list(checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? ORDER BY key', (rid,), wire_index=1))
         before = [tuple(row) for row in before]
     kwargs = {'candidates': {'diagnose': proposal}} if entry == 'candidates' else {}
     suggested = decision if entry == 'candidates' else proposal.model_dump() if entry == 'dictionary' else proposal
     with pytest.raises(StateConflict, match='validated recovery decisions'):
         await policy.authorize(rid, failure, active, work, plan, suggested, operation='not-a-permit', **kwargs)
     with workflow.store.connect() as db:
-        assert [tuple(row) for row in db.execute(
-            'SELECT key,data FROM checkpoints WHERE run_id=? ORDER BY key', (rid,))] == before
+        assert [tuple(row) for row in checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? ORDER BY key', (rid,), wire_index=1)] == before
     assert not workflow.agent.calls and not workflow.store.pending(rid)
 
 
@@ -112,7 +112,7 @@ async def test_completed_legacy_catalog_is_not_rewritten_or_rediagnosed_on_resum
     invocation = workflow.store.get(rid, invocation_key)
     with workflow.store.connect() as db:
         keys = [row[0] for row in db.execute(
-            "SELECT key FROM checkpoints WHERE run_id=? AND key LIKE 'recovery/invocation-inputs/%'", (rid,))]
+            "SELECT key FROM checkpoint_records WHERE run_id=? AND key LIKE 'recovery/invocation-inputs/%'", (rid,))]
     frozen = {key: workflow.store.get(rid, key) for key in keys}
     assert frozen and any('failure_id' in value['context']['allowed_actions']['diagnose'] for value in frozen.values())
     monkeypatch.setattr(RecoveryPolicy, 'proposal_actions', staticmethod(original))

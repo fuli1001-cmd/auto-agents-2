@@ -299,6 +299,12 @@ class SharedCache:
                     return True
             if reference.get("run_id"):
                 with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as connection:
+                    from .errors import AA2Error
+                    from .state_connection import require_format
+                    try:
+                        require_format(connection)
+                    except (AA2Error, sqlite3.Error):
+                        return True  # unknown/old formats conservatively keep shared cache pinned
                     row = connection.execute("SELECT status FROM runs WHERE id=?", (reference["run_id"],)).fetchone()
                 if not row or row[0] != "SUCCEEDED":
                     return True

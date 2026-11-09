@@ -10,6 +10,7 @@ from test_recovery_policy import ready
 from auto_agents_2.context_plan import ContextPlanner
 from auto_agents_2.decisions import DecisionResult
 from auto_agents_2.recovery import Diagnosis
+from auto_agents_2.state_codec import checkpoint_query_db
 from auto_agents_2.util import digest
 from auto_agents_2.workspace import tree_hash
 
@@ -125,7 +126,7 @@ async def test_new_actual_log_gets_new_basis_without_resetting_consumption(tmp_p
     assert workflow.store.get(rid, 'recovery/budgets/diagnosis/T3')['round'] == before + 2
     assert workflow.agent.diagnoses == 5
     with workflow.store.connect() as db:
-        ledgers = list(db.execute("SELECT data FROM checkpoints WHERE run_id=? AND key LIKE 'recovery/no-progress/diagnose/%'", (rid,)))
+        ledgers = list(checkpoint_query_db(db, "SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'recovery/no-progress/diagnose/%'", (rid,), wire_index=0))
     import json
     assert sorted(len(json.loads(row[0])['operations']) for row in ledgers) == [1, 2, 2]
 

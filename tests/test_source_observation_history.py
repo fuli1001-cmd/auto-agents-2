@@ -15,6 +15,7 @@ from auto_agents_2.evidence_refs import controller_context_catalog
 from auto_agents_2.faults import StateConflict
 from auto_agents_2.models import ReviewResult
 from auto_agents_2.source_history import SourceHistory
+from auto_agents_2.state_codec import checkpoint_query_db
 from auto_agents_2.util import digest, write_json
 from auto_agents_2.workspace import git, tree_hash
 
@@ -68,7 +69,7 @@ def test_applied_uncommitted_test_preimage_survives_repair_and_recheck(tmp_path)
 def test_existing_manifest_versions_are_read_without_rewriting_history(tmp_path, version):
     workflow, rid, old = observed_fixture(tmp_path)
     with workflow.store.connect() as db:
-        row = db.execute("SELECT key,data FROM checkpoints WHERE run_id=? AND key LIKE 'review-evidence/source-history/%'", (rid,)).fetchone()
+        row = checkpoint_query_db(db, "SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=? AND key LIKE 'review-evidence/source-history/%'", (rid,), wire_index=1).fetchone()
     manifest = workflow.artifacts.json(old["artifact"])
     manifest.pop("observations", None)
     manifest["version"] = version
