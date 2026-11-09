@@ -1085,6 +1085,60 @@ A/AAAA 并行且全部成功才交付结果，NOERROR 且匹配 Question 的 NOD
 
 解析响应原始/解压后各最多 64 KiB、最多 256 Answer 与 8 CNAME，保留正文原始/解压后各 4 MiB、最多 5 次重定向及共享 30 秒 HTTP acquisition deadline；解析、bootstrap、代理 CONNECT、TLS 与资料正文都消耗同一 deadline，不逐层刷新总预算。任何失败取消并排空同轮 A/AAAA 任务，不发布部分采集。配置改变前须由操作者确认解析器信任、域名隐私和网络可达性；不得用该路由绕过明确的资源拒绝。
 
+
+### Explicit replacement of stopped research sources
+
+A source refusal is not a permit to replay that source or erase its history. For an
+unaccepted proposal in a stopped `provider_research` stage, an explicitly authorized
+replacement may be registered as a different source operation. This is not a gate
+reset or an answer to the old prerequisite question.
+
+`prepare-research-source-replacement --run-id ... --proposal ...
+--authorization-reference ...` is strictly read-only. The bounded regular JSON input
+contains `proposal` (a complete `ResearchRecoveryDocument`) and
+`requirement_assessment` (one row per original requirement: `requirement_id`, exact
+`claim_ids`, and a nonempty `reason`). Every original claim retains a disposition,
+relevant original requirement IDs and exact new source indexes. Requirements that do
+not depend on document research still need an explicit explanation. Accepted research,
+recording holds, overlapping control transitions, incomplete episodes and drift block
+preparation. No old recovery `prepare()` or network request is run by this command.
+
+`replace-research-sources --request ... --expected-sha256 ... --confirm-new-sources`
+checks the exact request bytes, source/configuration identity and the full stopped
+state under the controller lock. One SQLite transaction archives the complete old
+candidate, episode, fault, wait and questions, then registers the new unaccepted
+candidate. It does not change run status, replan generation, old question answers,
+source-refusal consumption, prototype approval or cumulative counters. Exact repeated
+submission is idempotent; a changed input requires a newly reviewed request.
+
+All previous source hosts, observed refusal origins and retained redirect destinations
+are excluded, including subdomains and canonical hostname variants. Literal addresses
+and ambiguous escaped hostnames cannot substitute for an independent named source.
+The entire new source set is checked before any dispatch, and every redirect is checked
+before its request. Existing public-address, pinned-connect, TLS and acquisition limits
+remain unchanged. Resolver, proxy and unknown shared `ConnectError` route prerequisites
+remain holds, including historical faults without an original dispatch stamp. Replacing
+a document never clears a shared network prerequisite.
+
+Original archive hashes, claim/requirement bindings, code/configuration identity,
+unanswered questions and original cumulative-count floors are rechecked for the new
+operation. New uncertainty, changed episode evidence or recording faults stop progress
+rather than trigger an automatic retry. Fresh controller collection is still only
+retrieval evidence. Independent review must assess all original claims, every original
+requirement and its acceptance items, equivalent coverage, authority, version, and any
+no-research rationale. Only the exact owned review receipt and exact reviewed retrievals
+can atomically accept the replacement. Product tests and human prototype gates remain.
+
+**Current capability limit:** built-in native CLI providers do not establish an
+enforceable controller-evidence-only execution capability. A read-only filesystem or
+an instruction in a prompt is not proof that shell, Web and MCP access are unavailable.
+Registered replacements therefore fail closed before any native provider invocation,
+including cached/fallback and downstream stages. This implementation supplies a safe
+registration/collection/review boundary; it does not declare live recovery ready. Do
+not deploy or resume a real replacement until that provider capability and any original
+shared network holds are independently resolved and verified. Synthetic no-tool
+reviewer tests prove controller gates only, not native provider isolation.
+
 ## Controller-private state format 9
 
 Normal storage creates and reads schema 9 only. Older versions are rejected before

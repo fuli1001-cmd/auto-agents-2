@@ -535,3 +535,33 @@ def doctor(project: Project = Path("."), live: bool = False):
             raise typer.Exit(1)
     except AA2Error as exc:
         fail(exc)
+
+
+@app.command("prepare-research-source-replacement")
+def prepare_research_source_replacement(
+        run_id: Annotated[str, typer.Option("--run-id")],
+        proposal: Annotated[Path, typer.Option("--proposal")],
+        authorization_reference: Annotated[str, typer.Option("--authorization-reference")],
+        project: Project = Path(".")):
+    """只读生成原需求绑定的来源替换请求，不联网、不改状态。"""
+    try:
+        from .research_replacement import prepare
+        console.print_json(data=prepare(project.resolve(), run_id=run_id, proposal=proposal,
+                                       authorization_reference=authorization_reference))
+    except AA2Error as exc:
+        fail(exc)
+
+
+@app.command("replace-research-sources")
+def replace_research_sources(
+        request: Annotated[Path, typer.Option("--request")],
+        expected_sha256: Annotated[str, typer.Option("--expected-sha256")],
+        confirm_new_sources: Annotated[bool, typer.Option("--confirm-new-sources")] = False,
+        project: Project = Path(".")):
+    """原子登记已确认的新来源候选；保留旧问题，不批准研究或原型。"""
+    try:
+        from .research_replacement import submit
+        console.print_json(data=submit(project.resolve(), request, expected_sha256,
+                                       confirm_new_sources=confirm_new_sources))
+    except AA2Error as exc:
+        fail(exc)

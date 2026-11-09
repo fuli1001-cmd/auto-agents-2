@@ -49,9 +49,16 @@ def public_url(value: str):
 class ResearchService:
     """Preserve the response and provenance; acquisition is not proof of a claim."""
 
-    def __init__(self, artifacts: ArtifactStore, *, resolver_config=None):
+    def __init__(self, artifacts: ArtifactStore, *, resolver_config=None, excluded_hosts=()):
         self.artifacts = artifacts
+        self.excluded_hosts = tuple(excluded_hosts)
         self.resolver_config = resolver_config.model_copy(deep=True) if resolver_config is not None else None
+
+    def admit(self, url):
+        public_url(url)
+        if self.excluded_hosts:
+            from .research_replacement import admit_url
+            admit_url(url, self.excluded_hosts)
 
     async def capture(self, url: str) -> dict:
         history = current_capture.get()
@@ -70,7 +77,7 @@ class ResearchService:
             current_capture.reset(capture_token)
 
     async def _capture(self, url, history):
-        public_url(url)
+        self.admit(url)
         label = f"Research document download for {urlsplit(url).hostname}"
         resolver = None
         batch = current_batch.get()
@@ -94,7 +101,7 @@ class ResearchService:
                     headers={"Accept-Encoding": "gzip, deflate"}) as client:
                 try:
                     for _ in range(6):
-                        public_url(final)
+                        self.admit(final)
                         attempted_url = history.request_url = final
                         async with client.stream("GET", final) as response:
                             prior_requests.append({"url_hash": digest(attempted_url),
@@ -205,7 +212,7 @@ class ResearchService:
                     current_capture.reset(capture_token)
 
         for source in sources:
-            public_url(source.url)
+            self.admit(source.url)
         for source in sources:
             url = urldefrag(source.url)[0]
             if url not in documents:

@@ -218,6 +218,8 @@ class ProviderRouter:
         return digest(identities)
 
     async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
+        from .research_replacement import guard_provider
+        guard_provider(self.store, run_id)
         incident = Incident(self.store, run_id)
         if incident.active() and CALL.get() is None:
             raise incident.stop("provider_call_outside_incident_workflow")

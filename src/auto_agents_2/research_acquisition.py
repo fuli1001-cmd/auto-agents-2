@@ -1,6 +1,7 @@
 """Research-source recovery evidence; transport and stage authorization stay separate."""
 from __future__ import annotations
 
+import json
 from typing import Literal
 from urllib.parse import urldefrag, urlsplit
 
@@ -97,6 +98,21 @@ def extend_basis(body, context):
                 "goal and explicit source constraint. Do not defer this assessment, infer success from acquisition, "
                 "or accept blocked/missing facts. Use an evidence_gap/defect finding for an unresolved disposition, "
                 "quoting the original claim. failed_research is historical evidence, not a source_dispute target."})
+    replacement = recovery.get("source_replacement")
+    if replacement:
+        requirements = replacement["original_requirements"]["requirements"]
+        text = json.dumps(requirements, ensure_ascii=False, sort_keys=True)
+        body["sources"]["replacement_original_requirements"] = {
+            "kind": "original_requirement", "owner": "clarify", "text": text, "hash": digest(text)}
+        for row in requirements:
+            body["criteria"].append({"id": "stage:research-replacement-requirement:" + row["id"],
+                "kind": "research_evidence", "owner": "provider_research", "source": "replacement_original_requirements",
+                "statement": json.dumps(row, ensure_ascii=False, sort_keys=True),
+                "instruction": "Check this complete original requirement, including every acceptance item, against the "
+                    "explicit requirement_assessment and exact claim dispositions. No-research mappings require a grounded "
+                    "necessity explanation, not silent removal. Check authority, version and equivalent support in freshly "
+                    "collected independent sources. Old denied hosts must not be contacted. A fetch or renamed URL alone "
+                    "does not satisfy this criterion. Preserve all product and human prototype gates."})
 
 
 class ResearchAcquisitionRecovery:
@@ -241,9 +257,15 @@ class ResearchAcquisitionRecovery:
             raise StateConflict("Historical research recording audit has no verified hard-hold resolution; "
                                 "preserve its original state and verify the owner repair before any new request.",
                                 phase="provider_research")
-        wait = self.waiting(rid)
-        if wait is not None:
-            raise self.wait_error(wait)
+        from .research_replacement import covers_attempt, current
+        replacement = current(self.store, rid)
+        # An explicit replacement opens a different, independently collected operation.
+        # Preserve the old wait verbatim; it is neither answered nor consumed.
+        old_wait = (replacement["request"]["basis"]["checkpoints"].get(WAIT) if replacement else None)
+        if not (old_wait and digest(self.store.get(rid, WAIT)) == old_wait):
+            wait = self.waiting(rid)
+            if wait is not None:
+                raise self.wait_error(wait)
         # Do not invent a wait for historical refusals. Old records without the
         # new original stamp/consumption receipt must be checked by their owner.
         candidate = self.store.get(rid, "candidate/provider_research", {}).get("document")
@@ -255,7 +277,7 @@ class ResearchAcquisitionRecovery:
             record = self.store.get(rid, key)
         for attempt in (record or {}).get("attempts", []):
             own = self.refusals(attempt["observations"])
-            if not own:
+            if not own or replacement and covers_attempt(replacement, attempt):
                 continue
             stamp = attempt.get("dispatch")
             identity = digest([stamp, attempt["id"], own]) if stamp is not None else None
@@ -266,7 +288,9 @@ class ResearchAcquisitionRecovery:
                                     "preserve its original question and observations before any new request.",
                                     phase="provider_research", evidence_refs=[CURRENT])
         fault = self.store.get(rid, "recovery/current-fault", {})
-        if fault.get("route") == "human" and fault.get("phase") == "provider_research" and fault.get("reason_code") in SOURCE_CODES:
+        if (fault.get("route") == "human" and fault.get("phase") == "provider_research"
+                and fault.get("reason_code") in SOURCE_CODES
+                and not (replacement and digest(fault) == replacement["original_fault_hash"])):
             requirement = fault.get("human_requirement", {})
             category, automatic = http_failure_classification(
                 requirement.get("evidence", {}), document=fault["reason_code"] == "DOCUMENT_ACQUISITION_UNAVAILABLE")
@@ -297,7 +321,14 @@ class ResearchAcquisitionRecovery:
         record = self.active(rid)
         if not record:
             return None
+        from .research_replacement import current
+        replacement = current(self.store, rid)
         return {"episode_id": record["id"], "binding": record["binding"], "claims": record["claims"],
+                **({"source_replacement": {"request_hash": replacement["request_hash"],
+                     "excluded_hosts": replacement["request"]["excluded_hosts"],
+                     "original_requirements": self.store.get(rid, "clarify"),
+                     "requirement_assessment": replacement["request"]["requirement_assessment"]}}
+                   if replacement else {}),
                 "original_candidate": record["original_candidate"], "attempts": record["attempts"],
                 **({"rejected_reviews": record["rejected_reviews"]} if record.get("rejected_reviews") else {}),
                 "instruction": "The source failed, not necessarily the fact or the project. Assess necessity against "
@@ -545,7 +576,7 @@ class ResearchAcquisitionRecovery:
             evidence_refs=[PREFIX + record["id"]], evidence=details),
             reason_code="research_acquisition_blocked", phase="provider_research")
 
-    def acceptance(self, rid, document, review):
+    def acceptance(self, rid, document, review, retrieved=None):
         record = self.active(rid)
         if not record:
             return {}
@@ -556,5 +587,7 @@ class ResearchAcquisitionRecovery:
         if (not review.approved or proof["owned_candidate"] != document
                 or proof["basis"]["observations"].get(CONTEXT) != digest(self.context(rid))):
             raise StateConflict("Research acquisition disposition lost its exact independent review evidence")
+        from .research_replacement import acceptance
         return {PREFIX + record["id"]: {**record, "completed": {
-            "candidate_hash": digest(document), "review_key": "authority/reviews/" + digest(review.model_dump())}}}
+            "candidate_hash": digest(document), "review_key": "authority/reviews/" + digest(review.model_dump())}},
+                **acceptance(self.store, rid, document, review, retrieved)}

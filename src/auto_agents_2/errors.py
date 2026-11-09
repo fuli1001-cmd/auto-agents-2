@@ -255,6 +255,15 @@ class ResearchDestinationRejected(AA2Error):
                          "itself is non-public.")
 
 
+class ResearchSourceExcluded(ResearchDestinationRejected):
+    """A preserved source exclusion, not an observation about fresh DNS."""
+
+    def __init__(self, hostname):
+        self.evidence = {"operation": "research_source_replacement", "hostname": hostname,
+                         "reason": "preserved_source_exclusion"}
+        AA2Error.__init__(self, f"Research replacement must not contact excluded source {hostname}")
+
+
 class RetryableInfrastructureError(AA2Error):
     """An explicitly recognized transient transport/timeout failure, not a manifest defect."""
 

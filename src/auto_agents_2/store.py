@@ -374,6 +374,35 @@ class Store:
                 provider, attempt, body = usage
                 db.execute("INSERT OR IGNORE INTO usage VALUES(?,?,?,?,?)",
                            (digest([provider, attempt, "invocation"]), rid, provider, attempt, json.dumps(body)))
+            from .research_replacement import CURRENT as replacement_key
+            from .research_replacement import current as replacement_current
+            if "provider_research" in values and replacement_key not in values:
+                registered = replacement_current(self, rid, db=db)
+                if registered and registered["phase"] == "pending_review":
+                    from .faults import StateConflict
+                    raise StateConflict("Pending research replacement publication requires its atomic acceptance receipt")
+            if replacement_key in values:
+                registered = replacement_current(self, rid, db=db)
+                accepted = values[replacement_key]
+                if (not registered or accepted != {**registered, "phase": "accepted", "review_key": accepted.get("review_key"),
+                                                           "review_receipt_hash": accepted.get("review_receipt_hash"),
+                                                           "retrieved_sources_hash": accepted.get("retrieved_sources_hash"),
+                                                           "verified_sources": accepted.get("verified_sources")}
+                        or not accepted.get("review_key") or "provider_research" not in values):
+                    from .faults import StateConflict
+                    raise StateConflict("Research replacement acceptance lost its exact atomic transition")
+                proof = checkpoint_query_db(db, "SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?",
+                                            (rid, accepted["review_key"]), wire_index=0).fetchone()
+                proof = json.loads(proof[0]) if proof else {}
+                proposal = registered["request"]["proposal"]
+                published = values["provider_research"]
+                if (proof.get("owned_candidate") != proposal or not proof.get("review", {}).get("approved")
+                        or digest(proof) != accepted.get("review_receipt_hash")
+                        or proof.get("basis", {}).get("observations", {}).get("retrieved_sources") != accepted.get("retrieved_sources_hash")
+                        or published.get("verified_sources", []) != accepted.get("verified_sources")
+                        or {k: v for k, v in published.items() if k != "verified_sources"} != proposal):
+                    from .faults import StateConflict
+                    raise StateConflict("Research replacement needs its original owned independent review receipt")
             for key, data in values.items():
                 if key.startswith("rounds/"):
                     existing = checkpoint_query_db(db, 'SELECT slot_order AS data FROM checkpoint_records WHERE run_id=? AND key=?', (rid, key), wire_index=0).fetchone()
@@ -384,6 +413,34 @@ class Store:
             if event is not None:
                 kind, data = event
                 self._event(db, rid, kind, data)
+
+    def register_research_replacement(self, request):
+        """Archive the unaccepted proposal and register a different exact source operation."""
+        from .faults import StateConflict
+        from .research_acquisition import WAIT
+        from .research_replacement import CURRENT, HISTORY, VERSION, snapshot
+        rid, identity = request["run_id"], digest(request)
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            _, records, basis = snapshot(db, rid)
+            if basis != request["basis"]:
+                raise StateConflict("Research replacement state changed before atomic registration")
+            prior = records.get(CURRENT) or {}
+            episode = records[request["episode_key"]]
+            record = {"version": VERSION, "request": request, "request_hash": identity,
+                      "phase": "pending_review", "replacement_count": prior.get("replacement_count", 0) + 1,
+                      "original_attempt_hashes": [digest(row) for row in episode["attempts"]],
+                      "original_fault_hash": digest(records.get("recovery/current-fault", {}))}
+            self._put(db, rid, HISTORY + identity,
+                      {"request": request, "original_candidate": records["candidate/provider_research"],
+                       "registration": record, "previous_registration": records.get(CURRENT), "original_episode": episode,
+                       "original_fault": records.get("recovery/current-fault"), "original_wait": records.get(WAIT),
+                       "original_questions": [dict(row) for row in db.execute(
+                           "SELECT * FROM questions WHERE run_id=? ORDER BY id", (rid,))]})
+            self._put(db, rid, "candidate/provider_research", {"document": request["proposal"]})
+            self._put(db, rid, CURRENT, record)
+            self._event(db, rid, "research.sources_replaced", {"request_hash": identity,
+                        "source_count": len(request["proposal"]["sources"])})
 
     def consume_research_prerequisite(self, rid, wait_key, hard_key, receipt_key, expected, question_id):
         """Consume the exact research-source answer and wait in one transaction."""

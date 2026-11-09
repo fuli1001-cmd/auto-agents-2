@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import shlex
-import shutil
 from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import quote
@@ -1585,7 +1584,7 @@ class WorkflowEngine:
                     or {row["url"] for row in selections} != {row.url for row in selected}):
                 raise Replan("prototype", "Explain each selected design reference's product fit and adaptations in design_selection")
             fresh_sources = [row for row in selected if row.url not in prior_sources]
-            acquired = await self._research_service().verify(fresh_sources) if fresh_sources else []
+            acquired = await self._research_service(rid).verify(fresh_sources) if fresh_sources else []
             by_url = {**prior_sources, **{row["url"]: row for row in acquired}}
             retrieved = ([{**by_url[row.url], **row.model_dump()} for row in selected]
                          if selected else list(prior_sources.values()))
@@ -2004,7 +2003,7 @@ class WorkflowEngine:
                     acquisition.block(rid, "Research could not find a useful permitted continuation.", document.model_dump())
                 if (document.sources or self.authority.author_scope(rid, stage)["correction"]
                         or PlanReviewRecovery(self).requires_research_review(rid) or acquisition.active(rid)):
-                    service = self._research_service()
+                    service = self._research_service(rid)
                     dispatch = acquisition.dispatch_binding(rid, document)
                     try:
                         retrieved = await service.verify(document.sources)
@@ -2101,7 +2100,7 @@ class WorkflowEngine:
                 updates.update(PlanReviewRecovery(self).accept_research(rid, stage_data, review))
                 # Receipt binds the author's proposal; verified_sources is only
                 # controller metadata appended after independent review.
-                updates.update(ResearchAcquisitionRecovery(self).acceptance(rid, document.model_dump(), review))
+                updates.update(ResearchAcquisitionRecovery(self).acceptance(rid, document.model_dump(), review, retrieved))
             if stage == "plan" and rebuilding:
                 self.authority.commit(rid, stage, stage_data, review, updates, work)
                 atomic_write(work / "docs/aa2" / f"{stage}.md", document.document)
@@ -2299,8 +2298,8 @@ class WorkflowEngine:
                 context["prototype_approval"] = await self._ensure_prototype_approval(rid, integration)
             await self._storage_boundary(rid, "generation")
             base = git(integration, "rev-parse", "HEAD")
-            from .task_repair_order import dispatched_repair
             from .output_limit_recovery import Incident
+            from .task_repair_order import dispatched_repair
             incident = Incident(self.store, rid)
             priority = incident.priority(plan.tasks, done)
             repair = None if priority else dispatched_repair(self, rid, plan, done, base)
@@ -3385,11 +3384,16 @@ class WorkflowEngine:
                                 phase="delivery", evidence_refs=tuple(snapshot)) from exc
         return snapshot
 
-    def _research_service(self):
+    def _research_service(self, rid=None):
+        from .research_replacement import guard_network
+        excluded = guard_network(self.store, rid) if rid is not None else ()
+        options = {}
         resolver = self.config.load().research_resolver
-        if resolver is None:
-            return ResearchService(self.artifacts)
-        return ResearchService(self.artifacts, resolver_config=resolver)
+        if resolver is not None:
+            options["resolver_config"] = resolver
+        if excluded:
+            options["excluded_hosts"] = excluded
+        return ResearchService(self.artifacts, **options)
 
     async def _review_research(self, rid, work, document, retrieved):
         recovery = ResearchAcquisitionRecovery(self)
