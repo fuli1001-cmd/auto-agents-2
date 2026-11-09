@@ -120,6 +120,15 @@ def management_path(path):
     return bool(segments and (segments[0] in MANAGEMENT_ROOTS or segments[-1] in ACTION_TERMINALS))
 
 
+def public_document_action(path):
+    # A narrow documentation spelling exception, never a private-target grant.
+    segments = [part.lower() for part in path.split("/") if part]
+    return (bool(segments) and segments[-1] in {"reset", "restart"}
+            and any(part in {"docs", "reference"} for part in segments[:-1])
+            and not any(part in MANAGEMENT_ROOTS | (ACTION_TERMINALS - {"reset", "restart"})
+                        for part in segments[:-1]))
+
+
 def normalize_document_authorization(value):
     try:
         url, host, _ = parse_document_url(value["origin"])
@@ -219,7 +228,7 @@ class ResearchDestinationPolicy:
             self.reject(host, "special_host")
         if port in SENSITIVE_PORTS:
             self.reject(host, "sensitive_service")
-        if (management_path(path)
+        if (management_path(path) and not public_document_action(path)
                 or any(key.lower() in ACTION_KEYS and any(item.lower() in ACTION_VALUES for item in values)
                        for key, values in parse_qs(url.query.decode()).items())):
             self.reject(host, "authentication_or_management_action")
@@ -228,6 +237,11 @@ class ResearchDestinationPolicy:
             if old.scheme == "https" and url.scheme != "https":
                 self.reject(host, "https_downgrade")
             self.crossed_origin = self.crossed_origin or origin(old) != origin(url)
+        if public_document_action(path) and any(
+                binding.get("selected_ip") and not public_address(binding["selected_ip"])
+                for binding in self.connections
+                if binding["hostname"] == host and binding["port"] == port):
+            self.reject(host, "document_action_requires_public_connection")
         explicit = self.permitted_document(url, path)
         if (host.endswith((".local", ".internal", ".lan", ".home", ".localdomain")) or "." not in host) and not explicit:
             try:
@@ -266,6 +280,8 @@ class ResearchDestinationPolicy:
         if literal is not None and any(value != literal for value in values):
             self.reject(current_host, "literal_address_mismatch")
         public = all(public_address(value) for value in values)
+        if public_document_action(path) and not public:
+            self.reject(current_host, "document_action_requires_public_connection")
         explicit = self.permitted_document(url, path)
         if not public:
             try:

@@ -184,7 +184,8 @@ async def test_restart_action_never_dials_even_with_document_authorization(monke
         selected = ResearchDestinationPolicy("https://docs.example.test" + path, grants)
         async with httpx.AsyncClient(transport=PublicHTTPTransport(destination_policy=selected), trust_env=False) as client:
             await client.get("https://docs.example.test" + path)
-    assert lookups == [] and connections == []
+    assert connections == []
+    assert lookups == (["docs.example.test"] if path == "/reference/restart" and not authorized else [])
 
 
 async def test_restart_document_name_remains_an_ordinary_unknown_private_document(monkeypatch):
@@ -752,3 +753,92 @@ async def test_grant_reentry_receipt_damage_stops_instead_of_reissuing_permissio
     with pytest.raises(StateConflict, match="atomic receipt"):
         recovery.prepare(rid)
     assert connections == []
+
+
+@pytest.mark.parametrize("path", ["/en-US/docs/Web/API/HTMLFormElement/reset", "/docs/reference/restart"])
+async def test_action_named_document_requires_public_numeric_binding_and_original_tls(monkeypatch, path):
+    target = "https://docs.example.test" + path
+    stream = RecordingStream([b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"])
+    _, connections = install_network(monkeypatch, stream, {"docs.example.test": ["93.184.216.34"]})
+    selected = ResearchDestinationPolicy(target)
+    async with httpx.AsyncClient(transport=PublicHTTPTransport(destination_policy=selected), trust_env=False) as client:
+        assert (await client.get(target)).text == "ok"
+    assert connections == [("93.184.216.34", 443)]
+    assert stream.tls == [("docs.example.test", ssl.CERT_REQUIRED, True)]
+
+
+@pytest.mark.parametrize("authorized", [False, True])
+@pytest.mark.parametrize("address", ["10.0.0.8", "198.18.0.8"])
+async def test_action_named_document_is_not_a_private_or_unknown_fallback(monkeypatch, address, authorized):
+    target = "https://docs.example.test/reference/restart"
+    grants = [{"origin": "https://docs.example.test", "path_prefix": "/reference"}] if authorized else []
+    stream = RecordingStream([])
+    _, connections = install_network(monkeypatch, stream, {"docs.example.test": [address]})
+    selected = ResearchDestinationPolicy(target, grants)
+    with pytest.raises(ResearchDestinationPolicyRejected, match="document_action_requires_public_connection"):
+        async with httpx.AsyncClient(transport=PublicHTTPTransport(destination_policy=selected), trust_env=False) as client:
+            await client.get(target)
+    assert connections == []
+
+
+@pytest.mark.parametrize("path", ["/restart", "/docs/admin/reset", "/docs/login/reset",
+                                 "/docs/reference/restart?action=restart"])
+def test_document_spelling_does_not_waive_management_or_action_query(path):
+    with pytest.raises(ResearchDestinationPolicyRejected):
+        ResearchDestinationPolicy("https://docs.example.test" + path)
+
+
+def test_action_document_reuse_uses_actual_origin_binding_not_a_new_public_dns_answer():
+    selected = ResearchDestinationPolicy(SOURCE)
+    selected.admit_addresses("docs.example.test", 443, ("10.0.0.8",), "fixture")
+    selected.connected("docs.example.test", 443, "10.0.0.8")
+    # A later resolution, with no successful new binding, cannot bless the old socket.
+    selected.admit_addresses("docs.example.test", 443, ("93.184.216.34",), "fixture")
+    with pytest.raises(ResearchDestinationPolicyRejected, match="document_action_requires_public_connection"):
+        selected.before_request("https://docs.example.test/reference/restart")
+    public = ResearchDestinationPolicy(SOURCE)
+    public.admit_addresses("docs.example.test", 443, ("93.184.216.34",), "fixture")
+    public.connected("docs.example.test", 443, "93.184.216.34")
+    public.before_request("https://docs.example.test/reference/restart")
+    # A reconnect/rebinding and a changed origin are each checked again.
+    with pytest.raises(ResearchDestinationPolicyRejected):
+        public.admit_addresses("docs.example.test", 443, ("10.0.0.8",), "fixture")
+    public.before_request("https://other.example.test/docs/reference/restart")
+    with pytest.raises(ResearchDestinationPolicyRejected):
+        public.admit_addresses("other.example.test", 443, ("10.0.0.8",), "fixture")
+
+
+@pytest.mark.parametrize("address", ["93.184.216.34", "10.0.0.8"])
+async def test_action_named_document_checks_actual_reused_http_connection(monkeypatch, address):
+    response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+    stream = RecordingStream([response, response])
+    lookups, connections = install_network(monkeypatch, stream, {"docs.example.test": [address]})
+    selected = ResearchDestinationPolicy(SOURCE)
+    async with httpx.AsyncClient(transport=PublicHTTPTransport(destination_policy=selected), trust_env=False) as client:
+        assert (await client.get(SOURCE)).text == "ok"
+        target = "https://docs.example.test/reference/restart"
+        if address == "93.184.216.34":
+            assert (await client.get(target)).text == "ok"
+        else:
+            with pytest.raises(ResearchDestinationPolicyRejected):
+                await client.get(target)
+            assert b"/reference/restart" not in b"".join(stream.writes)
+    assert lookups == ["docs.example.test"] and connections == [(address, 443)]
+    assert stream.tls == [("docs.example.test", ssl.CERT_REQUIRED, True)]
+
+
+async def test_action_document_redirect_rechecks_destination_instead_of_inheriting_public_source(monkeypatch):
+    target = "https://other.example.test/reference/restart"
+    stream = RecordingStream([("HTTP/1.1 302 Found\r\nLocation: " + target
+                              + "\r\nContent-Length: 0\r\n\r\n").encode()])
+    lookups, connections = install_network(monkeypatch, stream, {
+        "docs.example.test": ["93.184.216.34"], "other.example.test": ["10.0.0.8"]})
+    selected = ResearchDestinationPolicy(SOURCE, [
+        {"origin": "https://other.example.test", "path_prefix": "/reference"}])
+    with pytest.raises(ResearchDestinationPolicyRejected):
+        async with httpx.AsyncClient(transport=PublicHTTPTransport(destination_policy=selected),
+                                    trust_env=False, follow_redirects=True) as client:
+            await client.get(SOURCE)
+    assert lookups == ["docs.example.test", "other.example.test"]
+    assert connections == [("93.184.216.34", 443)]
+    assert b"/reference/restart" not in b"".join(stream.writes)

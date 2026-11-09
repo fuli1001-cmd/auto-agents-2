@@ -1251,3 +1251,10 @@ archive, together with the fixed old plan/origin/done inputs. Subsequent task
 classification reads that pre-write dictionary, not the transaction's newly
 written done/state values. Activated replay retains its original materialization
 and recording revalidation and does not activate or charge a second time.
+Ordinary research documentation URLs whose terminal is reset or restart may
+use the narrow docs/reference spelling exception only when all current answers
+are public and the original-host strict TLS/numeric binding is retained. This is
+not a private document grant. Sensitive/auth/admin paths and action queries remain
+rejected. Every redirect/reconnect is checked; an actual private binding retained
+by the capture prevents a later DNS answer from blessing its pooled connection.
+Previously recorded refusals are never released by this spelling exception.
