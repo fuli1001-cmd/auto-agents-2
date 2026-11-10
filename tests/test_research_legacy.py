@@ -153,3 +153,53 @@ def test_consumed_legacy_shared_wait_stays_consumed_across_episode(tmp_path):
     next_ledger = reopen(store, rid, recovery, doc)
     assert next_ledger.record()["attempts"] == []
     assert next_ledger.previous(URL) is None
+
+
+@pytest.mark.parametrize("damage", [None, "future-event", "sources", "candidate-hash", "artifact", "owner"])
+def test_changed_legacy_sources_require_exact_prior_owned_candidate(tmp_path, damage):
+    store, rid, recovery, doc, record = legacy(tmp_path, ("failed",))
+    newer = copy.deepcopy(doc.model_dump())
+    newer["sources"][0]["claim"] = "A revised original claim"
+    ref = recovery.engine.artifacts.put(newer, "provider_research")
+    event = {"stage": "provider_research", "operation": "provider_research", "artifact": ref}
+    if damage != "future-event":
+        store.event(rid, "artifact.created", event)
+    attempt = copy.deepcopy(record["attempts"][0])
+    attempt.update(id="attempt-2", generation=1, candidate_hash=digest(newer), sources=newer["sources"])
+    if damage == "sources":
+        attempt["sources"][0]["claim"] = "tampered"
+    if damage == "candidate-hash":
+        attempt["candidate_hash"] = "0" * 64
+    record["attempts"].append(attempt)
+    store.event(rid, "research.acquisition_failed", {"episode_id": "legacy", "attempt": 2,
+                "observations": attempt["observations"]})
+    if damage == "future-event":
+        store.event(rid, "artifact.created", event)
+    if damage == "artifact":
+        (store.root / "artifacts" / ref["hash"][:2] / ref["hash"]).write_text("changed")
+    if damage == "owner":
+        with store.connect() as db:
+            db.execute("DELETE FROM artifact_owners WHERE hash=? AND run_id=?", (ref["hash"], rid))
+    store.checkpoint(rid, PREFIX + "legacy", record)
+    if damage is not None:
+        with pytest.raises(StateConflict):
+            documents(store, rid, record)
+        return
+    ledger = reopen(store, rid, recovery, doc)
+    projected = ledger.entry(ledger.record(), URL)["outcomes"]
+    assert len(projected) == 2 and projected[1]["sources"] == newer["sources"]
+    assert projected[1]["legacy"]["original_source_basis"] == ref
+    assert projected[1]["legacy"]["candidate_event"]["seq"] > 0
+    assert ledger.cause_count(projected, projected[0]["failure"]) == 2
+
+
+def test_changed_legacy_projection_is_not_appended_or_double_charged(tmp_path):
+    store, rid, recovery, doc, record = legacy(tmp_path, ("failed",))
+    record["documents"] = documents(store, rid, record)
+    old = record["documents"][URL]["outcomes"][0]
+    old["legacy"]["transport_proof"] = "Older projection shape"
+    old["id"] = digest(old["legacy"])
+    before = copy.deepcopy(record)
+    with pytest.raises(StateConflict, match="explicit provenance reconciliation"):
+        documents(store, rid, record)
+    assert record == before

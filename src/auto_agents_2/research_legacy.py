@@ -11,6 +11,31 @@ from .util import digest
 TAG = "research-legacy-observation-v1"
 
 
+def _candidate_basis(store, rid, record, original, attempt, observation_event):
+    """Only a candidate archived before this observation can bind changed sources."""
+    from .research_documents import _artifact
+    if (digest(original) == attempt.get("candidate_hash")
+            and original.get("sources") == attempt.get("sources")):
+        return {"original_source_basis": record["original_candidate"]}
+    with store.connect() as db:
+        events = db.execute(
+            "SELECT seq,time,kind,data FROM events WHERE run_id=? AND kind=? AND seq<? ORDER BY seq DESC",
+            (rid, "artifact.created", observation_event["seq"]))
+        for event in events:
+            data = json.loads(event["data"])
+            if data.get("stage") != "provider_research" or event["time"] > observation_event["time"]:
+                continue
+            ref = data.get("artifact", {})
+            candidate = json.loads(_artifact(store, db, rid, ref, "provider_research"))
+            if digest(candidate) != attempt.get("candidate_hash"):
+                continue
+            if candidate.get("sources") != attempt.get("sources"):
+                raise StateConflict("Legacy research sources differ from their exact archived candidate")
+            return {"original_source_basis": ref,
+                    "candidate_event": {"seq": event["seq"], "event_hash": digest(dict(event))}}
+    raise StateConflict("Legacy research changed sources need their exact archived candidate evidence")
+
+
 def _rows(store, rid, record):
     """One authentic observation per attempt; repeated event presentation is not work."""
     from .research_acquisition import claim_rows
@@ -30,8 +55,6 @@ def _rows(store, rid, record):
         if not attempt.get("id") or attempt["id"] in seen:
             raise StateConflict("Legacy research attempt identity is absent or duplicated")
         seen.add(attempt["id"])
-        if attempt.get("sources") != original.get("sources"):
-            raise StateConflict("Legacy research changed sources need their exact archived candidate evidence")
         if attempt.get("dispatch") is not None:
             stamp = attempt["dispatch"]
             if (stamp.get("run_id") != rid or stamp.get("binding") != record["binding"]
@@ -49,6 +72,7 @@ def _rows(store, rid, record):
         if not matches:
             raise StateConflict("Legacy research has no original observation event")
         event = matches[0]
+        candidate_basis = _candidate_basis(store, rid, record, original, attempt, event)
         for index, observation in enumerate(attempt["observations"]):
             url = observation.get("url")
             sources = [row for row in attempt.get("sources", [])
@@ -59,7 +83,7 @@ def _rows(store, rid, record):
             proof = {"tag": TAG, "run_id": rid, "episode_id": record["id"],
                      "attempt_ordinal": ordinal, "attempt_id": attempt["id"],
                      "attempt_hash": digest(attempt), "observation_index": index,
-                     "original_source_basis": record["original_candidate"],
+                     **candidate_basis,
                      "event_seq": event["seq"], "event_hash": digest(dict(event)),
                      "original_dispatch": attempt.get("dispatch"),
                      "http_status": None,
@@ -100,6 +124,13 @@ def documents(store, rid, record):
     result = copy.deepcopy(record.get("documents", {}))
     for url, outcome in _rows(store, rid, record):
         entry = result.setdefault(url, {"url": url, "outcomes": []})
+        proof = outcome["legacy"]
+        for row in entry["outcomes"]:
+            old = row.get("legacy", {})
+            if (all(old.get(key) == proof[key] for key in
+                    ("episode_id", "attempt_id", "observation_index"))
+                    and row.get("id") != outcome["id"]):
+                raise StateConflict("Legacy research projection requires explicit provenance reconciliation")
         previous = next((row for row in entry["outcomes"] if row["id"] == outcome["id"]), None)
         if previous is not None:
             if previous != outcome:

@@ -1266,8 +1266,10 @@ Pre-document-ledger batches may contribute reusable observations only through a
 validated compatibility projection. Their original episode, attempt, event and
 owned candidate/source rows remain authoritative historical records. Successes
 must pass the same complete artifact, dependency and re-extraction checks as new
-captures. Legacy source rows that differ from the archived original candidate
-fail closed pending their exact archived candidate evidence. A compatibility tag
+captures. Legacy source rows that differ from the episode original require a run-owned
+research candidate artifact with exact full-candidate/source hashes and an original
+controller artifact event preceding the acquisition observation. Missing, later or
+changed candidate evidence fails closed. A compatibility tag
 states the missing original dispatch, HTTP status and transport proof explicitly;
 it does not invent a successful request, reviewed claim, retry grant or acceptance.
 The projection is idempotent and is committed with the existing dispatch CAS.
