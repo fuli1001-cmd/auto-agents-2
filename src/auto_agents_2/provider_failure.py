@@ -40,12 +40,18 @@ def code(value, allowed=CODES):
 
 
 def denied_action(value):
-    # AGY DeniedAction has tool_name, Struct args, and free-text reason.
+    # Headless JSONDeniedAction uses action/display_name; internal protobuf uses tool_name/args/reason.
     # Legacy string entries and unknown extensions remain explicitly opaque.
     result = {"fingerprint": opaque(value), "tool": code(None, TOOLS), "reason": code(None)}
     if type(value) is str:
         result["tool"] = code(value, TOOLS)
     elif type(value) is dict:
+        result["fields_present"] = {field: field in value for field in
+            ("action", "display_name", "tool_name", "toolName", "args", "reason_code", "reason")}
+        if "action" in value or "display_name" in value:
+            result["wire_shape"] = "headless_action_display"
+            result["headless_action"] = code(value.get("action"), TOOLS)
+            result["display_name"] = opaque(value.get("display_name"))
         result["tool"] = code(value.get("tool_name", value.get("toolName")), TOOLS)
         result["reason"] = code(value.get("reason_code", value.get("reason")))
         args = value.get("args")

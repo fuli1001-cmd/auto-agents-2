@@ -193,3 +193,60 @@ async def test_retry_failure_refs_accumulate_without_more_calls_after_exhaustion
     state = store.get(rid, "infra/review/antigravity")
     assert state["failures"] == 2 and state["grant"] == 0 and not state["pending"]
     assert state["provider_failure_refs"] == refs
+
+
+@pytest.mark.parametrize("action,expected", [
+    ("run_command", "run_command"),
+    ("EXAMPLE_UNKNOWN_ACTION --token=EXAMPLE_TOKEN", "unknown"),
+])
+def test_headless_action_display_shape_is_separate_from_tool_and_reason(action, expected):
+    display = "EXAMPLE_COMMAND https://EXAMPLE_USER:EXAMPLE_PASSWORD@private.invalid/EXAMPLE_PATH?token=EXAMPLE_QUERY"
+    safe = denied_action({"action": action, "display_name": display})
+    assert safe["wire_shape"] == "headless_action_display"
+    assert safe["headless_action"]["value"] == expected
+    assert safe["display_name"]["type"] == "str" and safe["display_name"]["sha256"]
+    assert safe["fields_present"]["action"] and safe["fields_present"]["display_name"]
+    assert not safe["fields_present"]["args"] and not safe["fields_present"]["reason"]
+    assert safe["tool"]["value"] == safe["reason"]["value"] == "unknown"
+    assert safe["tool"]["type"] == safe["arguments"]["type"] == safe["reason"]["type"] == "NoneType"
+    assert safe["targets"] == []
+    assert "EXAMPLE_" not in json.dumps(safe) and "private.invalid" not in json.dumps(safe)
+
+
+def test_headless_presence_distinguishes_omitted_fields_from_explicit_null():
+    omitted = denied_action({"display_name": ""})
+    nulls = denied_action({"action": None, "display_name": None, "args": None, "reason": None})
+    assert omitted["wire_shape"] == nulls["wire_shape"] == "headless_action_display"
+    assert not omitted["fields_present"]["action"] and nulls["fields_present"]["action"]
+    assert not omitted["fields_present"]["args"] and nulls["fields_present"]["args"]
+    assert not omitted["fields_present"]["reason"] and nulls["fields_present"]["reason"]
+    assert omitted["headless_action"]["type"] == nulls["headless_action"]["type"] == "NoneType"
+    assert nulls["display_name"]["type"] == "NoneType"
+
+
+@pytest.mark.parametrize("tool_key", ["tool_name", "toolName"])
+def test_internal_protobuf_snake_and_camel_projection_remains_compatible(tool_key):
+    safe = denied_action({tool_key: "read_file", "args": {"path": "/EXAMPLE_PRIVATE_PATH"},
+                          "reason": "POLICY_DENIED"})
+    assert safe["tool"]["value"] == "read_file" and safe["reason"]["value"] == "POLICY_DENIED"
+    assert safe["arguments"]["type"] == "dict" and safe["targets"][0]["field"] == "path"
+    assert safe["fields_present"][tool_key] and safe["fields_present"]["args"]
+    assert not safe["fields_present"]["action"] and "wire_shape" not in safe
+    assert "EXAMPLE_" not in json.dumps(safe)
+
+
+async def test_headless_success_with_denial_still_fails_once_and_keeps_safe_action_facts(tmp_path):
+    events = [result(denied_actions=[{"action": "read_file", "display_name": "EXAMPLE_PRIVATE_DISPLAY"}])]
+    router, project, store, rid = fixture_router(tmp_path, events, kind="antigravity")
+    with pytest.raises(ProviderError):
+        await router.invoke("review", {}, ReviewResult, project, rid, "review")
+    _, facts = observations(store, rid)
+    assert len(facts) == 1 and facts[0]["returncode"] == 0
+    assert facts[0]["last_terminal"]["status"]["value"] == "SUCCESS"
+    denial = facts[0]["terminal_failures"][0]["denied_actions"][0]
+    assert denial["headless_action"]["value"] == "read_file" and denial["fields_present"]["display_name"]
+    assert denial["reason"]["value"] == "unknown" and denial["targets"] == []
+    assert store.get(rid, "provider-result/review") is None
+    assert store.get(rid, "infra/review/antigravity")["failures"] == 1
+    assert len([row for row in store.events(rid) if row["kind"] == "agent.started"]) == 1
+    assert "EXAMPLE_" not in json.dumps(facts)
