@@ -83,3 +83,113 @@ async def test_transport_fallback_completion_is_not_reused_as_active_provider(tm
     store.checkpoint(rid, "invocation/cache", saved)
     await workflow._invoke("verify", {}, ReviewResult, tmp_path, rid, "cache")
     assert calls == ["codex", "codex"]
+
+
+@pytest.mark.parametrize("shape", ["selected-profile", "base", "auth", "home"])
+def test_selected_input_links_never_follow_an_alias(tmp_path, monkeypatch, shape):
+    import os
+
+    from auto_agents_2.errors import PolicyViolation
+    from auto_agents_2.transports import native_input_bytes
+    config, store = configured(tmp_path)
+    native = tmp_path / "native"
+    native.mkdir()
+    target = tmp_path / "forbidden-target"
+    target.write_text("synthetic unselected contents")
+    profile = native / "deep.config.toml"
+    profile.write_text("model='fixture'\nmodel_reasoning_effort='high'\n")
+    name = {"selected-profile": "deep.config.toml", "base": "config.toml", "auth": "auth.json"}.get(shape)
+    if name:
+        path = native / name
+        if path.exists():
+            path.unlink()
+        path.symlink_to(target)
+    else:
+        alias = tmp_path / "linked-home"
+        alias.symlink_to(native, target_is_directory=True)
+        native = alias
+    body = config.load().model_dump(mode="json")
+    body["providers"]["codex"]["environment"]["CODEX_HOME"] = str(native)
+    body["providers"]["codex"]["profile_map"]["balanced"] = "deep"
+    from auto_agents_2.util import write_json
+    write_json(config.path, body)
+    original_open = os.open
+    def checked_open(path, flags, *args, **kwargs):
+        assert str(path) != str(target) and str(path) != target.name
+        return original_open(path, flags, *args, **kwargs)
+    monkeypatch.setattr(os, "open", checked_open)
+    if shape != "auth":
+        with pytest.raises(PolicyViolation):
+            config.resolve("review", "codex")
+    with pytest.raises(PolicyViolation):
+        CodexTransport().input_files({"environment": {"CODEX_HOME": str(native)}, "native_profile": "deep"})
+    if name:
+        with pytest.raises(PolicyViolation):
+            native_input_bytes(native / name)
+
+
+@pytest.mark.parametrize("name", ["deep.config.toml", "config.toml", "auth.json"])
+def test_selected_native_hardlink_is_rejected_without_reading(tmp_path, monkeypatch, name):
+    import os
+
+    from auto_agents_2.errors import PolicyViolation
+    from auto_agents_2.transports import native_input_bytes
+    native = tmp_path / "native"
+    native.mkdir()
+    original = tmp_path / "unselected-original"
+    original.write_text("synthetic fixture")
+    alias = native / name
+    os.link(original, alias)
+    with pytest.raises(PolicyViolation):
+        native_input_bytes(alias)
+    with pytest.raises(PolicyViolation):
+        CodexTransport().input_files({"environment": {"CODEX_HOME": str(native)}, "native_profile": "deep"})
+
+
+async def test_unsafe_selected_input_stops_without_spawn_or_fallback(tmp_path, monkeypatch):
+    from auto_agents_2.errors import PolicyViolation
+    from auto_agents_2.models import ReviewResult
+    config, store = configured(tmp_path)
+    native = tmp_path / "native"
+    native.mkdir()
+    target = tmp_path / "unselected-target"
+    target.write_text("synthetic fixture")
+    (native / "auth.json").symlink_to(target)
+    def resolve(stage, candidate):
+        assert candidate == "codex", "Unsafe input must not trigger fallback resolution"
+        return {"kind": "codex", "provider": "codex", "native_profile": "",
+                "environment": {"CODEX_HOME": str(native)}, "fingerprint": "fixture"}
+    monkeypatch.setattr(config, "resolve", resolve)
+    router = ProviderRouter(config, store, SandboxRunner(store.root))
+    async def forbidden(*args):
+        pytest.fail("Unsafe input must not spawn any provider")
+    monkeypatch.setattr(router, "_call", forbidden)
+    rid = store.admit("fixture", {})["id"]
+    with pytest.raises(PolicyViolation):
+        await router.invoke("review", {}, ReviewResult, tmp_path, rid, "unsafe")
+
+
+def test_selected_overlay_preserves_refresh_and_removes_only_owned_old_profile(tmp_path):
+    config, store = configured(tmp_path)
+    native = tmp_path / "native"
+    native.mkdir()
+    for name in ("config.toml", "auth.json", "deep.config.toml", "balanced.config.toml", "max.config.toml"):
+        (native / name).write_text("synthetic " + name)
+    effective = {"kind": "codex", "provider": "codex", "native_profile": "deep",
+                 "environment": {"CODEX_HOME": str(native)}, "fingerprint": "fixture"}
+    router = ProviderRouter(config, store, SandboxRunner(store.root))
+    rid = store.admit("fixture", {})["id"]
+    mirror = router._session_overlay(effective, rid, "fixture")[0][0]
+    (mirror / "auth.json").write_text("synthetic CLI refreshed auth")
+    router._session_overlay(effective, rid, "fixture")
+    assert (mirror / "auth.json").read_text() == "synthetic CLI refreshed auth"
+    (native / "auth.json").write_text("synthetic source rotation")
+    router._session_overlay(effective, rid, "fixture")
+    assert (mirror / "auth.json").read_text() == "synthetic source rotation"
+    effective["native_profile"] = "balanced"
+    router._session_overlay(effective, rid, "fixture")
+    assert not (mirror / "deep.config.toml").exists()
+    assert (mirror / "balanced.config.toml").exists()
+    assert (native / "deep.config.toml").read_text() == "synthetic deep.config.toml"
+    assert (native / "max.config.toml").read_text() == "synthetic max.config.toml"
+    assert not (mirror / "max.config.toml").exists()

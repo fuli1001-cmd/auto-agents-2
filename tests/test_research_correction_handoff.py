@@ -150,7 +150,8 @@ async def test_research_acceptance_and_correction_close_atomically_on_resume(tmp
     assert resumed.authority.author_scope(rid, "provider_research")["correction"] is None
 
 
-async def test_cached_legacy_research_reaudits_active_dispute_and_retains_controller_metadata(tmp_path, monkeypatch, local_research):
+@pytest.mark.parametrize("hard_hold", [False, True])
+async def test_cached_legacy_research_reaudits_active_dispute_and_retains_controller_metadata(tmp_path, monkeypatch, local_research, hard_hold):
     from auto_agents_2.util import digest
     agent = CorrectedEmptyAgent()
     workflow, request = scenario(tmp_path, agent)
@@ -173,8 +174,22 @@ async def test_cached_legacy_research_reaudits_active_dispute_and_retains_contro
     saved = workflow.store.get(rid, "provider_research")
     assert workflow.authority.accepted(rid, "provider_research", saved)
     assert not workflow.store.get(rid, "authority/correction").get("completed")
+    from auto_agents_2.research_acquisition import ResearchAcquisitionRecovery
+    def no_reacquisition(*args):
+        pytest.fail("Accepted cache must not prepare a new acquisition")
+    monkeypatch.setattr(ResearchAcquisitionRecovery, "prepare", no_reacquisition)
     before = agent.reviews
     resumed = engine(workflow.project, agent)
+    if hard_hold:
+        from auto_agents_2.faults import StateConflict
+        from auto_agents_2.research_acquisition import HARD
+        held = {"operation": "fixture-recording", "error_type": "fixture-failure"}
+        resumed.store.checkpoint(rid, HARD, held)
+        with pytest.raises(StateConflict, match="remains unverified"):
+            await resumed._execute(rid)
+        assert resumed.store.get(rid, HARD) == held
+        assert agent.reviews == before and agent.authors == 2
+        return
     with pytest.raises(asyncio.CancelledError):
         await resumed.start()
     assert agent.reviews == before + 1 and agent.authors == 2

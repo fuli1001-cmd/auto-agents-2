@@ -2,8 +2,31 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Protocol
+
+
+def native_input_bytes(path, *, optional=False):
+    """Do not turn a selected input into access to a linked, different target."""
+    from .errors import ConfigurationError, PolicyViolation
+    from .safe_files import directory_fd, regular_file
+    try:
+        with directory_fd(path.parent) as parent, regular_file(parent, path.name) as stream:
+            info = os.fstat(stream.fileno())
+            limit = 32 * 1024**2
+            if info.st_nlink != 1 or info.st_size > limit:
+                raise ValueError("Selected native input is linked or too large")
+            raw = stream.read(limit + 1)
+            if len(raw) > limit:
+                raise ValueError("Selected native input is too large")
+            return raw
+    except FileNotFoundError as error:
+        if optional:
+            return b""
+        raise ConfigurationError("Selected native input is missing") from error
+    except (OSError, ValueError) as error:
+        raise PolicyViolation("Selected native input must be an unlinked regular file") from error
 
 
 class CLITransport(Protocol):
@@ -37,7 +60,21 @@ class CodexTransport:
             if Path(profile).name != profile or profile in {".", ".."} or "\\" in profile:
                 raise ConfigurationError("Native profile must be a single profile name")
             names.append(profile + ".config.toml")
-        return tuple(native / name for name in names if (native / name).is_file())
+        from .errors import PolicyViolation
+        from .safe_files import directory_fd, regular_exists
+        try:
+            with directory_fd(native) as parent:
+                selected = []
+                for name in names:
+                    if regular_exists(parent, name):
+                        if os.stat(name, dir_fd=parent, follow_symlinks=False).st_nlink != 1:
+                            raise ValueError("Selected native input has another hard link")
+                        selected.append(native / name)
+                return tuple(selected)
+        except FileNotFoundError:
+            return ()
+        except (OSError, ValueError) as error:
+            raise PolicyViolation("Selected native inputs must be unlinked regular files") from error
 
     def encode_prompt(self, prompt):
         return prompt.encode()

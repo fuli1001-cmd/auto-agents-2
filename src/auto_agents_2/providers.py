@@ -209,7 +209,8 @@ class ProviderRouter:
         try:
             transport = self.transports[effective["kind"]]
             native = transport.native_home(effective["environment"])
-            sources = {file.relative_to(native).as_posix(): file_digest(file)
+            from .transports import native_input_bytes
+            sources = {file.relative_to(native).as_posix(): digest(native_input_bytes(file))
                        for file in self._native_inputs(transport, effective)}
         except (OSError, KeyError) as exc:
             raise ConfigurationError("Cannot inspect provider native inputs") from exc
@@ -849,7 +850,8 @@ class ProviderRouter:
         for file in self._native_inputs(transport, eff):
             dest = mirror / file.relative_to(native)
             relative = file.relative_to(native).as_posix()
-            raw = file.read_bytes()
+            from .transports import native_input_bytes
+            raw = native_input_bytes(file)
             source_hash = digest(raw)
             with directory_fd(dest.parent, create=True) as parent:
                 exists = regular_exists(parent, dest.name)

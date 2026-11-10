@@ -62,8 +62,8 @@ def live_controller(identity):
 def native_inputs(router, eff):
     transport = router.transports[eff["kind"]]
     native = transport.native_home(eff["environment"])
-    from .workspace import file_digest
-    return {file.relative_to(native).as_posix(): file_digest(file)
+    from .transports import native_input_bytes
+    return {file.relative_to(native).as_posix(): digest(native_input_bytes(file))
             for file in router._native_inputs(transport, eff)}
 
 

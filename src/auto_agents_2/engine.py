@@ -1923,8 +1923,19 @@ class WorkflowEngine:
             if stage == "prototype" and not result.frontend:
                 continue
             cached = self.store.get(rid, stage)
-            if stage == "provider_research" and not (cached and self.authority.accepted(rid, stage, cached)):
-                ResearchAcquisitionRecovery(self).prepare(rid)
+            if stage == "provider_research":
+                recovery = ResearchAcquisitionRecovery(self)
+                if cached and self.authority.accepted(rid, stage, cached):
+                    # Reuse is not acquisition, but an unresolved recording failure
+                    # still prevents any advancement through this stage.
+                    hard = recovery.hard_error(rid)
+                    if hard is not None:
+                        raise hard
+                    if self.store.has_event(rid, "research.acquisition_recording_failed"):
+                        raise StateConflict("Historical research recording audit remains unresolved",
+                                            phase="provider_research")
+                else:
+                    recovery.prepare(rid)
             if cached:
                 if stage == "provider_research":
                     try:

@@ -284,16 +284,16 @@ class ConfigStore:
                 native_profile = profile
                 home = Path(environment.get("CODEX_HOME", "~/.codex")).expanduser()
                 file = home / f"{profile}.config.toml"
-                if not file.is_file():
-                    raise ConfigurationError(f"Missing native profile: {file}")
                 try:
+                    from .transports import native_input_bytes
                     settings = {}
-                    if (home / "config.toml").exists():
-                        raw_base = (home / "config.toml").read_bytes()
+                    raw_base = native_input_bytes(home / "config.toml", optional=True)
+                    if raw_base:
                         settings.update(tomllib.loads(raw_base.decode()))
                         fingerprints.append(digest(raw_base))
-                    settings.update(tomllib.loads(file.read_text()))
-                    fingerprints.append(digest(file.read_bytes()))
+                    raw_profile = native_input_bytes(file)
+                    settings.update(tomllib.loads(raw_profile.decode()))
+                    fingerprints.append(digest(raw_profile))
                 except (OSError, ValueError) as exc:
                     raise ConfigurationError("Cannot read or parse native provider profile") from exc
                 profile = Profile(model=str(settings.get("model", "")),
@@ -343,7 +343,8 @@ class ConfigStore:
         from .workspace import file_digest
         try:
             native = Path(environment.get("CODEX_HOME", "~/.codex")).expanduser() / "config.toml"
-            native_hash = digest(native.read_bytes()) if spec.kind == "codex" and native.is_file() else ""
+            from .transports import native_input_bytes
+            native_hash = digest(native_input_bytes(native, optional=True)) if spec.kind == "codex" else ""
             public["fingerprint"] = digest(["provider-execution-v3", public, str(Path(binary).resolve()),
                 file_digest(Path(binary)), environment, native_hash])
         except OSError as exc:
