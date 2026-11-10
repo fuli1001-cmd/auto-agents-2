@@ -1084,7 +1084,7 @@ class WorkflowEngine:
 
     def _prototype_reentry_context(self, rid, work, context, *, review=False):
         context = {**context}
-        retained = PrototypeReentry(self).context(rid, work)
+        retained = PrototypeReentry(self).context(rid, work, include_decision=not review)
         if retained:
             if review:
                 retained = {**retained, "instruction": (

@@ -1361,3 +1361,23 @@ report publication reuses that permission/observation. The complete old pending,
 negative invocation and report are retained as immutable required-read history
 for the new independent review. Fresh bytes never automatically resolve the
 other findings. Already approved old baselines do not enter this path.
+
+### Prototype controller-replan decision feedback
+
+Only new prototype author input assembly may expose the applied decision's full
+reason and expected result under controller_prototype_reentry.decision_feedback.
+This is historical feedback, not new permission or acceptance criteria. The
+original replan error, correction request, counts and gates remain unchanged.
+The bridge uses the completed generation's exact controller-replan permit,
+authorization snapshot and applied receipt, checking failure, observation, action,
+basis and decision proposal bindings within the same run. It never searches a
+latest decision or substitutes another round. Missing legacy provenance omits this
+optional field. Prototype review inputs remain unchanged. Ordinary context
+compilation retains the explanation inline or as complete required-read material.
+
+A replan not yet completed supplies no such feedback until normal completion.
+An already completed transition can supply it to a subsequent normal author call
+only if that existing chain is complete. This does not amend an already compiled,
+dispatched or cached request, prove an old author read the explanation, or authorize
+a replacement call. New input participates in the existing invocation identity;
+deployment must use the normal safe boundary, not restart healthy work to inject it.

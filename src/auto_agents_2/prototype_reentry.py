@@ -72,6 +72,87 @@ class PrototypeReentry:
                     and source.get("workspace") == str(work)
                     and source.get("hash") == permit.get("source_hash"))
 
+    def _decision_feedback(self, rid, history):
+        """Read only the applied controller-replan decision for this transition."""
+        from .decisions import DecisionRequest, decision_request_identity
+        from .recovery_identity import action_contract, binding_matches_failure
+
+        pending = history.get("pending", {})
+        key = pending.get("permit")
+        if (pending.get("stage") != "prototype" or not key
+                or pending.get("correction_permit") not in (None, key)):
+            return None
+        permit = self.store.get(rid, key, {})
+        cycle = self.store.get(rid, "recovery/cycles/" + permit.get("cycle_id", ""), {})
+        suffix = key.removeprefix("recovery/permits/")
+        snapshot_key = "recovery/request-snapshots/" + suffix
+        snapshot = self.store.get(rid, snapshot_key, {})
+        binding = self.store.get(rid, "recovery/authorization-inputs/" + suffix, {})
+        request = snapshot.get("request", {})
+        failure = request.get("evidence", {}).get("failure", {})
+        original = failure.get("evidence", {}).get("pending", {})
+        choice = request.get("scope", {}).get("candidates", {}).get("prototype", {})
+        # No broad search, latest pointer, or inference from similar wording.
+        if (not original or not binding or not choice
+                or key != "recovery/permits/" + digest([cycle.get("id"), "controller-replan"])
+                or cycle.get("id") != digest([failure.get("origin_id"), failure.get("id"), pending.get("evaluation")])
+                or cycle.get("observation") != pending.get("evaluation")
+                or cycle.get("failure_id") != failure.get("id")
+                or cycle.get("owner") != failure.get("origin_id")
+                or key not in cycle.get("permits", [])
+                or permit.get("owner") != failure.get("origin_id")
+                or permit.get("action", {}).get("failure_id") != failure.get("id")
+                or permit.get("action", {}).get("action") != "prototype"
+                or permit.get("authority_failure") != failure
+                or failure.get("component") != "controller" or failure.get("step") != "upstream"
+                or any(original.get(name) != pending.get(name)
+                       for name in original if name != "granted")
+                or original.get("granted") is not False
+                or snapshot.get("binding") != binding
+                or not binding_matches_failure(binding, failure)
+                or any(binding.get(name) != permit.get(name) for name in ("source_hash", "plan_hash"))
+                or request.get("kind") != "recovery_action"
+                or request.get("owner") != permit.get("owner")
+                or request.get("scope", {}).get("cycle_id") != cycle.get("id")
+                or action_contract(choice) != action_contract(permit.get("action", {}))):
+            return None
+        try:
+            basis = decision_request_identity(DecisionRequest.model_validate(request).model_copy(update={"state_identity": ""}))
+        except (TypeError, ValueError):
+            return None
+        choices = request["scope"]["candidates"]
+        candidates_hash = digest({k: action_contract(v) for k, v in choices.items()}) if binding.get("version") == 2 else digest(choices)
+        applied_key = "decisions/applied/" + digest([key, request])
+        applied = self.store.get(rid, applied_key, {})
+        result = applied.get("result", {})
+        if (snapshot.get("basis") != basis or binding.get("candidates") != candidates_hash
+                or not applied.get("applied") or applied.get("request") != request
+                or applied.get("actor") != permit.get("actor")
+                or result.get("action") != "approve" or result.get("selected_action") != "prototype"
+                or not result.get("reason") or result.get("reason") != permit.get("reason")
+                or result.get("expected_result") != permit.get("expected_result")):
+            return None
+        result_key = applied.get("result_key")
+        if permit.get("actor") == "agent":
+            saved = self.store.get(rid, result_key, {}) if result_key else {}
+            if (not saved.get("request") or saved.get("result") != result
+                    or result_key != "decisions/requests/" + digest(saved["request"])
+                    or saved.get("failed") or saved.get("fallback")
+                    or saved.get("attempts") not in (1, 2)):
+                return None
+            try:
+                if decision_request_identity(DecisionRequest.model_validate(saved["request"])) != decision_request_identity(DecisionRequest.model_validate(request)):
+                    return None
+            except (TypeError, ValueError):
+                return None
+        return {"reason": result["reason"], "expected_result": result["expected_result"],
+                "actor": permit["actor"], "permit": key, "permit_hash": digest(permit),
+                "request_snapshot": snapshot_key, "basis": basis,
+                "applied_decision": applied_key, "applied_decision_hash": digest(applied),
+                "proposal": result_key, "failure_id": failure["id"],
+                "observation": cycle["observation"],
+                "scope": "Bound historical recovery feedback only; not new authority or acceptance criteria."}
+
     def _review(self, history, reviews):
         pending = history.get("checkpoints", {}).get("prototype/pending", {})
         if not pending.get("fingerprint") or "visuals" not in pending:
@@ -154,7 +235,7 @@ class PrototypeReentry:
         return {"human_binding_matches": matches, "consent": {"question": question, "proof": human,
                 "approval_hash": digest(approval)}, "current_binding": binding}
 
-    def context(self, rid, work):
+    def context(self, rid, work, *, include_decision=False):
         generation = self.store.run(rid)["data"].get("replans", 0) - 1
         feedback = self.store.get(rid, "replan_feedback", {})
         key = f"recovery/gate-history/{generation}"
@@ -198,7 +279,9 @@ class PrototypeReentry:
             existing["origins"].append({"role": role, **origin})
             if consent:
                 existing.update(consent)
+        decision_feedback = self._decision_feedback(rid, latest) if include_decision else None
         return {**base, "status": "historical_reentry", "candidates": list(selected.values()),
+                **({"decision_feedback": decision_feedback} if decision_feedback else {}),
                 "transition": {"checkpoint": key, "hash": digest(latest),
                                "source_matches_current": latest["pending"]["correction_source"]["hash"] == base["current_source_hash"],
                                "permit": latest["pending"].get("correction_permit") or latest["pending"].get("permit")},
