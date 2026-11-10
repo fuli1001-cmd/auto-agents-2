@@ -358,9 +358,10 @@ class ProtectedChange(PolicyViolation):
 class ProviderError(AA2Error):
     code = "PROVIDER_ERROR"
 
-    def __init__(self, message: str, retryable: bool = False):
+    def __init__(self, message: str, retryable: bool = False, *, evidence=None):
         super().__init__(message)
         self.retryable = retryable
+        self.evidence = evidence or {}
 
 
 class InvalidStructuredResponse(ProviderError):

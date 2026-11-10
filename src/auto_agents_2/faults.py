@@ -138,10 +138,12 @@ def known_exception(error, phase):
             evidence_refs=failure_references(error), evidence=error.evidence),
             reason_code=error.code, phase=phase)
     if isinstance(error, (ConfigurationError, ProviderError)):
+        from .installation_failure import failure_references
         return HumanIntervention(HumanRequirement(kind="external_input",
             reason=f"外部配置或 provider 尚不可用（{error.code}）。",
             action="检查项目配置和原生 provider 的认证、连接状态。",
-            resume_condition="配置验证和原生 provider 检查通过后重新执行当前已声明操作。"),
+            resume_condition="配置验证和原生 provider 检查通过后重新执行当前已声明操作。",
+            evidence_refs=failure_references(error), evidence=getattr(error, "evidence", {})),
             reason_code=error.code, phase=phase)
     if isinstance(error, PolicyViolation):
         return StateConflict("当前操作未通过路径、权限或候选完整性核对；保留未应用提案及现场。", phase=phase)

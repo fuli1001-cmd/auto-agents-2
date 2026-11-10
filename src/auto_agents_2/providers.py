@@ -22,6 +22,7 @@ from .output_limit_recovery import CALL, CORRECTION, Incident, current_call
 from .progress import capture_output
 from .prompt_rules import is_review
 from .prompts import PROMPT_VERSION, PromptCompiler
+from .provider_failure import ProviderFailureFacts, failure_evidence
 from .readview import VIEW_VERSION, create_artifact_view, create_view
 from .resources import ResourceManager
 from .review_materials import ReviewMaterialChanged, ReviewMaterials
@@ -267,11 +268,13 @@ class ProviderRouter:
             candidates, retries = [cfg.active_provider], 0
         errors = []
         error_kinds = {}
+        failure_refs = []
         logical_input = invocation_identity(stage, context, schema, workspace, cfg)
         for candidate in candidates:
             for retry in range(retries + 1):
                 key = f"infra/{operation}/{candidate}"
                 state = self.store.get(run_id, key, {"failures": 0, "grant": 0, "pending": False})
+                failure_refs.extend(state.get("provider_failure_refs", []))
                 if scope is not None and state["pending"]:
                     raise scope.incident.stop("acceptance_provider_call_uncertain")
                 if state["pending"]:
@@ -351,6 +354,11 @@ class ProviderRouter:
                         raise PostCommitError("Provider result saved; reconcile completion without failover") from exc
                     kind = "invalid_structured_response" if isinstance(exc, InvalidStructuredResponse) else "unavailable"
                     state.update(pending=False, failures=state["failures"] + 1, error_kind=kind, error_input=logical_input)
+                    refs = exc.evidence.get("provider_failures", [])
+                    if refs:
+                        state["provider_failure_refs"] = failure_evidence(
+                            [*state.get("provider_failure_refs", []), *refs])["provider_failures"]
+                        failure_refs.extend(refs)
                     error_kinds[candidate] = kind
                     self.store.checkpoint(run_id, key, state)
                     errors.append(f"{candidate}: {exc}")
@@ -364,7 +372,7 @@ class ProviderRouter:
                                      "retry": retry + 1, "delay": min(2 ** retry, 15)})
                     await asyncio.sleep(min(2 ** retry, 15))
         error = InvalidStructuredResponse if set(error_kinds.values()) == {"invalid_structured_response"} else ProviderError
-        raise error("; ".join(errors)[-3000:])
+        raise error("; ".join(errors)[-3000:], evidence=failure_evidence(failure_refs))
 
     async def _call(self, eff, stage, context, schema, workspace, run_id, operation, fresh):
         scope = current_call(self.store, run_id, stage, operation)
@@ -559,6 +567,9 @@ class ProviderRouter:
                              "repair_kind": repair_kind, "task_title": task_title,
                              "config_hash": eff["fingerprint"], "prompt_version": PROMPT_VERSION, "prompt_family": family})
             decoder, errors = self.decoders.get(eff["kind"], EventDecoder)(eff["kind"]), []
+            failure_facts = ProviderFailureFacts(eff["kind"])
+            failure_error = failure_ref = failure_errno = None
+            failure_phase = "launch"
             process = None
             cancellation = None
             outcome = "interrupted"
@@ -580,6 +591,10 @@ class ProviderRouter:
                     event = json.loads(line)
                     if not isinstance(event, dict):
                         raise ValueError("Expected object")
+                    try:
+                        failure_facts.event(event)
+                    except (ValueError, TypeError, RecursionError):
+                        failure_facts.projection_complete = False
                     decoder.feed(event)
                     if decoder.session and decoder.session != session:
                         session = decoder.session
@@ -599,6 +614,7 @@ class ProviderRouter:
                     if detail:
                         observe("stdout", detail, force=True)
                 except (ValueError, TypeError):
+                    failure_facts.stream("stdout_non_json", line)
                     errors.append(scrub_text(line.decode(errors="replace")[:2000], secret_values))
                     del errors[:-100]
 
@@ -619,6 +635,7 @@ class ProviderRouter:
                                                    readonly_overlays=readonly_overlays,
                                                    **({"_incident_launch": managed_launch} if scope is not None else {}))
                 self.store.event(run_id, "agent.spawned", {"attempt": aid, "pid": process.pid})
+                failure_phase = "transport"
 
                 async def stdout():
                     pending = bytearray()
@@ -638,6 +655,7 @@ class ProviderRouter:
 
                 async def stderr():
                     while chunk := await process.stderr.read(8192):
+                        failure_facts.stream("stderr", chunk)
                         observe("stderr", diagnostic_summary(chunk.decode(errors="replace")))
                         errors.append(scrub_text(chunk.decode(errors="replace")[:2000], secret_values))
                         if len(errors) > 100:
@@ -654,6 +672,7 @@ class ProviderRouter:
                     for reader in readers:
                         reader.cancel()
                     await asyncio.gather(*readers, return_exceptions=True)
+                failure_phase = "terminal_validation"
                 if process.returncode != 0 or decoder.error or not decoder.finished:
                     message = decoder.error or getattr(decoder, "stream_error", "") or "".join(errors)
                     diagnostic = diagnostic_summary(message)
@@ -662,6 +681,7 @@ class ProviderRouter:
                         retryable=diagnostic not in {INPUT_LIMIT_DIAGNOSTIC, CONTEXT_LIMIT_DIAGNOSTIC, MODEL_UNAVAILABLE_DIAGNOSTIC, MOUNT_LIMIT_DIAGNOSTIC}
                         and any(t in message.lower() for t in
                             ("timeout", "timed out", "429", "503", "connection", "rate limit", "capacity", "overloaded")))
+                failure_phase = "structured_response"
                 from .safe_files import read_regular
                 try:
                     response = read_regular(out / "result.json", 32 * 1024 * 1024).decode("utf-8")
@@ -707,9 +727,12 @@ class ProviderRouter:
                 raise
             except OSError as exc:
                 outcome = "error"
-                raise ProviderError(str(exc)) from exc
-            except Exception:
+                failure_error = ProviderError(str(exc))
+                failure_errno = exc
+                raise failure_error from exc
+            except Exception as exc:
                 outcome = "error"
+                failure_error = failure_errno = exc
                 raise
             finally:
                 from .cleanup import finalize_async
@@ -722,11 +745,29 @@ class ProviderRouter:
                                              {"attempt": aid, "operation": operation})
                         except Exception:
                             pass  # Preserve the original failure/cancellation and cleanup.
+
+                def save_failure():
+                    nonlocal failure_ref
+                    record = failure_facts.record(run_id=run_id, attempt=aid, stage=stage,
+                        operation=operation, provider=eff["provider"], input_identity=input_identity,
+                        process=process, decoder=decoder, phase=failure_phase, error=failure_errno)
+                    ref = artifact_store.put(record, "provider_failure")
+                    self.store.checkpoints(run_id, {f"provider-failure/{aid}": ref},
+                        event=("agent.failure", {"attempt": aid, "stage": stage,
+                                                "operation": operation, "artifact": ref}))
+                    failure_ref = ref
+                    if isinstance(failure_error, ProviderError):
+                        failure_error.evidence = failure_evidence([ref])
+
                 await finalize_async(
+                    *([save_failure] if outcome == "error" else []),
                     *([lambda: self.sandbox.stop(process)] if process else []),
                     lambda: self.store.add_usage(run_id, eff["provider"], aid, "invocation", decoder.usage.model_dump()),
                     lambda: self.store.event(run_id, "agent.finished", {"attempt": aid, "complete": decoder.finished,
                         "outcome": outcome, "last_output": last_output,
+                        **({"failure_observation": failure_ref, "failure_observation_status": "saved"}
+                           if failure_ref is not None else
+                           {"failure_observation_status": "unavailable"} if outcome == "error" else {}),
                         "diagnostic": (getattr(decoder, "failure_diagnostic", "") or
                             diagnostic_summary(decoder.error or getattr(decoder, "stream_error", "") or "".join(errors))) if outcome == "error" else ""}))
                 if outcome == "success" and process is not None and cache_invocation.get("handle"):
