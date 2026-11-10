@@ -328,6 +328,10 @@ class ResearchService:
             for url, task in documents.items():
                 if task.cancelled():
                     row = {"url": url, "status": "cancelled", "capture_started": url in started}
+                elif getattr(task.exception(), "acquisition_request_not_executed", False):
+                    row = {"url": url, "status": "not_executed", "capture_started": False,
+                           "unit": "capture", "boundary": {"operation": "research_prerequisite_admission",
+                                                             "error_type": type(task.exception()).__name__}}
                 elif isinstance(task.exception(), ResearchRequestNotExecuted):
                     row = {"url": url, "status": "not_executed", "capture_started": url in started,
                            "unit": "pending_request" if url in started else "capture",

@@ -1290,3 +1290,30 @@ a refused selected input or operation still requires its own valid authorization
 An already authority-accepted research document may use the normal cached-stage
 path without preparing another acquisition. Unaccepted captures, old questions and
 unfinished prerequisites cannot use that shortcut and retain normal review gates.
+
+
+For a v1 episode lacking original dispatch bindings, a complete set of verified
+local captures for the exact current candidate may enter the ordinary research
+verification and independent-review path. This is a cache-use condition, not a
+retroactive dispatch, prerequisite answer, permission grant or acceptance. The
+original questions, faults and failure counts remain unchanged. Candidate changes
+are checked again before verification; missing captures, unavailable anchors,
+changed material, recording hard holds or a real current wait block the exception.
+Every actual document dispatch checks the original network prerequisites again,
+including legacy observations carried across completed/new episodes. A successful
+cache review cannot release their acquisition restrictions. Explicitly identified
+pre-dispatch prerequisite refusals are retained as not_executed, never charged as
+an HTTP failure or mislabeled as an internal recording failure. Corrupt evidence
+continues to follow the existing hard-failure path. Provider review receives the
+ordinary acquisition context explaining that cached evidence does not authorize
+contacting blocked sources through another tool or route.
+
+
+The optional invocation-only `resume --stop-after provider_research` pauses through
+normal run state after research acceptance, including an already accepted cached
+stage. It is not stored in project/model configuration and does not approve a
+prototype. A bounded invocation refuses to attach to an existing unbounded
+controller and pauses rather than entering pending downstream recovery, delivery
+or a no-change finalization shortcut. Normal resume remains unchanged. This thin
+stage boundary supports a shared-research comparison without embedding either
+prototype arm or comparison policy in the workflow.

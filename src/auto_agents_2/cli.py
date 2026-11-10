@@ -102,7 +102,7 @@ async def render(store: Store, stop: asyncio.Event, paused: asyncio.Event, last:
         display.close()
 
 
-async def execute(project, requirements=None, provider=None, run_id=None, *, requirements_text=None):
+async def execute(project, requirements=None, provider=None, run_id=None, *, requirements_text=None, stop_after=None):
     if requirements_text is not None and (requirements is not None or run_id is not None):
         raise AA2Error("需求文本不能与需求文件或恢复迭代 ID 同时提供")
     configuration(project)
@@ -152,8 +152,12 @@ async def execute(project, requirements=None, provider=None, run_id=None, *, req
         engine = WorkflowEngine(project, question_handler=question if session else None)
         try:
             text_input = {"requirements_text": requirements_text} if requirements_text is not None else {}
+            if stop_after is not None:
+                text_input["stop_after"] = stop_after
             result = await supervised_start(requirements, provider, run_id, **text_input)
         except BusyProject:
+            if stop_after is not None:
+                raise BusyProject("A stage stop cannot be attached to another running controller")
             if new_iteration:
                 raise IncompleteIteration(f"项目已有控制进程。请先执行：aa2 run --project {project}")
             if provider:
@@ -253,10 +257,11 @@ def run(project: Project = Path("."), requirements: Annotated[str | None, typer.
 
 @app.command()
 def resume(project: Project = Path("."), run_id: Annotated[str | None, typer.Option("--run")] = None,
-           provider: Annotated[str | None, typer.Option("--provider")] = None):
+           provider: Annotated[str | None, typer.Option("--provider")] = None,
+           stop_after: Annotated[str | None, typer.Option("--stop-after", help="本次运行在 provider_research 正常接受后暂停；不保存为配置")] = None):
     """显式恢复入口，RUN_ID 可省略。"""
     try:
-        asyncio.run(execute(project.resolve(), provider=provider, run_id=run_id))
+        asyncio.run(execute(project.resolve(), provider=provider, run_id=run_id, stop_after=stop_after))
     except AA2Error as exc:
         fail(exc)
     except (KeyboardInterrupt, asyncio.CancelledError):

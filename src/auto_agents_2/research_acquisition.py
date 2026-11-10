@@ -30,6 +30,10 @@ SOURCE_CODES = {"DOCUMENT_ACQUISITION_UNAVAILABLE", "RESEARCH_RESOLVER_UNAVAILAB
                 "RESEARCH_DESTINATION_REJECTED", "RESEARCH_DOCUMENT_AUTHORIZATION_REQUIRED"}
 
 
+class ResearchPrerequisiteAdmission(StateConflict):
+    """An unresolved known prerequisite, not corrupt acquisition evidence."""
+
+
 class ClaimDisposition(Record):
     claim_id: str
     disposition: Literal["supported", "not_required", "blocked"]
@@ -258,7 +262,35 @@ class ResearchAcquisitionRecovery:
                              "this hard boundary. Restore and verify the original owner state first.",
                              phase="provider_research", evidence_refs=[HARD])
 
-    def prepare_wait(self, rid):
+    def legacy_cache_available(self, rid, record, candidate):
+        """Collection evidence is reusable; missing historical authority is not repaired."""
+        if (not record or not candidate.get("sources")
+                or not any(not row.get("dispatch") for row in record.get("attempts", []))):
+            return False
+        from .research_documents import ResearchDocumentLedger, _artifact, validate_capture
+        from .research_legacy import documents
+        from .research_sections import select_section
+        retained = documents(self.store, rid, record)
+        ledger = ResearchDocumentLedger(self, rid, PREFIX + record["id"], {})
+        projected = {**record, "documents": retained}
+        for source in candidate["sources"]:
+            url, fragment = urldefrag(source["url"])
+            outcomes = ledger.entry(projected, url)["outcomes"]
+            outcome = next((row for row in reversed(outcomes)
+                            if row["status"] == "retrieved"), None)
+            if outcome is None:
+                return False
+            validate_capture(self.store, rid, url, outcome["retrieval"])
+            # Both legacy and modern receipts retain their full body/index proof.
+            if fragment:
+                with self.store.connect() as db:
+                    index = json.loads(_artifact(self.store, db, rid, outcome["retrieval"]["section_index"],
+                                                 "research_section_index"))
+                if select_section(index, fragment)["status"] != "selected":
+                    return False
+        return True
+
+    def prepare_wait(self, rid, *, network=False):
         hard = self.hard_error(rid)
         if hard is not None:
             raise hard
@@ -284,6 +316,8 @@ class ResearchAcquisitionRecovery:
         if record is None:
             key = PREFIX + digest([rid, self.store.run(rid)["data"].get("replans", 0), self.binding(rid), candidate])
             record = self.store.get(rid, key)
+        legacy_cached = False
+        cache_checked = False
         for attempt in (record or {}).get("attempts", []):
             own = self.refusals(attempt["observations"], shared_only=attempt.get("document_protocol") == 1)
             if not own or replacement and covers_attempt(replacement, attempt):
@@ -293,7 +327,13 @@ class ResearchAcquisitionRecovery:
             receipt = self.store.get(rid, CONSUMED + identity) if identity else None
             if (not receipt or receipt.get("dispatch") != stamp
                     or receipt.get("acquisition_id") != attempt["id"]):
-                raise StateConflict("Historical research refusal has no verified dispatch wait/consumption binding; "
+                if stamp is None and not network:
+                    if not cache_checked:
+                        legacy_cached = self.legacy_cache_available(rid, record, candidate)
+                        cache_checked = True
+                    if legacy_cached:
+                        continue  # Local evidence only; no wait/consumption receipt is invented.
+                raise ResearchPrerequisiteAdmission("Historical research refusal has no verified dispatch wait/consumption binding; "
                                     "preserve its original question and observations before any new request.",
                                     phase="provider_research", evidence_refs=[CURRENT])
         fault = self.store.get(rid, "recovery/current-fault", {})
@@ -305,8 +345,8 @@ class ResearchAcquisitionRecovery:
                 requirement.get("evidence", {}), document=fault["reason_code"] == "DOCUMENT_ACQUISITION_UNAVAILABLE")
             identity = digest([fault["reason_code"], fault["phase"], requirement])
             key = "prerequisite/" + identity + "/" + str(self.store.get(rid, "prerequisite/" + identity, 0))
-            if not automatic and self.store.decision_questions(rid, [key]):
-                raise StateConflict("Legacy source prerequisite lacks a verified new dispatch binding; keep the "
+            if not automatic and self.store.decision_questions(rid, [key]) and not legacy_cached:
+                raise ResearchPrerequisiteAdmission("Legacy source prerequisite lacks a verified new dispatch binding; keep the "
                                     "original question and obtain an owner-verified bridge before reacquisition.",
                                     phase="provider_research")
 
@@ -449,6 +489,10 @@ class ResearchAcquisitionRecovery:
                      "requirement_assessment": replacement["request"]["requirement_assessment"]}}
                    if replacement else {}),
                 "original_candidate": record["original_candidate"], "attempts": record["attempts"],
+                "historical_dispatch_missing": any(not row.get("dispatch") for row in record["attempts"]),
+                "cache_admission": "Complete validated local captures may be assessed through normal independent review. "
+                    "This does not answer old questions or authorize reacquisition. Do not contact blocked sources "
+                    "through provider tools; actual collection remains subject to controller network admission.",
                 "document_grant_updates": self.document_grant_matches(rid, record),
                 "document_grant_rechecks": record.get("document_grant_rechecks", []),
                 **({"documents": record["documents"], "retry_policy": {
@@ -623,6 +667,8 @@ class ResearchAcquisitionRecovery:
         source_error = isinstance(error, (DocumentAcquisitionTimeout, DocumentAcquisitionUnavailable,
                                          ResearchResolverUnavailable, ResearchDestinationRejected, ResearchRequestNotExecuted,
                                          RetainedDocumentFailure))
+        source_error = source_error or (isinstance(error, (ResearchPrerequisiteAdmission, HumanIntervention))
+                                        and getattr(error, "acquisition_request_not_executed", False))
         if (self.global_failures(report) or getattr(error, "acquisition_document_recording_error", None)
                 or not control and not source_error):
             updates[HARD] = self.hard_record(rid, error, error, "research.capture.internal")

@@ -196,7 +196,9 @@ class WorkflowEngine:
         browser_environment(self.store.root / "cache/browsers")
 
     async def start(self, source: str | None = None, provider: str | None = None, run_id: str | None = None, *,
-                    allow_resume: bool = True, requirements_text: str | None = None):
+                    allow_resume: bool = True, requirements_text: str | None = None, stop_after: str | None = None):
+        if stop_after not in {None, "provider_research"}:
+            raise AA2Error("This invocation can stop only after provider_research")
         if requirements_text is not None and (source is not None or run_id is not None):
             raise AA2Error("需求文本不能与需求文件或恢复迭代 ID 同时提供")
         new_iteration = source is not None or requirements_text is not None
@@ -235,6 +237,16 @@ class WorkflowEngine:
                 if run["status"] in {"SUCCEEDED", "CANCELLED"}:
                     return run
             rid = run["id"]
+            def stage_boundary_pending():
+                if not stop_after:
+                    return False
+                pending = self.store.get(rid, "replanning/pending", {})
+                return (self.store.get(rid, "delivery/journal") or self.store.get(rid, "recovery/active")
+                        or (pending and pending.get("stage") not in {"clarify", "provider_research"}))
+            if stage_boundary_pending():
+                # Do not enter downstream work before the bounded stage loop.
+                self.store.update(rid, status="PAUSED", pause_reason="requested_stage_boundary")
+                return self.store.run(rid)
             self.store.event(rid, "automation.policy", {"enabled": self.config.load().automation.enabled,
                 "count_limits_enforced": False,
                 "message": "生成及验收阶段的累计实现、诊断和停滞次数仅供决策参考；旧轮数上限不再触发停止。"})
@@ -254,6 +266,9 @@ class WorkflowEngine:
             preflight_complete = False
             try:
                 while True:
+                    if stage_boundary_pending():
+                        self.store.update(rid, status="PAUSED", pause_reason="requested_stage_boundary")
+                        return self.store.run(rid)
                     try:
                         from .output_limit_recovery import Incident
                         incident = Incident(self.store, rid)
@@ -281,7 +296,7 @@ class WorkflowEngine:
                                     self._legacy_recovery(rid)
                                     continue
                                 await self._resume_replan(rid)
-                        return await self._execute(rid)
+                        return await self._execute(rid, stop_after=stop_after) if stop_after else await self._execute(rid)
                     except RecoveryNeeded as exc:
                         if incident.active():
                             return incident.pause("workflow_recovery_requested")
@@ -1727,11 +1742,14 @@ class WorkflowEngine:
             rid, work, document, pending["review"], pending["visuals"])
         return document, pending["retrieved"]
 
-    async def _execute(self, rid):
+    async def _execute(self, rid, *, stop_after=None):
         if self.store.run(rid)["status"] == "SUCCEEDED":
             self.resources.finish_delivery(rid)
             return self.store.run(rid)
         if self.store.get(rid, "delivery/journal"):
+            if stop_after:
+                self.store.update(rid, status="PAUSED", pause_reason="requested_stage_boundary")
+                return self.store.run(rid)
             journal = self.store.get(rid, "delivery/journal")
             if (journal.get("plan") or {}).get("preview"):
                 try:
@@ -1795,6 +1813,9 @@ class WorkflowEngine:
             if (not rebuilding and not self.store.get(rid, "recovery/implementation_pending") and previous_raw and previous_raw["hash"] == raw["hash"]
                     and previous["data"].get("verified_source_hash") == source_hash and not previous["data"].get("external_dependencies")):
                 self.store.checkpoint(rid, "clarify", assessment)
+                if stop_after:
+                    self.store.update(rid, status="PAUSED", pause_reason="requested_stage_boundary")
+                    return self.store.run(rid)
                 return await self._finish_no_changes(rid, work, previous["id"])
         context = {**self.store.get(rid, "clarify_context", {}), "raw_requirements": original,
                    "context_files": [str(self.artifacts.root / raw_hash[:2] / raw_hash)],
@@ -1907,6 +1928,9 @@ class WorkflowEngine:
                     if r["data"].get("verified_source_hash") == source_hash and self.store.get(r["id"], "prototype")
                     and self.store.get(r["id"], "plan", {}).get("preview")), None)
                 if not rebuilding and not retained_verification and (not result.frontend or previous_contract):
+                    if stop_after:
+                        self.store.update(rid, status="PAUSED", pause_reason="requested_stage_boundary")
+                        return self.store.run(rid)
                     return await self._finish_no_changes(rid, work, previous_contract or "current-baseline")
                 verification_only = True
                 context["planning_mode"] = "verification_only"
@@ -1971,6 +1995,9 @@ class WorkflowEngine:
                 context[stage] = cached
                 if stage == "prototype":
                     context["prototype_approval"] = await self._ensure_prototype_approval(rid, work, cached)
+                if stage == stop_after:
+                    self.store.update(rid, status="PAUSED", stage=stage, pause_reason="requested_stage_boundary")
+                    return self.store.run(rid)
                 continue
             context["project"] = self.contexts.build(work)
             if stage == "prototype":
@@ -2057,6 +2084,9 @@ class WorkflowEngine:
             if stage == "provider_research":
                 review = None
                 acquisition = ResearchAcquisitionRecovery(self)
+                # Questions or author revision may have changed the candidate since
+                # stage entry. Recheck local cache coverage before any verification.
+                acquisition.prepare_wait(rid)
                 acquisition.validate(rid, document)
                 if getattr(document, "acquisition_resolution", None) and document.acquisition_resolution.status == "blocked":
                     acquisition.block(rid, "Research could not find a useful permitted continuation.", document.model_dump())
@@ -2171,6 +2201,9 @@ class WorkflowEngine:
             else:
                 self.store.checkpoints(rid, updates)
             context[stage] = stage_data
+            if stage == stop_after:
+                self.store.update(rid, status="PAUSED", stage=stage, pause_reason="requested_stage_boundary")
+                return self.store.run(rid)
         if self.store.get(rid, CONTRACT_REENTRY):
             raise StateConflict("Contract rebuild must finish independent preservation review before execution")
         plan = PlanResult.model_validate(self.store.get(rid, "plan"))

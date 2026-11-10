@@ -322,6 +322,35 @@ class ResearchDocumentLedger:
         return False
 
     def start(self, url):
+        # Recheck immediately before a real request. A cache-only v1 continuation
+        # cannot become a new acquisition through a changed candidate or cache miss.
+        from .faults import HumanIntervention
+        from .research_acquisition import PREFIX, ResearchPrerequisiteAdmission
+        try:
+            self.recovery.prepare_wait(self.rid, network=True)
+            record = self.record()
+            # Completed cache reviews may carry these observations to a new
+            # episode. Completion never consumes an old network prerequisite.
+            from .research_replacement import covers_attempt, current
+            replacement = current(self.store, self.rid)
+            for old_url, entry in record["documents"].items():
+                if not any("legacy" in row for row in entry["outcomes"]):
+                    continue
+                for outcome in self.entry(record, old_url)["outcomes"]:
+                    proof = outcome.get("legacy")
+                    if not proof:
+                        continue
+                    original = self.store.get(self.rid, PREFIX + proof["episode_id"])
+                    attempt = original["attempts"][proof["attempt_ordinal"] - 1]
+                    if replacement and covers_attempt(replacement, attempt):
+                        continue
+                    for failure in self.failures(outcome):
+                        if not failure["automatic"] and not self.consumed_shared_wait(record, old_url, outcome, failure):
+                            raise ResearchPrerequisiteAdmission("Historical research prerequisite still blocks network acquisition",
+                                                phase="provider_research")
+        except (ResearchPrerequisiteAdmission, HumanIntervention) as error:
+            error.acquisition_request_not_executed = True
+            raise
         record = self.record()
         entry = self.entry(record, url)
         candidate = self.store.get(self.rid, "candidate/provider_research")["document"]
