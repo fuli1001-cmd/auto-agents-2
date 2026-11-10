@@ -127,9 +127,35 @@ async def refresh_controller_download_gap(engine, rid, work, document, pending):
                 "candidate_hash": basis["candidate_hash"], "review_hash": digest(old),
                 "browser_version": engine.browser_check_version()}
     state = pending.get("download_capture_refresh")
+
+    def require_old_report(ref):
+        # The latest shared pointer is not historical provenance by itself.
+        # Validate the complete report and its images against this exact old
+        # review basis before retaining or exposing it.
+        try:
+            report = engine.artifacts.json(ref)
+            version = pending["browser_version"]
+            binding = {"hash": pending["fingerprint"], "actions_hash": digest(actions)}
+            valid = (ref["kind"] == "prototype-browser"
+                     and len(engine.artifacts.bytes(ref)) == ref["bytes"]
+                     and report["results"] == rows
+                     and basis["observations_hash"] == digest(report["results"])
+                     and basis["candidate_hash"] == digest([binding["hash"], binding["actions_hash"]])
+                     and engine.approvals.browser_report_current(report, binding, actions, version,
+                         expected_routes=engine.approvals.routes(work, actions)))
+        except (OSError, ValueError, KeyError, TypeError):
+            valid = False
+        if not valid:
+            raise StateConflict("Historical prototype report is missing or does not match its rejected review")
+        return ref
+
     if state is None:
-        archived = engine.approvals.archive_review(rid, {"pending": pending, "invocation": invocation,
-            "browser_report": engine.store.get(rid, "prototype_browser_report"),
+        old_report = require_old_report(engine.store.get(rid, "prototype_browser_report"))
+        archived = engine.approvals.archive_review(rid, {
+            "pending": pending, "invocation": invocation, "review": old, "basis": basis, "source": source,
+            # Existing dependency expansion follows report, including its image
+            # refs, into the ordinary compiled payload and selective read view.
+            "report": {"artifact": old_report, "required_read": True},
             "reason": "Authorized passive-download profile reobservation; previous rejection is not resolved"})
         identity = digest([error.reason_code, error.phase, error.requirement.model_dump()])
         key = "prerequisite/" + identity
@@ -139,6 +165,18 @@ async def refresh_controller_download_gap(engine, rid, work, document, pending):
         engine.store.checkpoint(rid, "prototype/pending", pending)
     if any(state.get(key) != value for key, value in expected.items()):
         raise StateConflict("Prototype download refresh inputs changed; preserve its original authorization")
+    try:
+        previous = engine.artifacts.json(state["previous"])
+        original_pending = {key: value for key, value in pending.items() if key != "download_capture_refresh"}
+        valid = (previous["pending"] == original_pending and previous["basis"] == basis
+                 and previous["review"] == old and previous["source"] == source
+                 and previous["report"]["required_read"] is True)
+        old_report = previous["report"]["artifact"]
+    except (OSError, ValueError, KeyError, TypeError):
+        valid = False
+    if not valid:
+        raise StateConflict("Historical prototype report lost its rejected-review binding")
+    require_old_report(old_report)
     key, attempt = state["prerequisite"], state["attempt"]
     count = engine.store.get(rid, key, 0)
     if count == attempt:

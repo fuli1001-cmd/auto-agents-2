@@ -371,6 +371,8 @@ async def test_normal_retry_of_old_controller_gap_reobserves_once_and_keeps_reje
     assert question["key"].startswith("prerequisite/")
     old_pending = workflow.store.get(rid, "prototype/pending")
     old_receipt = workflow.store.get(rid, "invocation/prototype-review")
+    old_report_ref = workflow.store.get(rid, "prototype_browser_report")
+    old_report = workflow.artifacts.json(old_report_ref)
     before_source = tree_hash(tmp_path)
     workflow.store.answer(question["id"], "y", question["artifact_hash"])
     modern = True
@@ -431,8 +433,113 @@ async def test_normal_retry_of_old_controller_gap_reobserves_once_and_keeps_reje
     prior = workflow.artifacts.json(fresh["download_capture_refresh"]["previous"])
     assert prior["pending"] == old_pending
     assert prior["invocation"] == old_receipt and not prior["invocation"]["result"]["approved"]
+    assert prior["review"] == old_receipt["result"]
+    assert prior["basis"] == reviews[0]["prototype_review_basis"]
+    assert prior["report"] == {"artifact": old_report_ref, "required_read": True}
+    assert workflow.artifacts.json(prior["report"]["artifact"]) == old_report
+    assert old_report["results"] == old_pending["visuals"]
+
+    from auto_agents_2.diagnostics import references
+    from auto_agents_2.prototype_reading import KEY, reading_contract
+    from auto_agents_2.readview import create_artifact_view, create_view
+    from auto_agents_2.review_materials import ReviewMaterials
+    # Both small ordinary input and oversized prototype reading disclosure
+    # must select and project the old full report and its dependencies.
+    for mode in ("ordinary", "reading"):
+        context = copy.deepcopy(reviews[1])
+        if mode == "reading":
+            context["controller_prototype_download_reobservation"]["instruction"] += "Full history. " * 6000
+            context[KEY] = reading_contract(context)
+            assert context[KEY]
+        prepared = ContextPlanner(workflow.artifacts).prepare("review", context, tmp_path, run_id=rid)
+        prompt, _ = PromptCompiler().compile("review", prepared.payload)
+        assert prompt
+        selected = {ref["hash"]: ref for ref in references(prepared.payload) if {"kind", "bytes"} <= ref.keys()}
+        required = {old_report_ref["hash"], *[row["image_artifact"]["hash"] for row in old_report["results"]]}
+        assert required <= selected.keys()
+        paths = [workflow.artifacts.root / sha[:2] / sha for sha in selected]
+        stage = workflow.store.root / f"closure-{mode}"
+        view = create_view(tmp_path, stage / "workspace", maintenance=False)
+        guard = ReviewMaterials(view)
+        guard.admit_files(paths)
+        projected = create_artifact_view(workflow.artifacts.root, stage / "artifact-view", paths)
+        guard.admit_projection(projected, workflow.artifacts.root)
+        guarded = guard.record()
+        expected_path = workflow.artifacts.root / old_report_ref["hash"][:2] / old_report_ref["hash"]
+        assert str(expected_path) in guarded["files"]
+        assert (projected / old_report_ref["hash"][:2] / old_report_ref["hash"]).read_bytes() == workflow.artifacts.bytes(old_report_ref)
+        assert guarded["projections"]
     assert workflow.store.question(question["id"])["answer"] == "y"
     assert workflow.store.get(rid, question["key"].rsplit("/", 1)[0]) == 1
     assert workflow.store.get(rid, "rounds/T1") == {"round": 9, "stalled": 4}
     assert workflow.store.get(rid, "prototype_approval") is None
     assert tree_hash(tmp_path) == before_source
+
+
+@pytest.mark.parametrize("damage", ["missing", "source", "actions", "browser", "rows", "dependency",
+                                     "archived_basis", "archived_report"])
+async def test_old_download_gap_report_requires_exact_bound_history(tmp_path, monkeypatch, damage):
+    from prototype_review_fixtures import prototype_verdict
+
+    from auto_agents_2.approvals import prototype_identity
+    from auto_agents_2.faults import StateConflict
+    from auto_agents_2.prototype_recheck import refresh_controller_download_gap
+    from auto_agents_2.prototype_review import PrototypeFinding
+
+    workflow, rid, document, _, _, browsers = approval_fixture(tmp_path, monkeypatch, legacy=False, answer=None)
+    actions = document.model_dump()["browser_actions"]
+    rows = workflow.store.get(rid, "prototype_approval")["visuals"]
+    binding = prototype_identity(tmp_path, actions)
+    context = workflow._prototype_review_context(rid, tmp_path, {
+        "prototype": document.model_dump(), "review_kind": "prototype", "browser_evidence": rows})
+    finding = PrototypeFinding(severity="major", location="download button", description="Missing passive capture",
+        evidence="The old report contains no download observations", resolution="Reobserve through the controller",
+        criterion_id="specification:document", kind="evidence_gap", observation="Download bytes unobserved",
+        evidence_refs=["browser", "requirements"], owner="controller", requested_capability="unavailable",
+        source_quote=context["specification"]["document"])
+    review = prototype_verdict(context, approved=False, findings=[finding]).model_dump()
+    pending = {"document": document.model_dump(), "fingerprint": binding["hash"],
+               "browser_version": 13, "visuals": rows}
+    report = {"version": 13, "source_hash": binding["hash"], "actions_hash": digest(actions),
+              "results": rows, "error": ""}
+    ref = workflow.artifacts.put(report, "prototype-browser")
+    workflow.store.checkpoints(rid, {"prototype/pending": pending, "prototype_browser_report": ref,
+                                    "invocation/prototype-review": {"result": review}})
+
+    async def paused(question):
+        raise asyncio.CancelledError()
+
+    workflow.question_handler = paused
+    if damage.startswith("archived_"):
+        with pytest.raises(asyncio.CancelledError):
+            await refresh_controller_download_gap(workflow, rid, tmp_path, document, pending)
+        state = pending["download_capture_refresh"]
+        previous = workflow.artifacts.json(state["previous"])
+        if damage == "archived_basis":
+            previous["basis"]["observations_hash"] = "another observation"
+        else:
+            wrong = copy.deepcopy(report)
+            wrong["source_hash"] = "another candidate"
+            previous["report"]["artifact"] = workflow.artifacts.put(wrong, "prototype-browser")
+        state["previous"] = workflow.artifacts.put(previous, "prototype-review-history")
+        workflow.store.checkpoint(rid, "prototype/pending", pending)
+    elif damage == "missing":
+        workflow.store.checkpoint(rid, "prototype_browser_report", None)
+    elif damage == "dependency":
+        image = rows[0]["image_artifact"]
+        (workflow.artifacts.root / image["hash"][:2] / image["hash"]).unlink()
+    else:
+        wrong = copy.deepcopy(report)
+        if damage == "rows":
+            wrong["results"][0]["actions"] = []
+        else:
+            key = {"source": "source_hash", "actions": "actions_hash", "browser": "version"}[damage]
+            wrong[key] = "unrelated report"
+        workflow.store.checkpoint(rid, "prototype_browser_report", workflow.artifacts.put(wrong, "prototype-browser"))
+    before = copy.deepcopy(workflow.store.get(rid, "prototype/pending"))
+    questions = copy.deepcopy(workflow.store.pending(rid))
+    with pytest.raises(StateConflict, match="Historical prototype report"):
+        await refresh_controller_download_gap(workflow, rid, tmp_path, document, pending)
+    assert workflow.store.get(rid, "prototype/pending") == before
+    assert workflow.store.pending(rid) == questions
+    assert not browsers
