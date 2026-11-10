@@ -1461,13 +1461,15 @@ class WorkflowEngine:
                               source_hash=fingerprint)
         return report
 
-    async def _record_prototype_approval(self, rid, work, document, review, visuals):
+    async def _record_prototype_approval(self, rid, work, document, review, visuals, *, defer_human=False):
         actions = [action.model_dump() for action in document.browser_actions]
         identity = prototype_identity(work, actions)
         evidence = {**identity, "review": review, "visuals": visuals, "browser_version": self.browser_check_version()}
         if not self.approvals.automation_current(evidence, identity, actions, self.browser_check_version(), expected_routes=self.approvals.routes(work, actions),
                 review_inputs=self.approvals.review_inputs(rid, work, actions, visuals)):
             raise Replan("prototype", "原型审批缺少完整浏览器证据或独立审查，需要重新核验")
+        if defer_human:
+            return None  # Comparison readiness is not human consent or published approval.
         human = self.approvals.human(rid, work, actions)
         if not human:
             feedback = await self._approve_prototype(rid, work, identity["identity"])
@@ -1541,7 +1543,8 @@ class WorkflowEngine:
             raise StateConflict("Architecture documents or their review receipt changed; preserve the task candidate")
         return {"design_review": receipt}
 
-    async def _prepare_prototype(self, rid, work, specification, assessment, context, original):
+    async def _prepare_prototype(self, rid, work, specification, assessment, context, original, *,
+                                 defer_human=False, frozen_design_candidates=None):
         key = "prototype/pending"
         identity = digest([assessment, self.store.get(rid, "baseline"), self.store.get(rid, "replan_feedback")])
         pending = self.store.get(rid, key, {})
@@ -1574,7 +1577,8 @@ class WorkflowEngine:
             else:
                 self.resources.register(self.store.root / "cache/design", "cache", rid)
                 with observe_activity(self.store, rid, "准备原型设计参考"):
-                    context["design_candidates"] = await DesignCatalog(self.store.root / "cache/design", self.sandbox).candidates(original)
+                    context["design_candidates"] = (frozen_design_candidates if frozen_design_candidates is not None else
+                        await DesignCatalog(self.store.root / "cache/design", self.sandbox).candidates(original))
             if document is None:
                 # A new candidate has complete current inputs; do not accumulate
                 # prior rounds in the native session. Saved invocation/pending
@@ -1738,8 +1742,11 @@ class WorkflowEngine:
             self.store.checkpoint(rid, key, pending)
         if self._prototype_hash(work) != fingerprint:
             raise StateConflict("原型在检查期间被修改，需要重新检查")
-        context["prototype_approval"] = await self._record_prototype_approval(
-            rid, work, document, pending["review"], pending["visuals"])
+        if defer_human:
+            await self._record_prototype_approval(rid, work, document, pending["review"], pending["visuals"], defer_human=True)
+        else:
+            context["prototype_approval"] = await self._record_prototype_approval(
+                rid, work, document, pending["review"], pending["visuals"])
         return document, pending["retrieved"]
 
     async def _execute(self, rid, *, stop_after=None):
