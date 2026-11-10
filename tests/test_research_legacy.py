@@ -304,14 +304,10 @@ def test_completed_cache_review_does_not_release_old_network_prerequisite(tmp_pa
     assert not following.record()["documents"].get(doc.sources[0].url, {}).get("pending")
 
 
-async def test_normal_engine_reviews_legacy_cache_without_answering_old_question(tmp_path, monkeypatch):
-    import asyncio
-
+async def legacy_cache_engine(tmp_path, monkeypatch):
     from test_research_prerequisite_wait import paused_engine
-    from test_workflow import engine
 
     from auto_agents_2.research import ResearchService
-    from auto_agents_2.research_acquisition import CONSUMED
     workflow, agent, rid, state, questions = await paused_engine(tmp_path, monkeypatch, normal=True)
     original_question = copy.deepcopy(questions[0])
     wait = workflow.store.get(rid, WAIT)
@@ -337,6 +333,16 @@ async def test_normal_engine_reviews_legacy_cache_without_answering_old_question
     async def forbidden(*args):
         pytest.fail("Validated v1 cache must not reacquire or answer a prerequisite")
     monkeypatch.setattr(ResearchService, "capture", forbidden)
+    return workflow, agent, rid, state, original_question, wait, pointer, record, before_requests, forbidden
+
+
+async def test_normal_engine_reviews_legacy_cache_without_answering_old_question(tmp_path, monkeypatch):
+    import asyncio
+
+    from test_workflow import engine
+
+    from auto_agents_2.research_acquisition import CONSUMED
+    workflow, agent, rid, state, original_question, wait, pointer, record, before_requests, forbidden = await legacy_cache_engine(tmp_path, monkeypatch)
     restarted = engine(workflow.project, agent)
     restarted.question_handler = forbidden
     config_before = restarted.config.path.read_bytes()
@@ -357,3 +363,58 @@ async def test_normal_engine_reviews_legacy_cache_without_answering_old_question
     with pytest.raises(asyncio.CancelledError):
         await restarted.start()
     assert agent.research_reviews == 1
+
+
+async def test_typed_research_rejection_reuses_completed_review_after_recording_crash(tmp_path, monkeypatch):
+    import asyncio
+
+    from authority_review_fixtures import authority_review
+    from test_workflow import engine
+
+    from auto_agents_2.faults import InternalWorkflowError
+    from auto_agents_2.research_acquisition import ResearchAcquisitionRecovery
+    workflow, agent, rid, state, question, wait, pointer, record, requests, forbidden = await legacy_cache_engine(tmp_path, monkeypatch)
+    # Unlike a first collection, this v1 failure episode owns recovery dispositions.
+    record["collecting"] = False
+    document = workflow.store.get(rid, "candidate/provider_research")["document"]
+    document["acquisition_resolution"] = {"episode_id": record["id"], "status": "ready",
+        "claims": [{"claim_id": row["id"], "disposition": "supported", "source_indexes": [row["index"]],
+                    "requirement_ids": [], "reason": "Same retained first-party fixture fact"}
+                   for row in record["claims"]], "missing_information": []}
+    workflow.store.checkpoints(rid, {pointer["key"]: record, "candidate/provider_research": {"document": document}})
+    original_invoke = agent.invoke
+    reviews = []
+    async def typed_rejection(stage, context, schema, work, run_id, operation, fresh=False):
+        if context.get("review_kind") == "research":
+            reviews.append(operation)
+            return schema.model_validate(authority_review(context, approved=False,
+                summary="Fixture source version must be corrected from retained evidence").model_dump())
+        return await original_invoke(stage, context, schema, work, run_id, operation, fresh=fresh)
+    monkeypatch.setattr(agent, "invoke", typed_rejection)
+    restarted = engine(workflow.project, agent)
+    restarted.question_handler = forbidden
+    original_reject = ResearchAcquisitionRecovery.reject_review
+    def recording_crash(*args):
+        raise TypeError("Fixture crash after a valid typed review was saved")
+    monkeypatch.setattr(ResearchAcquisitionRecovery, "reject_review", recording_crash)
+    with pytest.raises(InternalWorkflowError):
+        await restarted.start(stop_after="provider_research")
+    saved = workflow.store.get(rid, "invocation/research-review")
+    assert saved["result"]["approved"] is False
+    assert len(reviews) == 1
+    monkeypatch.setattr(ResearchAcquisitionRecovery, "reject_review", original_reject)
+    resumed = engine(workflow.project, agent)
+    replan_reasons = []
+    def reached_normal_replan(run_id, error):
+        replan_reasons.append(error.reason)
+        assert error.stage == "provider_research"
+        raise asyncio.CancelledError()
+    monkeypatch.setattr(resumed, "_controller_replan", reached_normal_replan)
+    with pytest.raises(asyncio.CancelledError):
+        await resumed.start(stop_after="provider_research")
+    rejected = workflow.store.get(rid, pointer["key"])
+    assert len(reviews) == 1, "A persisted valid review must not be sent to a model again"
+    assert len(rejected.get("rejected_reviews", [])) == 1 and rejected.get("pending"), replan_reasons
+    assert rejected["attempts"] == record["attempts"]
+    assert workflow.store.question(question["id"]) == question
+    assert state["requests"] == requests

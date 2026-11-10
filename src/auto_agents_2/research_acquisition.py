@@ -730,7 +730,8 @@ class ResearchAcquisitionRecovery:
         record = self.active(rid)
         if not record:
             return
-        proof = self.engine.authority.receipt(rid, review.model_dump())
+        serialized = review.model_dump()
+        proof = self.engine.authority.receipt(rid, serialized)
         if (review.approved or proof["owned_candidate"] != document
                 or proof["basis"]["observations"].get(CONTEXT) != digest(self.context(rid))):
             raise StateConflict("Rejected research lost its exact acquisition review evidence")
@@ -741,9 +742,9 @@ class ResearchAcquisitionRecovery:
                     for row in retrieved]
         resolution = document["acquisition_resolution"]
         facts = {"binding": record["binding"], "contents": sorted(set(contents)),
-            "coverage": sorted((row["criterion_id"], row["status"]) for row in review.authority["coverage"]),
+            "coverage": sorted((row["criterion_id"], row["status"]) for row in serialized["authority"]["coverage"]),
             "findings": sorted((row["criterion_id"], row["kind"], row["owner"])
-                               for row in review.authority["findings"]),
+                               for row in serialized["authority"]["findings"]),
             "dispositions": sorted((row["claim_id"], row["disposition"],
                 sorted(contents[index] for index in row["source_indexes"]), sorted(row["requirement_ids"]))
                 for row in resolution["claims"])}
