@@ -1,6 +1,6 @@
 """Run-owned document receipts inside the existing acquisition episode.
 
-The ledger records collection, not acceptance. It never imports historical batches
+The ledger records collection, not acceptance. It never rewrites historical batches
 or clears a refusal. A pending dispatch with no durable outcome is a hard boundary.
 """
 from __future__ import annotations

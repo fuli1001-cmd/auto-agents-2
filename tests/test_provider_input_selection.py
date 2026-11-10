@@ -29,6 +29,8 @@ def test_only_selected_codex_profile_participates_in_hash_and_overlay(tmp_path, 
     monkeypatch.setattr(Path, "read_bytes", checked_read)
     monkeypatch.setattr(Path, "stat", checked_stat)
     first = router.effective("review", "codex")["fingerprint"]
+    from auto_agents_2.output_limit_runtime import native_inputs
+    assert set(native_inputs(router, effective)) == {"config.toml", "auth.json", "balanced.config.toml"}
     rid = store.admit("fixture", {})["id"]
     mounts = router._session_overlay(effective, rid, "fixture")
     assert {path.name for path in mounts[0][0].iterdir()} >= {"config.toml", "auth.json", "balanced.config.toml"}

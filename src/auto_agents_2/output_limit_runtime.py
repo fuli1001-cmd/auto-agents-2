@@ -64,7 +64,7 @@ def native_inputs(router, eff):
     native = transport.native_home(eff["environment"])
     from .workspace import file_digest
     return {file.relative_to(native).as_posix(): file_digest(file)
-            for pattern in transport.auth_patterns for file in native.glob(pattern) if file.is_file()}
+            for file in router._native_inputs(transport, eff)}
 
 
 def prepared_tree(root):

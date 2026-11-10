@@ -539,7 +539,7 @@ async def test_last_managed_boundary_rejects_drift_after_sandbox_command_prepara
                     (f.project / "user-change.py").write_text("preserve this unexpected source")
                 elif drift == "native-source":
                     native = f.router.transports["codex"].native_home(f.router.effective("implement", "codex")["environment"])
-                    (native / "unexpected.toml").write_text("model='test'")
+                    (native / "config.toml").write_text("model='changed-selected-base'")
                 else:
                     (cwd / "unexpected-view.py").write_text("changed after to_thread")
             return command
