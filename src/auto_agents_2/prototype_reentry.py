@@ -145,12 +145,10 @@ class PrototypeReentry:
                     return None
             except (TypeError, ValueError):
                 return None
+        # Private authorization keys and package hashes stay inside this
+        # validator; authors need the explanation, not navigation to its state.
         return {"reason": result["reason"], "expected_result": result["expected_result"],
-                "actor": permit["actor"], "permit": key, "permit_hash": digest(permit),
-                "request_snapshot": snapshot_key, "basis": basis,
-                "applied_decision": applied_key, "applied_decision_hash": digest(applied),
-                "proposal": result_key, "failure_id": failure["id"],
-                "observation": cycle["observation"],
+                "actor": permit["actor"], "generation": pending["generation"],
                 "scope": "Bound historical recovery feedback only; not new authority or acceptance criteria."}
 
     def _review(self, history, reviews):

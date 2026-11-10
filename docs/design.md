@@ -1371,7 +1371,9 @@ original replan error, correction request, counts and gates remain unchanged.
 The bridge uses the completed generation's exact controller-replan permit,
 authorization snapshot and applied receipt, checking failure, observation, action,
 basis and decision proposal bindings within the same run. It never searches a
-latest decision or substitutes another round. Missing legacy provenance omits this
+latest decision or substitutes another round. Private authorization checkpoint
+keys and package hashes remain internal; the author projection contains only the
+reason, expected result, actor, generation and advisory scope. Missing legacy provenance omits this
 optional field. Prototype review inputs remain unchanged. Ordinary context
 compilation retains the explanation inline or as complete required-read material.
 

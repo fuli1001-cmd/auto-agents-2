@@ -1,5 +1,6 @@
 """Synthetic controller replan feedback, without browser or provider execution."""
 import copy
+import json
 
 import pytest
 
@@ -10,6 +11,7 @@ from test_prototype_reentry_context import AuthorInspected, proposal
 from auto_agents_2.context_plan import ContextPlanner
 from auto_agents_2.decisions import DecisionResult
 from auto_agents_2.engine import Replan
+from auto_agents_2.evidence import invocation_identity
 from auto_agents_2.models import DocumentResult
 from auto_agents_2.prototype_reentry import PrototypeReentry
 from auto_agents_2.util import digest
@@ -62,8 +64,11 @@ async def test_bound_reason_reaches_actual_author_and_ordinary_compiler(tmp_path
     assert explanation["reason"] == REASON
     review = workflow._prototype_reentry_context(rid, tmp_path, {}, review=True)
     assert "decision_feedback" not in review["controller_prototype_reentry"]
-    assert explanation["observation"] == history["pending"]["evaluation"]
-    assert explanation["proposal"].startswith("decisions/requests/")
+    assert explanation["generation"] == history["pending"]["generation"]
+    assert set(explanation) == {"reason", "expected_result", "actor", "generation", "scope"}
+    private_prefixes = ("recovery/request-snapshots/", "decisions/applied/",
+                        "decisions/requests/", "recovery/authorization-inputs/")
+    assert not any(prefix in json.dumps(explanation) for prefix in (*private_prefixes, "recovery/permits/"))
     assert workflow.store.get(rid, "replan_feedback") == before
 
     class Author(ApprovingAgent):
@@ -73,6 +78,18 @@ async def test_bound_reason_reaches_actual_author_and_ordinary_compiler(tmp_path
             assert context["controller_prototype_reentry"]["decision_feedback"] == explanation
             view = ContextPlanner(workflow.artifacts).prepare(stage, context, tmp_path, run_id=rid)
             assert view.payload["feedback"]["reason"] == ERROR
+            projection = view.payload["controller_prototype_reentry"]["decision_feedback"]
+            assert set(projection) == set(explanation)
+            assert not any(prefix in json.dumps(projection)
+                           for prefix in (*private_prefixes, "recovery/permits/"))
+            # Existing transition/correction permit references are unchanged;
+            # the new feedback must not expose private decision-chain pointers.
+            assert not any(prefix in json.dumps(view.payload) for prefix in private_prefixes)
+            changed = copy.deepcopy(context)
+            changed["controller_prototype_reentry"]["decision_feedback"]["reason"] += " Changed reason."
+            cfg = workflow.config.load()
+            assert invocation_identity(stage, context, DocumentResult, tmp_path, cfg) != invocation_identity(
+                stage, changed, DocumentResult, tmp_path, cfg)
             rendered = view.payload["controller_prototype_reentry"]["decision_feedback"]["reason"]
             if large:
                 assert rendered["required_read"] is True
@@ -103,8 +120,10 @@ async def test_missing_or_unbound_explanations_are_not_borrowed(tmp_path, monkey
         other = "unrelated-synthetic-run"
         assert bridge._decision_feedback(other, history) is None
         return
-    key = valid["request_snapshot"]
+    permit_key = history["pending"]["permit"]
+    key = "recovery/request-snapshots/" + permit_key.removeprefix("recovery/permits/")
     value = store.get(rid, key)
+    applied_key = "decisions/applied/" + digest([permit_key, value["request"]])
     if damage == "missing_snapshot":
         value = {}
     elif damage == "stage":
@@ -118,7 +137,7 @@ async def test_missing_or_unbound_explanations_are_not_borrowed(tmp_path, monkey
     elif damage == "pending_reason":
         history["pending"]["reason"] = "another error"
     elif damage in {"proposal", "result", "missing_explanation"}:
-        key = valid["applied_decision"]
+        key = applied_key
         value = store.get(rid, key)
         if damage == "proposal":
             value["result_key"] = "decisions/requests/another-proposal"
