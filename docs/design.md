@@ -1319,3 +1319,45 @@ controller and pauses rather than entering pending downstream recovery, delivery
 or a no-change finalization shortcut. Normal resume remains unchanged. This thin
 stage boundary supports a shared-research comparison without embedding either
 prototype arm or comparison policy in the workflow.
+
+
+### Passive prototype download observations
+
+The stable prototype action schema, browser checker identity, independent review
+and human-consent algorithms are unchanged. A separate
+`controller_prototype_download_capture` profile extends the base protocol only
+for actual new `download_capture` rows. Legacy rows remain unobserved, never
+silently relabelled as observed-none or as having file evidence; valid existing
+approved baselines retain their previous meaning.
+
+The controller listens to downloads caused during existing isolated static
+browser sessions, including popups. Each bounded event records its observed
+action window, route/viewport, actual browser, source/actions and capture-profile
+binding. A window is not proof of delayed JavaScript causality. No event in the
+bounded observation window is recorded explicitly as none. Failed, cancelled,
+over-budget and incomplete transfers remain distinct from completed files.
+Private controller-generated storage names are used; candidate filenames/URLs
+are evidence text or hashes, never filesystem targets. Acquisition time, event
+counts and archive bytes are bounded; browser spool polling is not a disk quota.
+
+Raw bytes, complete bounded UTF-8 SRT text and controller-produced format facts
+are archived as ordinary owned hash references in the browser evidence closure.
+SRT checks inspect every cue. MP4 checks require both the container signature
+and an actual decoded video frame in a fresh offline controller page, separate
+from candidate-overridable APIs. Files/scripts are never executed. Unknown
+formats, including optional WAV, retain bytes with an explicit unverified format
+status. Opaque media is not mandatory LLM text material. Missing/corrupt refs or
+changed source/action/profile bindings fail integrity validation. File naming,
+same-version selection, completion/confirmation gating and the actual user
+requirements remain the independent reviewer's responsibility. This capability
+does not run candidate collectors or replace later production verification.
+
+A narrowly bound unapproved pending proposal with a valid old controller-gap
+rejection may reobserve through the original prerequisite retry question. The
+original answer is consumed normally and its accumulated count retained.
+The pending refresh records the exact old basis/candidate/review, new profile and
+original question attempt before waiting, so a crash after answer consumption or
+report publication reuses that permission/observation. The complete old pending,
+negative invocation and report are retained as immutable required-read history
+for the new independent review. Fresh bytes never automatically resolve the
+other findings. Already approved old baselines do not enter this path.

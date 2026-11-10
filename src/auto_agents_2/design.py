@@ -9,6 +9,7 @@ import shutil
 import socket
 import stat
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
@@ -23,6 +24,7 @@ from .network import OWNERSHIP_FAILURE, PreviewProxy, preview_owner
 from .process_ownership import PreviewOwnershipError
 from .progress import capture_output, current_activity
 from .prototype_contract import PROTOTYPE_VIEWPORTS
+from .prototype_downloads import DownloadBudget, PassiveDownloads
 from .safe_files import directory_fd, regular_file
 from .sandbox import SandboxRunner
 from .util import atomic_write, digest, scrub_text
@@ -234,13 +236,13 @@ async def _expect_rendered_text(locator, expected):
         raise AssertionError(f"Expected visible rendered text {expected!r}; last observation: {observation}") from None
 
 
-async def exercise(page, actions, route, completed=None):
+async def exercise(page, actions, route, completed=None, downloads=None):
     validate_browser_actions(actions)
     if completed is None:
         completed = []
-    for step in actions:
-        if step.route != route:
-            continue
+    for index, step in enumerate(a for a in actions if a.route == route):
+        if downloads is not None:
+            downloads.window = {"phase": "action", "action_index": index, "action": step.model_dump()}
         locator = page.locator(step.selector)
         if step.action == "expect_visible":
             await locator.wait_for(state="visible", timeout=10000)
@@ -254,6 +256,8 @@ async def exercise(page, actions, route, completed=None):
         else:
             await getattr(locator, step.action)(timeout=10000)
         completed.append(step.model_dump())
+        if downloads is not None:
+            await downloads.after_action(settle=not step.action.startswith("expect_"))
     return completed
 
 
@@ -424,10 +428,13 @@ async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[d
     activity = current_activity.get()
     if activity:
         activity.progress(0, len(routes) * 2)
-    with PreviewServer(directory) as server:
+    from .workspace import tree_hash
+    source_tree = tree_hash(directory)
+    budget = DownloadBudget()
+    with PreviewServer(directory) as server, tempfile.TemporaryDirectory(prefix="aa2-prototype-download-") as spool:
         async with async_playwright() as playwright:
             try:
-                browser = await playwright.chromium.launch()
+                browser = await playwright.chromium.launch(downloads_path=spool)
             except Exception as exc:
                 raise PrototypeBrowserError("Prototype browser startup failed: " + scrub_text(str(exc)), []) from exc
             try:
@@ -440,15 +447,17 @@ async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[d
                                "errors": errors, "actions": completed, "browser_runtime": dict(BROWSER_RUNTIME),
                                "actual_browser_version": browser.version}
                         results.append(row)
-                        context, page = None, None
+                        context, page, downloads = None, None, None
                         try:
                             try:
                                 context = await preview_context(browser, server.url, errors, width, height)
+                                downloads = PassiveDownloads(browser, context, output, Path(spool), row,
+                                    digest([a.model_dump() for a in actions]), source_tree, budget)
                                 page = await context.new_page()
                                 page.on("pageerror", lambda error: errors.append(scrub_text(str(error))))
                                 response = await page.goto(server.url.rstrip("/") + resolved, wait_until="networkidle")
                                 row["status"] = response.status if response else 0
-                                await exercise(page, actions, route, completed)
+                                await exercise(page, actions, route, completed, downloads)
                             except Exception as exc:
                                 errors.append(scrub_text(str(exc)))
                                 sequence = [a for a in actions if a.route == route]
@@ -457,6 +466,8 @@ async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[d
                             image = output / f"route-{digest(route)[:16]}-{width}.png"
                             try:
                                 if page is not None:
+                                    if downloads is not None:
+                                        downloads.window = {"phase": "capture", "action_index": None, "action": None}
                                     await capture_page(page, image, row, actions)
                                 else:
                                     raise AA2Error("Prototype page creation failed")
@@ -467,6 +478,12 @@ async def inspect_prototype(directory: Path, output: Path, actions=()) -> list[d
                                 activity.output()
                                 activity.progress(len(results), len(routes) * 2)
                         finally:
+                            if downloads is not None:
+                                try:
+                                    downloads.window = {"phase": "post_actions", "action_index": None, "action": None}
+                                    await finalize_async(downloads.finish, original=sys.exception())
+                                except Exception as exc:
+                                    errors.append("Download observation cleanup failed: " + scrub_text(str(exc)))
                             if context is not None:
                                 try:
                                     await finalize_async(context.close, original=sys.exception())

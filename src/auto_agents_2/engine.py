@@ -1441,14 +1441,18 @@ class WorkflowEngine:
         fingerprint = self._prototype_hash(work)
         browser_identity = self.browser_check_version()
         results, error = [], ""
+        output = self.store.root / "visuals" / rid / "prototype" / identifier("check")
         try:
             with observe_activity(self.store, rid, "原型浏览器检查"):
-                results = await inspect_prototype(work / "design/prototypes",
-                    self.store.root / "visuals" / rid / "prototype" / identifier("check"), document.browser_actions)
+                results = await inspect_prototype(work / "design/prototypes", output, document.browser_actions)
         except PrototypeBrowserError as exc:
             results, error = exc.results, str(exc)
         if self._prototype_hash(work) != fingerprint or self.browser_check_version() != browser_identity:
             raise StateConflict("原型或浏览器环境在检查期间被修改，需要重新检查")
+        from .prototype_downloads import archive_downloads
+        archive_downloads(results, self.artifacts, output, source_hash=fingerprint,
+                          actions_hash=digest([a.model_dump() for a in document.browser_actions]),
+                          browser_version=browser_identity, source_tree=tree_hash(work / "design/prototypes"))
         results = self._archive_visuals(results)
         report = {"version": self.browser_check_version(), "source_hash": fingerprint,
                   "actions_hash": digest([a.model_dump() for a in document.browser_actions]),
@@ -1710,6 +1714,8 @@ class WorkflowEngine:
             self.store.checkpoint(rid, key, pending)
         if fingerprint != pending["fingerprint"]:
             raise StateConflict("待审核原型已被修改，已保留现场；请核对修改后再续跑")
+        from .prototype_recheck import refresh_controller_download_gap
+        await refresh_controller_download_gap(self, rid, work, document, pending)
         if "visuals" in pending and pending.get("browser_version") != self.browser_check_version():
             self.artifacts.put(pending, "prototype-recovery")
             pending.pop("visuals")
@@ -1734,9 +1740,16 @@ class WorkflowEngine:
             pending.pop("review")
             self.store.checkpoint(rid, key, pending)
         if "review" not in pending:
+            refresh = pending.get("download_capture_refresh")
+            download_history = ({"controller_prototype_download_reobservation": {
+                "profile_hash": refresh["profile_hash"],
+                "previous": {"artifact": refresh["previous"], "required_read": True},
+                "instruction": "Compare every previous unresolved finding with the actual new observations. "
+                               "The old review is rejected history, not approval; file capability alone does not "
+                               "resolve UI defects, missing downloads or any other acceptance obligation."}} if refresh else {})
             review = await self._invoke("review", {"specification": assessment, "prototype": document.model_dump(),
                 "review_kind": "prototype", "design_evidence": pending["retrieved"], "browser_evidence": pending["visuals"],
-                "project": self.contexts.build(work)}, ReviewResult, work, rid, "prototype-review", fresh=True)
+                **download_history, "project": self.contexts.build(work)}, ReviewResult, work, rid, "prototype-review", fresh=True)
             if not review.approved:
                 self._prototype_rejection(review)
             pending["review"] = review.model_dump()

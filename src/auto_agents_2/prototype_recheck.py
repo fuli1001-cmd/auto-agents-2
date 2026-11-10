@@ -88,3 +88,89 @@ async def recheck_prototype(engine, rid, work, permit_key, failure):
         ledger.record(rid, scope, PrototypeReview.model_validate(review), context)
     store.checkpoint(rid, key, {**saved, "approval": approvals.context(record, actions=actions), "phase": "verified"})
     return None
+
+
+async def refresh_controller_download_gap(engine, rid, work, document, pending):
+    """A normal retry of one bound, unapproved legacy controller gap.
+
+    Existing prerequisite answers/counters authorize only reobservation. The
+    negative review/report remain immutable history; no finding is waived.
+    """
+    from .engine import Replan
+    from .faults import HumanIntervention
+    from .prototype_downloads import download_capture_profile, valid_downloads
+    from .prototype_review import PrototypeReview, review_valid
+
+    rows = pending.get("visuals", [])
+    if not rows or any("download_capture" in row for row in rows):
+        return
+    invocation = engine.store.get(rid, "invocation/prototype-review", {})
+    old = pending.get("review") or invocation.get("result")
+    if not old:
+        return
+    actions = document.model_dump()["browser_actions"]
+    basis, source = engine.approvals.review_inputs(rid, work, actions, rows)
+    if not review_valid(old, basis, source):
+        return
+    review = PrototypeReview.model_validate(old)
+    if review.approved or not any(f.owner == "controller" and f.kind == "evidence_gap"
+                                  and f.requested_capability == "unavailable" for f in review.findings):
+        return
+    try:
+        engine._prototype_rejection(review)
+    except HumanIntervention as boundary:
+        error = boundary
+    else:
+        return
+    profile = download_capture_profile()["hash"]
+    expected = {"profile_hash": profile, "basis_hash": basis["hash"],
+                "candidate_hash": basis["candidate_hash"], "review_hash": digest(old),
+                "browser_version": engine.browser_check_version()}
+    state = pending.get("download_capture_refresh")
+    if state is None:
+        archived = engine.approvals.archive_review(rid, {"pending": pending, "invocation": invocation,
+            "browser_report": engine.store.get(rid, "prototype_browser_report"),
+            "reason": "Authorized passive-download profile reobservation; previous rejection is not resolved"})
+        identity = digest([error.reason_code, error.phase, error.requirement.model_dump()])
+        key = "prerequisite/" + identity
+        state = {**expected, "previous": archived, "prerequisite": key, "identity": identity,
+                 "attempt": engine.store.get(rid, key, 0)}
+        pending["download_capture_refresh"] = state
+        engine.store.checkpoint(rid, "prototype/pending", pending)
+    if any(state.get(key) != value for key, value in expected.items()):
+        raise StateConflict("Prototype download refresh inputs changed; preserve its original authorization")
+    key, attempt = state["prerequisite"], state["attempt"]
+    count = engine.store.get(rid, key, 0)
+    if count == attempt:
+        await engine._wait_prerequisite(rid, error)
+        count = engine.store.get(rid, key, 0)
+    # Crash after consuming the original answer does not require another answer.
+    questions = engine.store.decision_questions(rid, [f"{key}/{attempt}"])
+    if (count != attempt + 1 or len(questions) != 1 or questions[0]["artifact_hash"] != state["identity"]
+            or questions[0]["answer"] != "y"):
+        raise StateConflict("Prototype download refresh lost its exact consumed retry answer")
+    if engine._prototype_hash(work) != pending["fingerprint"]:
+        raise StateConflict("Prototype changed after download reobservation authorization")
+    ref = state.get("report") or engine.store.get(rid, "prototype_browser_report")
+    report = engine.artifacts.json(ref) if ref else None
+    current = (isinstance(report, dict) and report.get("version") == expected["browser_version"]
+               and report.get("source_hash") == pending["fingerprint"]
+               and report.get("actions_hash") == digest(actions) and bool(report.get("results"))
+               and all(row.get("download_capture", {}).get("profile_hash") == profile for row in report["results"]))
+    binding = {"hash": pending["fingerprint"], "actions_hash": digest(actions)}
+    if current and not valid_downloads(report["results"], engine.artifacts, binding, actions, expected["browser_version"]):
+        raise StateConflict("Prototype download refresh report integrity changed")
+    if not current:
+        report = await engine._prototype_browser_report(rid, work, document)
+        state["report"] = engine.store.get(rid, "prototype_browser_report")
+        engine.store.checkpoint(rid, "prototype/pending", pending)
+    if report["error"]:
+        raise Replan("prototype", report["error"])
+    if not all(row.get("download_capture", {}).get("profile_hash") == profile for row in report["results"]):
+        raise StateConflict("Prototype download reobservation did not produce the authorized profile")
+    # The changed observations produce a new normal review basis and invocation.
+    # The saved old invocation is not deleted or accepted as the new review.
+    pending["visuals"] = report["results"]
+    pending["browser_version"] = expected["browser_version"]
+    pending.pop("review", None)
+    engine.store.checkpoint(rid, "prototype/pending", pending)

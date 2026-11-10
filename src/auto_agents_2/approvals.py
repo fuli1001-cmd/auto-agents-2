@@ -9,6 +9,7 @@ from .errors import AA2Error
 from .faults import StateConflict
 from .models import BrowserAction
 from .prototype_contract import source_context
+from .prototype_downloads import valid_downloads
 from .prototype_review import review_basis, review_current
 from .util import digest
 from .visual_design import UIDesign
@@ -160,7 +161,7 @@ class PrototypeApprovals:
                         return False
         except (OSError, ValueError, KeyError, TypeError):
             return False
-        return True
+        return valid_downloads(report["results"], self.artifacts, binding, actions, browser_version)
 
     def automation_current(self, record, binding, actions, browser_version, *, expected_routes, review_inputs=None):
         if not isinstance(record, dict):
@@ -185,7 +186,7 @@ class PrototypeApprovals:
                     return False
         except (OSError, ValueError, KeyError, TypeError):
             return False
-        return True
+        return valid_downloads(record["visuals"], self.artifacts, binding, actions, browser_version)
 
     def current(self, rid, work, actions, browser_version):
         record = self.store.get(rid, "prototype_approval", {})
