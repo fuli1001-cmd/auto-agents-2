@@ -1308,7 +1308,9 @@ class WorkflowEngine:
                     invocation_config, source_before, old_execution))
                 compatible.add(invocation_identity(stage, legacy, schema, workspace,
                     invocation_config, source_before, execution))
-        if saved.get("identity") in compatible and saved.get("result"):
+        if (saved.get("identity") in compatible and saved.get("result")
+                and saved.get("execution_provider", saved.get("provider", invocation_config.active_provider))
+                    == invocation_config.active_provider):
             if saved.get("cleanup_record"):
                 self.sandbox.confirm_record(saved["cleanup_record"])
             result = self._validate_stage_response(schema.model_validate(saved["result"]), stage, context, rid)
@@ -1349,6 +1351,8 @@ class WorkflowEngine:
                     and completion.get("attempt") == provider_result.get("attempt")
                     and all(isinstance(completion.get(field), str) and completion[field]
                             for field in ("attempt", "identity", "cleanup_record"))):
+                if completion.get("provider"):
+                    record["execution_provider"] = completion["provider"]
                 # Engine and transport bind different input presentations. Keep the
                 # exact durable transport receipt when publishing the Engine result.
                 record["provider_receipt"] = {"version": 1, **{
@@ -1918,9 +1922,9 @@ class WorkflowEngine:
         for stage in ("provider_research", "prototype", "design", "plan"):
             if stage == "prototype" and not result.frontend:
                 continue
-            if stage == "provider_research":
-                ResearchAcquisitionRecovery(self).prepare(rid)
             cached = self.store.get(rid, stage)
+            if stage == "provider_research" and not (cached and self.authority.accepted(rid, stage, cached)):
+                ResearchAcquisitionRecovery(self).prepare(rid)
             if cached:
                 if stage == "provider_research":
                     try:

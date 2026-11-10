@@ -1258,3 +1258,33 @@ not a private document grant. Sensitive/auth/admin paths and action queries rema
 rejected. Every redirect/reconnect is checked; an actual private binding retained
 by the capture prevents a later DNS answer from blessing its pooled connection.
 Previously recorded refusals are never released by this spelling exception.
+
+
+### Legacy acquisition evidence and selected provider inputs
+
+Pre-document-ledger batches may contribute reusable observations only through a
+validated compatibility projection. Their original episode, attempt, event and
+owned candidate/source rows remain authoritative historical records. Successes
+must pass the same complete artifact, dependency and re-extraction checks as new
+captures. Legacy source rows that differ from the archived original candidate
+fail closed pending their exact archived candidate evidence. A compatibility tag
+states the missing original dispatch, HTTP status and transport proof explicitly;
+it does not invent a successful request, reviewed claim, retry grant or acceptance.
+The projection is idempotent and is committed with the existing dispatch CAS.
+Actual failures, including failures before cancellation or a blocked later request,
+retain their cause budgets and refusal checks. Nonexecuted requests do not gain a
+new main failure charge. Exact old consumed shared prerequisites are checked in
+the original episode; unknown/unconsumed prerequisites and hard holds remain.
+A local non-public/empty DNS admission rejection stays an exact prerequisite, not
+a permanent site-wide permission refusal. Other concrete denials retain their scope.
+
+Ordinary Codex input projection includes only base configuration, authentication
+and the selected profile. Unselected providers are not resolved merely to compute
+an invocation identity; fallback resolution occurs when that attempt is admitted.
+The actual provider fingerprint remains bound to its transport completion, and a
+fallback completion cannot masquerade as the active provider cache after a crash.
+No configuration content is logged. This narrows unnecessary reads, not permissions:
+a refused selected input or operation still requires its own valid authorization.
+An already authority-accepted research document may use the normal cached-stage
+path without preparing another acquisition. Unaccepted captures, old questions and
+unfinished prerequisites cannot use that shortcut and retain normal review gates.

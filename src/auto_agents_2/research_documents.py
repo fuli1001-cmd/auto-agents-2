@@ -49,7 +49,11 @@ def shared_boundary(failure):
 
 
 def denied_hosts(url, failure):
-    if shared_boundary(failure) or failure["classification"] not in {"security", "permission"}:
+    diagnostic = failure["diagnostic"]
+    local_dns = (failure["code"] == "RESEARCH_DESTINATION_REJECTED"
+                 and diagnostic.get("operation") == "research_connect"
+                 and diagnostic.get("resolution") in {"non_public", "empty"})
+    if local_dns or shared_boundary(failure) or failure["classification"] not in {"security", "permission"}:
         return []
     diagnostic = failure["diagnostic"]
     values = [url, diagnostic.get("source_origin", "")]
@@ -177,6 +181,13 @@ class ResearchDocumentLedger:
                 or not isinstance(entry.get("outcomes"), list)):
             raise StateConflict("Research document outcome history is invalid")
         for outcome in entry["outcomes"]:
+            if "legacy" in outcome:
+                if outcome.get("url") != url or any(urldefrag(row.get("url", ""))[0] != url
+                                                     for row in outcome.get("sources", [])):
+                    raise StateConflict("Legacy research outcome belongs to a different document")
+                from .research_legacy import validate
+                validate(self.store, self.rid, outcome)
+                continue
             stamp = outcome.get("dispatch", {})
             if (stamp.get("run_id") != self.rid or url not in stamp.get("source_urls", [])
                     or not outcome.get("id") or outcome.get("status") not in {"retrieved", "failed", "cancelled", "not_executed"}
@@ -278,7 +289,8 @@ class ResearchDocumentLedger:
 
     @staticmethod
     def failures(outcome):
-        rows = ([outcome["failure"]] if outcome["status"] == "failed" else []) + outcome.get("observed_failures", [])
+        rows = ([outcome["failure"]] if outcome["status"] == "failed"
+                and outcome.get("request_executed") is not False else []) + outcome.get("observed_failures", [])
         return list({digest(stable_cause(row)): row for row in rows}.values())
 
     @classmethod
@@ -287,12 +299,19 @@ class ResearchDocumentLedger:
         return sum(any(stable_cause(row) == cause for row in cls.failures(outcome)) for outcome in outcomes)
 
     def consumed_shared_wait(self, record, url, outcome, failure):
-        from .research_acquisition import CONSUMED
+        from .research_acquisition import CONSUMED, PREFIX
+        if "legacy" in outcome:
+            record = self.store.get(self.rid, PREFIX + outcome["legacy"]["episode_id"])
+            if not record:
+                raise StateConflict("Legacy prerequisite lost its original episode")
         for attempt in record["attempts"]:
             own = self.recovery.refusals(attempt["observations"], shared_only=attempt.get("document_protocol") == 1)
-            matching = any(row["url"] == url and row.get("document_operation_id") == outcome["id"]
+            legacy = outcome.get("legacy", {})
+            matching = any(row["url"] == url and (row.get("document_operation_id") == outcome["id"]
+                           or legacy.get("attempt_id") == attempt["id"]
+                           and index == legacy.get("observation_index"))
                            and failure in ([row["failure"]] if row["status"] == "failed" else [])
-                               + row.get("observed_failures", []) for row in attempt["observations"])
+                               + row.get("observed_failures", []) for index, row in enumerate(attempt["observations"]))
             if not matching or not own or not attempt.get("dispatch"):
                 continue
             identity = digest([attempt["dispatch"], attempt["id"], own])
@@ -351,7 +370,8 @@ class ResearchDocumentLedger:
     def evidence(self, outcome, text, *, reused):
         return {**outcome["retrieval"], "excerpt": text,
                 "acquisition_receipt": {"version": 1, "run_id": self.rid, "operation_id": outcome["id"],
-                    "outcome_hash": digest(outcome), "original_dispatch": outcome["dispatch"],
+                    "outcome_hash": digest(outcome), "original_dispatch": outcome.get("dispatch", outcome.get("legacy", {}).get("original_dispatch")),
+                    **({"legacy_provenance": outcome["legacy"]} if "legacy" in outcome else {}),
                     "current_dispatch": self.dispatch, "reused": reused,
                     "version_status": "Original requested versions are proposals, never verified support"}}
 

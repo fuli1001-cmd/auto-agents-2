@@ -26,6 +26,19 @@ class CodexTransport:
     def native_home(self, environment):
         return Path(environment.get("CODEX_HOME", "~/.codex")).expanduser()
 
+    def input_files(self, effective):
+        # The ordinary CLI needs its base settings, credentials and selected profile,
+        # not every unrelated profile or historical native-home file.
+        native = self.native_home(effective["environment"])
+        names = ["config.toml", "auth.json"]
+        profile = effective["native_profile"]
+        if profile:
+            from .errors import ConfigurationError
+            if Path(profile).name != profile or profile in {".", ".."} or "\\" in profile:
+                raise ConfigurationError("Native profile must be a single profile name")
+            names.append(profile + ".config.toml")
+        return tuple(native / name for name in names if (native / name).is_file())
+
     def encode_prompt(self, prompt):
         return prompt.encode()
 

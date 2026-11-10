@@ -279,6 +279,8 @@ class ConfigStore:
             if spec.kind != "codex":
                 profile = Profile(file=profile)
             else:
+                if Path(profile).name != profile or profile in {".", ".."} or "\\" in profile:
+                    raise ConfigurationError("Native profile must be a single profile name")
                 native_profile = profile
                 home = Path(environment.get("CODEX_HOME", "~/.codex")).expanduser()
                 file = home / f"{profile}.config.toml"

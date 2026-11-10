@@ -338,15 +338,17 @@ class ResearchAcquisitionRecovery:
         previous = self.episode(rid)
         pointer = self.store.get(rid, CURRENT)
         record = previous
+        from .research_legacy import documents as legacy_documents
+        retained_documents = legacy_documents(self.store, rid, previous) if previous else {}
         if record is None or record.get("completed") or record["binding"] != self.binding(rid):
             identity = digest([rid, stamp["generation"], self.binding(rid), raw])
             record = {"version": 2, "id": identity, "run_id": rid, "binding": self.binding(rid),
                       "original_candidate": self.engine.artifacts.put(raw, "research-acquisition-candidate"),
                       "claims": claim_rows(raw), "attempts": [], "collecting": True,
-                      "document_ledger_version": 1, "documents": (previous or {}).get("documents", {})}
+                      "document_ledger_version": 1, "documents": retained_documents}
         else:
             record = {**record, "run_id": rid, "document_ledger_version": 1,
-                      "documents": record.get("documents", {})}
+                      "documents": retained_documents}
             if record.get("collecting"):
                 record.update(original_candidate=self.engine.artifacts.put(raw, "research-acquisition-candidate"),
                               claims=claim_rows(raw))

@@ -250,7 +250,7 @@ async def test_target_refusal_preserves_other_files_then_allows_only_independent
     async def fetch(self, url):
         calls.append(url)
         if url == URL:
-            raise ResearchDestinationRejected("docs.example.test")
+            raise status_error(url, 403)  # A real permission refusal, not a local DNS prerequisite.
         return capture(self.artifacts, url)
     monkeypatch.setattr(ResearchService, "capture", fetch)
     error = await observed_failure(recovery, rid, service, doc)

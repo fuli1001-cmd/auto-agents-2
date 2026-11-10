@@ -197,27 +197,33 @@ class ProviderRouter:
             state.pop("error_input", None)
             self.store.checkpoint(run_id, key, state)
 
+    def _native_inputs(self, transport, effective):
+        if hasattr(transport, "input_files"):
+            return transport.input_files(effective)
+        native = transport.native_home(effective["environment"])
+        return tuple(dict.fromkeys(file for pattern in transport.auth_patterns
+                                   for file in native.glob(pattern) if file.is_file()))
+
     def effective(self, stage, candidate):
         effective = self.config.resolve(stage, candidate)
         try:
             transport = self.transports[effective["kind"]]
             native = transport.native_home(effective["environment"])
             sources = {file.relative_to(native).as_posix(): file_digest(file)
-                       for pattern in transport.auth_patterns for file in native.glob(pattern) if file.is_file()}
+                       for file in self._native_inputs(transport, effective)}
         except (OSError, KeyError) as exc:
             raise ConfigurationError("Cannot inspect provider native inputs") from exc
         return {**effective, "fingerprint": digest([effective["fingerprint"], "native-inputs-v1", sources])}
 
     def execution_identity(self, stage):
-        identities = []
-        for candidate in self.config.load().providers:
-            try:
-                identities.append((candidate, self.effective(stage, candidate)["fingerprint"]))
-            except ConfigurationError:
-                # Resolution errors remain the router's responsibility so fallback
-                # providers can still run. No configuration contents are recorded.
-                identities.append((candidate, "unavailable"))
-        return digest(identities)
+        # Native inputs are opened only for the selected provider. A fallback is
+        # resolved when its own attempt is actually admitted, never speculatively.
+        candidate = self.config.load().active_provider
+        try:
+            identity = self.effective(stage, candidate)["fingerprint"]
+        except ConfigurationError:
+            identity = "unavailable"  # The router retains normal fallback handling.
+        return digest(["selected-provider-v1", candidate, identity])
 
     async def invoke(self, stage, context, schema, workspace, run_id, operation, fresh=False):
         from .research_replacement import guard_provider
@@ -393,7 +399,7 @@ class ProviderRouter:
             raise ConfigurationError(f"No installed provider transport: {eff['kind']}")
         transport = self.transports[eff["kind"]]
         input_identity = invocation_identity(stage, context, schema, workspace, self.config.load(),
-                                            execution=self.execution_identity(stage))
+                                            execution=digest(["selected-provider-v1", eff["provider"], eff["fingerprint"]]))
         aid = identifier("attempt")
         root = self.store.root / "attempts" / run_id / aid
         out = root / "out"
@@ -686,7 +692,7 @@ class ProviderRouter:
                 artifact = ArtifactStore(self.store.root).put(result.model_dump(mode="json"), stage)
                 self.store.checkpoints(run_id, {
                     f"provider-result/{operation}": {"attempt": aid, "artifact": artifact, "usage": decoder.usage.model_dump()},
-                    f"invocation/{operation}": {"attempt": aid, "identity": input_identity, "result": result.model_dump(mode="json"), "artifact": artifact,
+                    f"invocation/{operation}": {"attempt": aid, "provider": eff["provider"], "identity": input_identity, "result": result.model_dump(mode="json"), "artifact": artifact,
                                                 "cleanup_record": str(process.record),
                                                 **({"review_inputs_hash": review_materials.record()["hash"]}
                                                    if review_materials is not None else {}),
@@ -840,19 +846,17 @@ class ProviderRouter:
         sources = self.store.get(run_id, source_key, {})
         updated = {}
         # Copy only configuration/auth inputs, never all historical sessions.
-        for pattern in transport.auth_patterns:
-            for file in native.glob(pattern):
-                if file.is_file():
-                    dest = mirror / file.relative_to(native)
-                    relative = file.relative_to(native).as_posix()
-                    raw = file.read_bytes()
-                    source_hash = digest(raw)
-                    with directory_fd(dest.parent, create=True) as parent:
-                        exists = regular_exists(parent, dest.name)
-                        if (not exists or relative in sources and sources[relative] != source_hash
-                                or relative not in sources and file.name != "auth.json"):
-                            write_regular(parent, dest.name, raw)
-                    updated[relative] = source_hash
+        for file in self._native_inputs(transport, eff):
+            dest = mirror / file.relative_to(native)
+            relative = file.relative_to(native).as_posix()
+            raw = file.read_bytes()
+            source_hash = digest(raw)
+            with directory_fd(dest.parent, create=True) as parent:
+                exists = regular_exists(parent, dest.name)
+                if (not exists or relative in sources and sources[relative] != source_hash
+                        or relative not in sources and file.name != "auth.json"):
+                    write_regular(parent, dest.name, raw)
+            updated[relative] = source_hash
         for relative in sources.keys() - updated.keys():
             dest = mirror / relative
             try:
