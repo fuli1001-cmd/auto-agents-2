@@ -5,12 +5,24 @@ plugin API. It never executes candidate collectors or changes a gate's verdict.
 """
 from __future__ import annotations
 
+import json
+from collections import Counter
 from typing import get_args
+from urllib.parse import urlsplit
 
 from .models import BrowserAction
 from .util import digest
 
 PROTOTYPE_VIEWPORTS = ((1440, 900), (390, 844))
+
+
+PROTOTYPE_DESIGN_SELECTION_RULE = (
+    "For every pinned design-catalog or retained reference URL cited in sources, return exactly one "
+    "design_selection entry, including comparison-only and non-adopted references. In rationale explain "
+    "product fit, or the comparison purpose and why it is not adopted. In adaptations describe concrete "
+    "changes, or explicitly state not adopted/not applicable and why. Citation and design_selection coverage "
+    "do not imply adoption; never claim adoption merely to satisfy this URL coverage contract."
+)
 
 
 PROTOTYPE_OUTPUT_RULE = (
@@ -21,13 +33,42 @@ PROTOTYPE_OUTPUT_RULE = (
     "without treating historical action counts or rejected claims as proof of coverage. files has different "
     "semantics: propose only the changes currently needed in the allowed workspace scope. Historical files "
     "may already be applied and must never be copied or replayed automatically. Historical proposals and "
-    "reviews are references; they do not grant permission or approve this new proposal."
-)
+    "reviews are references; they do not grant permission or approve this new proposal. "
+) + PROTOTYPE_DESIGN_SELECTION_RULE
 
 
 def prototype_output_contract():
-    return {"version": 1, "complete_fields": ["document", "browser_actions", "sources", "design_selection"],
-            "files": "current_changes_only", "history": "reference_only"}
+    return {"version": 2, "complete_fields": ["document", "browser_actions", "sources", "design_selection"],
+            "files": "current_changes_only", "history": "reference_only",
+            "design_selection_coverage": PROTOTYPE_DESIGN_SELECTION_RULE}
+
+
+def design_selection_feedback(expected_urls, selections, public_candidate_urls):
+    """Describe only the existing URL-set gate; unknown proposal values stay opaque."""
+    expected, known = set(expected_urls), set(public_candidate_urls)
+    urls = [row["url"] for row in selections]
+    counts = Counter(urls)
+
+    def identify(url):
+        try:
+            parsed = urlsplit(url)
+            if (url in known and parsed.scheme == "https" and parsed.netloc == "raw.githubusercontent.com"
+                    and not parsed.query and not parsed.fragment):
+                return url  # Exact frozen public catalog candidate, never arbitrary proposal/prior text.
+        except ValueError:
+            pass
+        return {"sha256": digest(url), "characters": len(url)}
+
+    def rows(urls):
+        return [{"reference": identify(url),
+                 "design_selection_indexes": [index for index, value in enumerate(selections)
+                                              if value["url"] == url]} for url in sorted(urls)]
+
+    differences = {"missing": [identify(url) for url in sorted(expected - counts.keys())],
+                   "unexpected": rows(counts.keys() - expected),
+                   "duplicates": rows(url for url, count in counts.items() if count > 1)}
+    return ("design_selection URL coverage mismatch: " + json.dumps(differences, sort_keys=True) +
+            "\n" + PROTOTYPE_DESIGN_SELECTION_RULE)
 
 
 def prototype_contract():

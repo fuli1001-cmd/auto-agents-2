@@ -84,7 +84,7 @@ from .preview_evidence import PreviewEvidence
 from .profiles import ProjectProfile
 from .progress import observe_activity, safe_event
 from .proposal_recovery import ProposalRecovery
-from .prototype_contract import prototype_context, prototype_output_contract
+from .prototype_contract import design_selection_feedback, prototype_context, prototype_output_contract
 from .prototype_reentry import PrototypeReentry
 from .prototype_review import (
     InvalidPrototypeReview,
@@ -1649,7 +1649,8 @@ class WorkflowEngine:
             if pending.get("ui_design_version") and selected and (
                     len({row["url"] for row in selections}) != len(selections)
                     or {row["url"] for row in selections} != {row.url for row in selected}):
-                raise Replan("prototype", "Explain each selected design reference's product fit and adaptations in design_selection")
+                raise Replan("prototype", design_selection_feedback(
+                    {row.url for row in selected}, selections, candidates))
             fresh_sources = [row for row in selected if row.url not in prior_sources]
             acquired = await self._research_service(rid).verify(fresh_sources) if fresh_sources else []
             by_url = {**prior_sources, **{row["url"]: row for row in acquired}}
