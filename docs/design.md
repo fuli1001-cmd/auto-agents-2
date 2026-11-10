@@ -1197,3 +1197,16 @@ identity/reuse rules and are not backfilled with checks that never ran. The mani
 proves delivered bytes, not that a model read them or that its conclusions are true.
 Unpublished research-only protected/native material backends are not part of this
 shared review mechanism; their worktrees and historical records are retained.
+
+
+Local plan-patch activation keeps its existing `BEGIN IMMEDIATE` transaction and
+compare-and-swap checks, but reads only the selected journal and the exact dynamic
+materialization, permission, source and independent-review records required by its
+validators. Legacy v2 frozen presentations are selected by the current author and
+review operation prefixes before decoding. Unrelated frozen requests and old plan
+histories are not expanded. Before any activation write, all current `develop/`
+and `task_state/` records are still frozen for the complete old task-history
+archive, together with the fixed old plan/origin/done inputs. Subsequent task
+classification reads that pre-write dictionary, not the transaction's newly
+written done/state values. Activated replay retains its original materialization
+and recording revalidation and does not activate or charge a second time.

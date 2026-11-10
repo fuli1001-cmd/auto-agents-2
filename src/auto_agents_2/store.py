@@ -197,23 +197,36 @@ class Store:
         """CAS activation. Git/files are snapshotted before this transaction, never called atomic with it."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            rows = {r[0]: json.loads(r[1]) for r in checkpoint_query_db(db, 'SELECT key,slot_order AS data FROM checkpoint_records WHERE run_id=?', (rid,), wire_index=1)}
-            rows["authority/submitted-answers"] = self._submitted_answers(db, rid)
+            # Decode only this activation's dependencies, under the same write
+            # transaction. Cache absence as well as values during validation.
+            rows = {"authority/submitted-answers": self._submitted_answers(db, rid)}
+            absent, missing = set(), object()
+            def get(name, default=None):
+                if name not in rows and name not in absent:
+                    value = checkpoint_get_db(db, rid, name, missing)
+                    if value is missing:
+                        absent.add(name)
+                    else:
+                        rows[name] = value
+                return rows.get(name, default)
+
             key = "plan_revision/journal/" + journal_id
+            get(key)
             journal = rows[key]
             from .plan_proposals import validate_materialization
-            validate_materialization(journal, rows.get, self.root, journal_id)
+            validate_materialization(journal, get, self.root, journal_id)
             if journal["phase"] == "activated":
                 from .recording_recovery import validate_journal
-                validate_journal(journal, rows.get, self.root)
+                validate_journal(journal, get, self.root)
                 return
-            revision = rows.get("plan_revision/current", {}).get("revision", 1)
+            revision = get("plan_revision/current", {}).get("revision", 1)
+            get("plan")
             if revision != journal["base_revision"] or rows["plan"] != journal["previous_plan"]:
                 raise AA2Error("Plan activation CAS failed; preserving proposal and recovery snapshots")
             from .plan_revision import validate_timing_journal
             validate_timing_journal(journal)
             from .recording_recovery import validate_journal
-            validate_journal(journal, rows.get, self.root)
+            validate_journal(journal, get, self.root)
             from .contract_corrections import (
                 legacy_contract_contexts,
                 validate_contract_journal,
@@ -221,21 +234,40 @@ class Store:
             contexts = None
             if journal.get("version") == 2 and journal.get("patch", {}).get("contract_corrections"):
                 from .artifacts import ArtifactStore
-                contexts = legacy_contract_contexts(journal, journal_id, rows, ArtifactStore(self.root).json)
-            validate_contract_journal(journal, rows.get, legacy_contexts=contexts)
+                operations = ("recovery/patch/" + journal_id, "recovery/patch-review/" + journal_id)
+                legacy_keys = ["recovery/patch-context/" + journal_id,
+                               *("invocation/" + operation for operation in operations)]
+                for operation in operations:
+                    legacy_keys.extend(checkpoint_keys_db(db, rid, prefix="presentation/" + operation + "/"))
+                for name in legacy_keys:
+                    get(name)
+                legacy_rows = {name: rows[name] for name in legacy_keys if name in rows}
+                contexts = legacy_contract_contexts(journal, journal_id, legacy_rows, ArtifactStore(self.root).json)
+            validate_contract_journal(journal, get, legacy_contexts=contexts)
             from .evidence_admission import (
                 requires_admission,
                 validate_admission_journal,
             )
             if requires_admission(journal):
                 from .config import ConfigStore
-                validate_admission_journal(journal, rows.get,
+                validate_admission_journal(journal, get,
                     shared_browsers=ConfigStore(self.root.parent).load().shared_cache.enabled)
-            if rows.get("authority/protocol") or journal.get("review", {}).get("authority"):
+            # History retains every old task/development slot, including evidence
+            # outside the affected set. Freeze these and the fixed activation
+            # inputs BEFORE any writes: later decisions must still see old done,
+            # task state and missing records, never our own new checkpoint values.
+            for prefix in ("develop/", "task_state/"):
+                for name in checkpoint_keys_db(db, rid, prefix=prefix):
+                    get(name)
+            get("task_origins")
+            get("develop/done")
+            if get("authority/protocol") or journal.get("review", {}).get("authority"):
                 from .review_authority import validate_journal_authority
-                validate_journal_authority(journal, rows.get)
+                validate_journal_authority(journal, get)
                 review = (journal.get("authority_reassessment") or journal)["review"]
                 review_key = "authority/reviews/" + digest(review)
+                get(review_key)
+                get("authority/correction")
                 self._put(db, rid, "authority/accepted/plan", {"version": 1,
                     "artifact_hash": digest(journal["plan"]), "review_hash": digest(review), "review_key": review_key})
                 correction = rows[review_key]["basis"].get("correction")
