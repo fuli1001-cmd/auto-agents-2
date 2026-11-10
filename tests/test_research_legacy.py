@@ -383,11 +383,14 @@ async def test_typed_research_rejection_reuses_completed_review_after_recording_
                    for row in record["claims"]], "missing_information": []}
     workflow.store.checkpoints(rid, {pointer["key"]: record, "candidate/provider_research": {"document": document}})
     original_invoke = agent.invoke
-    reviews = []
+    reviews, authors = [], []
     async def typed_rejection(stage, context, schema, work, run_id, operation, fresh=False):
+        if stage == "provider_research":
+            authors.append(operation)
+            return schema.model_validate({**document, "document": document["document"] + "\nCorrected fixture source version."})
         if context.get("review_kind") == "research":
             reviews.append(operation)
-            return schema.model_validate(authority_review(context, approved=False,
+            return schema.model_validate(authority_review(context, approved=bool(authors),
                 summary="Fixture source version must be corrected from retained evidence").model_dump())
         return await original_invoke(stage, context, schema, work, run_id, operation, fresh=fresh)
     monkeypatch.setattr(agent, "invoke", typed_rejection)
@@ -418,3 +421,12 @@ async def test_typed_research_rejection_reuses_completed_review_after_recording_
     assert rejected["attempts"] == record["attempts"]
     assert workflow.store.question(question["id"]) == question
     assert state["requests"] == requests
+    # Continue the full normal decision/permit/archive/author/review handoff.
+    following = engine(workflow.project, agent)
+    following.question_handler = forbidden
+    accepted = await asyncio.wait_for(following.start(stop_after="provider_research"), 20)
+    assert accepted["status"] == "PAUSED" and accepted["stage"] == "provider_research"
+    assert len(authors) == 1 and len(reviews) == 2
+    assert workflow.store.get(rid, "provider_research")["document"].endswith("Corrected fixture source version.")
+    assert workflow.store.get(rid, pointer["key"])["attempts"] == record["attempts"]
+    assert workflow.store.question(question["id"]) == question and state["requests"] == requests
