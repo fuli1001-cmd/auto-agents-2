@@ -4,14 +4,14 @@ import json
 
 from .context_plan import purpose_for
 from .execution_stages import stage_instructions
-from .prompt_rules import COMMON, instructions
+from .prompt_rules import COMMON, REVIEW_RESPONSIBILITY, instructions, is_review
 from .prototype_contract import PROTOTYPE_OUTPUT_RULE
 from .research import request_documents
 from .research_contract import RESEARCH_PUBLICATION_RULE
 from .visual_design import visual_instructions
 
 INVOCATION_CONTRACT_VERSION = "2026-10-16.2"
-PROMPT_VERSION = "2026-11-05.worker-controller-scope-v1"
+PROMPT_VERSION = "2026-11-10.shared-review-responsibility-v1"
 CORE = COMMON
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
@@ -226,6 +226,8 @@ class PromptCompiler:
         task += environment_evidence_instructions(purpose)
         from .evidence_admission import evidence_instructions
         task += evidence_instructions(purpose, context)
+        if is_review(stage) and purpose != "provider_probe":
+            task += REVIEW_RESPONSIBILITY
         if context.get("controller_review_basis"):
             from .review_authority import instructions as authority_instructions
             task += authority_instructions()

@@ -1161,3 +1161,39 @@ New writes deduplicate only the established frozen request/permit objects.
 Schema/writer guards and the maintenance HOLD/shared-lock protocol remain runtime
 protections. A separately supplied offline operator tool may use that protocol;
 normal tasks must not enter state left under an unfinished maintenance barrier.
+
+
+### Shared review responsibility and exact delivered materials
+
+Review, coverage review, final verification and read-only recovery diagnosis share
+one responsibility statement: evaluate and report; repairs belong to the owning
+author stage and existing controller gates. Domain schemas, authority binding,
+independent task review and original prototype human approval remain unchanged.
+Protocol probes retain their narrower no-tools instruction. Authorized public
+documentation remains readable; a concrete access refusal stops its operation and
+target, never authorizes a bypass, and is not generalized into a blanket network ban.
+
+For each actual review invocation, the controller freezes the already filtered
+source snapshot regular-file set (including its independent Git metadata, with automatic maintenance
+disabled), exact prompt/schema, selected attachments and exact artifact projection.
+It verifies these finite sets before dispatch and before publishing a reusable
+response. Missing, changed, added or unsafe linked material rejects the response
+without provider fallback; cumulative failures and usage are retained. An unchanged
+persisted integrity failure cannot redispatch until the normal prerequisite answer
+grants one recheck against the exact failed invocation state; this does not clear
+counts, release another provider, or accept the regenerated inputs without checks. A valid
+structured response rejected for material damage is retained as unaccepted evidence.
+Failed or cancelled calls record detected damage without replacing the original
+error or cancellation. Output/session directories, other tasks' artifacts, database
+writes and event logs are not immutable inputs. Timestamps and empty-directory
+metadata are not input identity. Non-regular entries, including directory links,
+are rejected rather than followed.
+Native profiles and credentials are not scanned by this guard.
+
+The existing execution-source pre/post check remains separate: concurrent real
+source edits make the old review stale, without attributing those edits to the
+reviewer or changing the user's files. Old valid receipts keep their existing
+identity/reuse rules and are not backfilled with checks that never ran. The manifest
+proves delivered bytes, not that a model read them or that its conclusions are true.
+Unpublished research-only protected/native material backends are not part of this
+shared review mechanism; their worktrees and historical records are retained.

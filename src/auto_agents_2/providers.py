@@ -20,9 +20,11 @@ from .materials import bundle, prepare_prompt, present_materials
 from .models import Usage, strict_schema
 from .output_limit_recovery import CALL, CORRECTION, Incident, current_call
 from .progress import capture_output
+from .prompt_rules import is_review
 from .prompts import PROMPT_VERSION, PromptCompiler
 from .readview import VIEW_VERSION, create_artifact_view, create_view
 from .resources import ResourceManager
+from .review_materials import ReviewMaterialChanged, ReviewMaterials
 from .sandbox import SandboxRunner
 from .store import Store
 from .transports import BUILTIN_TRANSPORTS, CLITransport
@@ -279,6 +281,8 @@ class ProviderRouter:
                         state["error_kind"] = "cancelled" if cancellation else "incomplete"
                     state["pending"] = False
                     self.store.checkpoint(run_id, key, state)
+                if state.get("error_kind") == "review_material_changed" and state.get("error_input") == logical_input:
+                    raise ReviewMaterialChanged("Saved review material failure requires repaired inputs or a normal recovery grant").bind_failure(key, state)
                 if state.get("error_kind") == "invalid_structured_response" and state.get("error_input") == logical_input:
                     errors.append(f"{candidate}: saved response failed schema validation")
                     error_kinds[candidate] = "invalid_structured_response"
@@ -317,6 +321,12 @@ class ProviderRouter:
                             # Without a durable receipt, resume stays conservative.
                             exc.add_note("Cancellation receipt not saved: " + type(failure).__name__)
                     raise  # Never turn cancellation into an in-process retry.
+                except ReviewMaterialChanged as exc:
+                    state.update(pending=False, failures=state["failures"] + 1,
+                                 error_kind="review_material_changed", error_input=logical_input,
+                                 material_failure_reason=exc.requirement.reason)
+                    self.store.checkpoint(run_id, key, state)
+                    raise exc.bind_failure(key, state)  # No fallback or automatic retry.
                 except ConfigurationError as exc:
                     completed = self.store.get(run_id, f"provider-result/{operation}")
                     if completed and completed != previous:
@@ -403,7 +413,8 @@ class ProviderRouter:
             prepared = self._prepare_context(stage, context, workspace, run_id, operation, input_identity)
             context = prepared.payload
             workspace = create_view(workspace, root / "workspace", self.config.load().sensitive_paths,
-                                    **({"maintenance": False} if scope is not None else {}))
+                                    **({"maintenance": False} if scope is not None or is_review(stage) else {}))
+            review_materials = ReviewMaterials(workspace) if is_review(stage) else None
             if scope is not None:
                 from .output_limit_runtime import prepared_tree
                 workspace_view_manifest = prepared_tree(workspace)
@@ -484,6 +495,9 @@ class ProviderRouter:
             context_files = [Path(p) for p in context.get("context_files", [])]
             if any(not p.is_file() or not p.resolve().is_relative_to(self.store.root / "artifacts") for p in context_files):
                 raise ProviderError("Required context attachment cannot be delivered")
+            reads = [schema_file, prompt_file, *assets, *context_files]
+            if review_materials is not None:
+                review_materials.admit_files(reads)
             image_read = eff["kind"] == "antigravity" and bool(assets)
             source_read = isinstance(context.get("project"), dict) and bool(context["project"].get("read_on_demand"))
             if stage == "material_probe" and delivery.file:
@@ -516,6 +530,11 @@ class ProviderRouter:
                 except (OSError, ValueError) as exc:
                     raise ProviderError("Required evidence material cannot be projected safely") from exc
                 readonly_overlays = [(projected, artifact_store.root)]
+            if review_materials is not None:
+                for projected, destination in readonly_overlays:
+                    review_materials.admit_projection(projected, destination)
+                material["review_inputs"] = review_materials.record()
+                self.store.checkpoint(run_id, "materials/" + presentation_owner, material)
             argv = transport.argv(eff, workspace, schema_file, out / "result.json", delivery.text, previous,
                                   assets, context_files)
             env = dict(eff["environment"])
@@ -586,6 +605,8 @@ class ProviderRouter:
                     managed_launch = ManagedLaunch(scope, self, aid, input_identity, launch, argv, env, delivery.text,
                         semantic_workspace, cache_invocation, [out], reads, overlays,
                         [self.config.project, original_workspace], readonly_overlays)
+                if review_materials is not None:
+                    review_materials.verify()
                 process = await self.sandbox.spawn(argv, workspace, env, [out], reads, overlays,
                                                    hidden=[self.config.project, original_workspace],
                                                    readonly_overlays=readonly_overlays,
@@ -641,16 +662,34 @@ class ProviderRouter:
                     response = decoder.messages[-1] if decoder.messages else ""
                 except (OSError, ValueError) as exc:
                     raise ProviderError("Unsafe or invalid structured response file") from exc
+                if review_materials is not None:
+                    try:
+                        review_materials.verify()
+                    except ReviewMaterialChanged:
+                        unaccepted = ArtifactStore(self.store.root).put({"response": response}, "unaccepted_review_response")
+                        self.store.event(run_id, "review.result_unaccepted",
+                                         {"attempt": aid, "operation": operation, "artifact": unaccepted})
+                        raise  # Invalid JSON must not turn damaged inputs into a format retry.
                 try:
                     validate(json.loads(response), strict_schema(schema))
                     result = schema.model_validate(remap_references(json.loads(response), prepared.reference_map, materials=prepared.payload))
                 except (ValueError, ValidationError) as exc:
                     raise InvalidStructuredResponse("Invalid structured response: schema validation failed") from exc
+                if review_materials is not None:
+                    try:
+                        review_materials.verify()
+                    except ReviewMaterialChanged:
+                        unaccepted = ArtifactStore(self.store.root).put(result.model_dump(mode="json"), "unaccepted_review")
+                        self.store.event(run_id, "review.result_unaccepted",
+                                         {"attempt": aid, "operation": operation, "artifact": unaccepted})
+                        raise
                 artifact = ArtifactStore(self.store.root).put(result.model_dump(mode="json"), stage)
                 self.store.checkpoints(run_id, {
                     f"provider-result/{operation}": {"attempt": aid, "artifact": artifact, "usage": decoder.usage.model_dump()},
                     f"invocation/{operation}": {"attempt": aid, "identity": input_identity, "result": result.model_dump(mode="json"), "artifact": artifact,
                                                 "cleanup_record": str(process.record),
+                                                **({"review_inputs_hash": review_materials.record()["hash"]}
+                                                   if review_materials is not None else {}),
                                                 **({"incident_launch": launch} if scope is not None else {})},
                 }, usage=(eff["provider"], aid, decoder.usage.model_dump()))
                 outcome = "success"
@@ -667,6 +706,15 @@ class ProviderRouter:
                 raise
             finally:
                 from .cleanup import finalize_async
+                if review_materials is not None and outcome != "success":
+                    try:
+                        review_materials.verify()
+                    except Exception:
+                        try:
+                            self.store.event(run_id, "review.materials_invalid",
+                                             {"attempt": aid, "operation": operation})
+                        except Exception:
+                            pass  # Preserve the original failure/cancellation and cleanup.
                 await finalize_async(
                     *([lambda: self.sandbox.stop(process)] if process else []),
                     lambda: self.store.add_usage(run_id, eff["provider"], aid, "invocation", decoder.usage.model_dump()),

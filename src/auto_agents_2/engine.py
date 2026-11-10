@@ -459,6 +459,20 @@ class WorkflowEngine:
             research.consume_wait(rid, source_wait, matching[0]["id"])
             return
         updates = {key: attempt + 1}
+        from .review_materials import ReviewMaterialChanged
+        if isinstance(error, ReviewMaterialChanged):
+            failure = error.requirement.evidence.get("review_material_failure", {})
+            failed_key, expected = failure.get("key"), failure.get("state")
+            if (not isinstance(failed_key, str) or not failed_key.startswith("infra/")
+                    or not isinstance(expected, dict) or expected.get("pending") is not False
+                    or expected.get("error_kind") != "review_material_changed"
+                    or not expected.get("error_input") or self.store.get(rid, failed_key) != expected):
+                raise StateConflict("Review material recovery lost its exact failed invocation")
+            # The original prerequisite answer permits one fresh recheck of these
+            # repaired inputs, not acceptance, another provider or a budget reset.
+            granted = {**expected, "grant": expected["grant"] + 1}
+            granted.pop("error_input")
+            updates[failed_key] = granted
         if observed_environment:
             queued = self._environment_waits(rid)
             if identity in queued and queued[identity] != pending:
@@ -1315,7 +1329,10 @@ class WorkflowEngine:
         if tree_hash(workspace) != source_before:
             self.store.checkpoint(rid, "invocation-drift/" + key, {"source_hash": source_before,
                 "proposal": self.artifacts.put(result.model_dump(mode="json"), "unaccepted_proposal")})
-            raise PolicyViolation("Workspace changed while generating or reviewing a candidate; preserving user changes")
+            from .prompt_rules import is_review
+            raise PolicyViolation("Review source is stale; preserving the old response and user changes"
+                                  if is_review(stage) else
+                                  "Workspace changed while generating a candidate; preserving user changes")
         result = self._validate_stage_response(result, stage, context, rid)
         artifact = self.artifacts.put(result.model_dump(mode="json"), stage)
         self.authority.record(rid, result, context, logical_operation or key)
@@ -1336,7 +1353,8 @@ class WorkflowEngine:
                 # exact durable transport receipt when publishing the Engine result.
                 record["provider_receipt"] = {"version": 1, **{
                     field: completion[field] for field in ("attempt", "identity", "artifact", "cleanup_record")},
-                    **({"incident_launch": completion["incident_launch"]} if "incident_launch" in completion else {})}
+                    **({"incident_launch": completion["incident_launch"]} if "incident_launch" in completion else {}),
+                    **({"review_inputs_hash": completion["review_inputs_hash"]} if "review_inputs_hash" in completion else {})}
         updates = {invocation_key: record}
         if logical_operation and logical_operation != key:
             updates["invocation/" + logical_operation] = {**record, "recovered_from": key,
