@@ -9,7 +9,15 @@ from auto_agents_2.artifacts import ArtifactStore
 from auto_agents_2.errors import ProviderError
 from auto_agents_2.faults import known_exception
 from auto_agents_2.models import ReviewResult
-from auto_agents_2.provider_failure import LIMIT, ProviderFailureFacts, denied_action
+from auto_agents_2.provider_failure import (
+    CODES,
+    HTTP_FIELDS,
+    LIMIT,
+    RETRY_FIELDS,
+    ProviderFailureFacts,
+    denied_action,
+    native_error,
+)
 from auto_agents_2.util import digest
 
 
@@ -248,5 +256,168 @@ async def test_headless_success_with_denial_still_fails_once_and_keeps_safe_acti
     assert denial["reason"]["value"] == "unknown" and denial["targets"] == []
     assert store.get(rid, "provider-result/review") is None
     assert store.get(rid, "infra/review/antigravity")["failures"] == 1
+    assert len([row for row in store.events(rid) if row["kind"] == "agent.started"]) == 1
+    assert "EXAMPLE_" not in json.dumps(facts)
+
+
+
+def signals(value):
+    return native_error(value)["observed_signals"]
+
+
+@pytest.mark.parametrize("value,codes", [
+    ("EXAMPLE_UNKNOWN_ERROR /EXAMPLE_PATH 429 EXAMPLE_TOKEN", []),
+    ({"code": "EXAMPLE_CODE", "type": "UNAVAILABLE", "message": "EXAMPLE_MESSAGE"}, ["UNAVAILABLE"]),
+    ({"message": {"message": "HTTP 429; Retry-After: 30"}, "status": 429,
+      "headers": {"Retry-After": 30}, "payload": {"code": "RESOURCE_EXHAUSTED"}}, []),
+    (["HTTP 429", "Retry-After: 30"], []), (None, []),
+])
+def test_unknown_native_error_stays_opaque_and_does_not_walk_nested_payloads(value, codes):
+    safe = native_error(value)
+    assert safe["code"]["value"] == "unknown"
+    assert safe["fingerprint"]["sha256"] == digest(
+        json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
+    assert safe["observed_signals"] == {
+        "authority": "native_text_or_field_markers_only", "public_codes": codes, "http_status_markers": [],
+        "keyword_signals": [], "retry_after_markers": [], "truncated": False,
+    }
+    assert "EXAMPLE_" not in json.dumps(safe)
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("Error generating content: [429 RESOURCE_EXHAUSTED] EXAMPLE_TOKEN", ["RESOURCE_EXHAUSTED"]),
+    ("rpc error: code = UNAVAILABLE desc = EXAMPLE_SECRET", ["UNAVAILABLE"]),
+    ('{"error":{"code":"PERMISSION_DENIED","message":"EXAMPLE_SECRET"}}', ["PERMISSION_DENIED"]),
+    ("prefixRESOURCE_EXHAUSTED EXAMPLE_UNAVAILABLE RESOURCE_EXHAUSTED_suffix", []),
+])
+def test_embedded_public_codes_are_text_markers_not_promoted_native_codes(message, expected):
+    safe = native_error(message)
+    assert safe["code"]["value"] == "unknown"
+    assert safe["observed_signals"]["public_codes"] == expected
+    assert safe["observed_signals"]["http_status_markers"] == []
+    assert "EXAMPLE_" not in json.dumps(safe)
+
+
+def test_original_code_hierarchy_and_diagnostic_privacy_are_unchanged():
+    message = ("HTTP 429: RESOURCE_EXHAUSTED rate limit capacity quota authentication permission timeout connection; "
+               "Retry-After: 30; EXAMPLE_SECRET EXAMPLE_TOKEN "
+               "https://EXAMPLE_USER:EXAMPLE_PASSWORD@EXAMPLE_HOST/EXAMPLE_PATH?token=EXAMPLE_QUERY "
+               "run_command EXAMPLE_COMMAND /EXAMPLE_PRIVATE_PATH")
+    for value in (message, {"code": "EXAMPLE_CODE", "type": "UNAVAILABLE", "message": message,
+                            "headers": {"Authorization": "EXAMPLE_TOKEN"}, "env": {"EXAMPLE_KEY": "EXAMPLE_SECRET"}}):
+        safe = native_error(value)
+        observed = safe["observed_signals"]
+        assert safe["code"]["value"] == "unknown"
+        assert observed["public_codes"] == (["RESOURCE_EXHAUSTED"] if type(value) is str else
+                                            ["RESOURCE_EXHAUSTED", "UNAVAILABLE"])
+        assert observed["http_status_markers"] == [429]
+        assert observed["keyword_signals"] == [
+            "authentication", "capacity", "connection", "permission", "quota", "rate_limit", "timeout"]
+        assert observed["retry_after_markers"] == [{"kind": "seconds", "value": 30}]
+        assert "EXAMPLE_" not in json.dumps(safe)
+        assert "run_command" not in json.dumps(safe) and "https://" not in json.dumps(safe)
+        assert "root_cause" not in safe and "retryable" not in safe
+    assert native_error({"code": "UNAVAILABLE", "type": "ERROR"})["code"]["value"] == "UNAVAILABLE"
+    assert native_error({"type": "UNAVAILABLE"})["code"]["value"] == "UNAVAILABLE"
+    assert native_error("UNAVAILABLE")["code"]["value"] == "UNAVAILABLE"
+
+
+@pytest.mark.parametrize("message,status", [
+    ("HTTP 429: EXAMPLE_SECRET", 429), ("HTTP/1.1 503 Service Unavailable", 503),
+    ("http status code: 401", 401), ('{"status_code":429}', 429),
+    ('{"http_status":"503"}', 503), ("statusCode=403", 403),
+])
+def test_only_explicit_http_text_markers_are_observed(message, status):
+    assert signals(message)["http_status_markers"] == [status]
+
+
+@pytest.mark.parametrize("key", HTTP_FIELDS)
+@pytest.mark.parametrize("value", [429, "429"])
+def test_shallow_http_status_fields_are_observed_as_markers_only(key, value):
+    assert signals({key: value})["http_status_markers"] == [429]
+
+
+@pytest.mark.parametrize("value", [
+    "429", "Error code: 429", "exit 503", "/home/EXAMPLE_PATH/429/error", r"C:\EXAMPLE_PATH\503\error",
+    "/tmp/HTTP 429/error", "/tmp/status_code:429/error", "HTTP 4290", "HTTP 429.json",
+    "HTTP429", "status_code=429suffix", "httpStatus: 503.5", {"status_code": True},
+    {"http_status": 600}, {"http_status": 99}, {"http_status": 429.0}, {"status": 429},
+])
+def test_plain_numbers_paths_and_invalid_values_do_not_become_http_statuses(value):
+    assert signals(value)["http_status_markers"] == []
+
+
+@pytest.mark.parametrize("key", RETRY_FIELDS)
+@pytest.mark.parametrize("value,seconds", [(0, 0), (86400, 86400), ("00030", 30)])
+def test_retry_fields_accept_only_bounded_whole_seconds(key, value, seconds):
+    assert signals({key: value})["retry_after_markers"] == [{"kind": "seconds", "value": seconds}]
+
+
+@pytest.mark.parametrize("message", [
+    "Retry-After: 30", "retry-after: 30", '"retry_after": "30"', '{"retryAfterSeconds":30}',
+    "HTTP 429; Retry-After: 30; EXAMPLE_SECRET", "Retry-After: 30\nEXAMPLE_SECRET",
+])
+def test_explicit_retry_text_field_normalizes_without_copying_message(message):
+    assert signals(message)["retry_after_markers"] == [{"kind": "seconds", "value": 30}]
+    assert "EXAMPLE_" not in json.dumps(signals(message))
+
+
+@pytest.mark.parametrize("value,utc", [
+    ("Wed, 11 Nov 2026 02:00:00 GMT", "2026-11-11T02:00:00Z"),
+    ("2026-11-11T02:00:00Z", "2026-11-11T02:00:00Z"),
+    ("2026-11-11T10:00:00+08:00", "2026-11-11T02:00:00Z"),
+    ("2026-11-11T02:00:00.125-01:00", "2026-11-11T03:00:00.125000Z"),
+])
+def test_retry_dates_require_valid_timezone_and_normalize_to_utc(value, utc):
+    expected = [{"kind": "utc_datetime", "value": utc}]
+    assert signals({"Retry-After": value})["retry_after_markers"] == expected
+    assert signals('Retry-After: "' + value + '"')["retry_after_markers"] == expected
+    assert signals("Retry-After: " + value)["retry_after_markers"] == expected
+    assert signals({"retry_after_seconds": value})["retry_after_markers"] == []
+    assert signals('retryAfterSeconds: "' + value + '"')["retry_after_markers"] == []
+
+
+@pytest.mark.parametrize("value", [
+    -1, 86401, True, 1.5, None, {}, [], "+30", "-30", "30.0", "3e1", "30s", "30 seconds", "1000000",
+    "2026-11-11T02:00:00", "2026-11-31T02:00:00Z", "2026-11-11T24:00:00Z",
+    "2026-11-11T02:00:60Z", "2026-11-11T02:00:00+24:00", "2026-11-11T02:00:00+00:60",
+    "2026-11-11T02:00:00-00:00", "2026-11-11T02:00:00Z/EXAMPLE_TOKEN",
+    "Thu, 11 Nov 2026 02:00:00 GMT", "Wed, 11 Nov 2026 02:00:00 PST",
+    "Wed, 11 Nov 2026 02:00:00", "Wed, 31 Nov 2026 02:00:00 GMT",
+    "30 EXAMPLE_TOKEN", '30"EXAMPLE_SECRET',
+])
+def test_invalid_or_out_of_range_retry_values_are_not_partially_captured(value):
+    assert signals({"Retry-After": value})["retry_after_markers"] == []
+    assert signals("Retry-After: " + str(value))["retry_after_markers"] == []
+    assert "EXAMPLE_" not in json.dumps(signals({"Retry-After": value}))
+
+
+def test_new_signal_lists_are_bounded_deduplicated_and_explicitly_truncated():
+    message = " ".join(sorted(CODES - {"SUCCESS"})) + "; " + "; ".join(
+        f"HTTP {400 + i}; Retry-After: {i}" for i in range(LIMIT + 2))
+    observed = signals(message)
+    assert observed["truncated"]
+    assert all(len(observed[key]) == LIMIT for key in ("public_codes", "http_status_markers", "retry_after_markers"))
+    assert signals("HTTP 429; HTTP 429; Retry-After: 30; Retry-After: 30")["retry_after_markers"] == [
+        {"kind": "seconds", "value": 30}]
+
+
+async def test_native_markers_cannot_erase_terminal_failure_or_grant_a_retry(tmp_path):
+    error_text = "HTTP 429: RESOURCE_EXHAUSTED; Retry-After: 30; EXAMPLE_SECRET"
+    router, project, store, rid = fixture_router(
+        tmp_path, [result(status="ERROR", error=error_text), result()], kind="antigravity")
+    for _ in range(2):
+        with pytest.raises(ProviderError):
+            await router.invoke("review", {}, ReviewResult, project, rid, "review")
+    _, facts = observations(store, rid)
+    assert len(facts) == 1 and facts[0]["terminal_failure_count"] == 1
+    assert facts[0]["last_terminal"]["status"]["value"] == "SUCCESS"
+    observed_error = facts[0]["terminal_failures"][0]["error"]
+    assert observed_error["code"]["value"] == "unknown"
+    assert observed_error["observed_signals"]["http_status_markers"] == [429]
+    assert observed_error["observed_signals"]["retry_after_markers"] == [{"kind": "seconds", "value": 30}]
+    state = store.get(rid, "infra/review/antigravity")
+    assert state["failures"] == 1 and state["grant"] == 0 and not state["pending"]
+    assert store.get(rid, "provider-result/review") is None
     assert len([row for row in store.events(rid) if row["kind"] == "agent.started"]) == 1
     assert "EXAMPLE_" not in json.dumps(facts)

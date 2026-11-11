@@ -4,6 +4,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
+from email.utils import format_datetime, parsedate_to_datetime
 
 from .util import digest
 
@@ -27,6 +29,32 @@ TARGET_FIELDS = (
     "path", "file_path", "directory", "cwd", "url",
 )
 LIMIT = 16
+MAX_RETRY_AFTER_SECONDS = 86400
+# Only these shallow native error fields are examined; no payload/header traversal.
+HTTP_FIELDS = ("http_status", "http_status_code", "httpStatus", "status_code", "statusCode")
+RETRY_FIELDS = ("Retry-After", "retry_after", "retryAfter", "retry_after_seconds", "retryAfterSeconds")
+PUBLIC_CODE = re.compile(r"(?<![A-Za-z0-9_])(" + "|".join(sorted(CODES - {"SUCCESS"})) + r")(?![A-Za-z0-9_])")
+HTTP_MARKER = re.compile(
+    r"(?<![\w./\\-])(?:HTTP(?:/[0-9](?:\.[0-9])?)?(?:[ \t]+status(?:[ \t]+code)?)?"
+    r"(?:[ \t]*[:=][ \t]*|[ \t]+)|(?:\"(?:" + "|".join(HTTP_FIELDS) + r")\"|(?:"
+    + "|".join(HTTP_FIELDS) + r"))[ \t]*[:=][ \t]*)(?:\"(?P<quoted>[1-5][0-9]{2})\"|"
+    r"(?P<bare>[1-5][0-9]{2}))(?![\w./\\-])", re.I)
+KEYWORD_SIGNALS = {
+    "rate_limit": r"\b(?:rate[ _-]limit(?:ed|ing)?|too many requests)\b",
+    "capacity": r"\bcapacity\b", "quota": r"\bquota\b",
+    "authentication": r"\b(?:authentication|unauthenticated|unauthorized)\b",
+    "permission": r"\b(?:permission|access denied)\b",
+    "timeout": r"\b(?:timeout|timed out)\b", "connection": r"\bconnection\b",
+}
+RFC3339 = (r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?"
+           r"(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])")
+HTTP_DATE = (r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), [0-9]{2} "
+             r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT")
+RETRY_VALUE = "(?:" + HTTP_DATE + "|" + RFC3339 + r"|[0-9]{1,6})"
+RETRY_MARKER = re.compile(
+    r"(?<![\w./\\-])(?:\"(?P<quoted_key>" + "|".join(RETRY_FIELDS) + r")\"|(?P<key>"
+    + "|".join(RETRY_FIELDS) + r"))[ \t]*[:=][ \t]*(?:\"(?P<quoted>" + RETRY_VALUE
+    + r")\"|(?P<bare>" + RETRY_VALUE + r"))(?=[ \t]*(?:$|[\r\n,;}\])]))", re.I)
 
 
 def opaque(value):
@@ -73,8 +101,61 @@ def denied_action(value):
     return result
 
 
+def retry_after_marker(value, *, seconds_only=False):
+    """Normalize only bounded whole seconds or a strict timezone-bearing date."""
+    if type(value) is int or (type(value) is str and re.fullmatch(r"[0-9]{1,6}", value)):
+        seconds = int(value)
+        return {"kind": "seconds", "value": seconds} if 0 <= seconds <= MAX_RETRY_AFTER_SECONDS else None
+    if type(value) is not str or seconds_only:
+        return None
+    try:
+        if re.fullmatch(HTTP_DATE, value):
+            parsed = parsedate_to_datetime(value)
+            if format_datetime(parsed, usegmt=True) != value:
+                return None  # Includes a mismatched weekday.
+        elif re.fullmatch(RFC3339, value) and not value.endswith("-00:00"):
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        else:
+            return None
+        return {"kind": "utc_datetime", "value": parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")}
+    except (ValueError, OverflowError):
+        return None
+
+
+def native_signals(value):
+    """Text/field markers only, never an HTTP receipt, root cause or retry grant."""
+    texts = [value] if type(value) is str else []
+    statuses, public_codes, keywords, retries = set(), set(), set(), []
+
+    def observe_retry(key, raw):
+        marker = retry_after_marker(raw, seconds_only=key.lower() in {"retry_after_seconds", "retryafterseconds"})
+        if marker is not None and marker not in retries and len(retries) <= LIMIT:
+            retries.append(marker)
+
+    if type(value) is dict:
+        texts = [value[key] for key in ("code", "type", "message") if type(value.get(key)) is str]
+        for key in HTTP_FIELDS:
+            status = value.get(key)
+            if type(status) is int and 100 <= status <= 599:
+                statuses.add(status)
+            elif type(status) is str and re.fullmatch(r"[1-5][0-9]{2}", status):
+                statuses.add(int(status))
+        for key in RETRY_FIELDS:
+            observe_retry(key, value.get(key))
+    for text in texts:
+        public_codes.update(PUBLIC_CODE.findall(text))
+        statuses.update(int(match["quoted"] or match["bare"]) for match in HTTP_MARKER.finditer(text))
+        keywords.update(name for name, pattern in KEYWORD_SIGNALS.items() if re.search(pattern, text, re.I))
+        for match in RETRY_MARKER.finditer(text):
+            observe_retry(match["quoted_key"] or match["key"], match["quoted"] or match["bare"])
+    return {"authority": "native_text_or_field_markers_only",
+            "public_codes": sorted(public_codes)[:LIMIT], "http_status_markers": sorted(statuses)[:LIMIT],
+            "keyword_signals": sorted(keywords), "retry_after_markers": retries[:LIMIT],
+            "truncated": any(len(rows) > LIMIT for rows in (public_codes, statuses, retries))}
+
+
 def native_error(value):
-    result = {"fingerprint": opaque(value), "code": code(None)}
+    result = {"fingerprint": opaque(value), "code": code(None), "observed_signals": native_signals(value)}
     if type(value) is dict:
         result["code"] = code(value.get("code", value.get("type")))
     elif type(value) is str:
