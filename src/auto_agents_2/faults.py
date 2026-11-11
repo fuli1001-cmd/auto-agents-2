@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import model_serializer
+from pydantic import PrivateAttr, model_serializer
 
 from .errors import (
     AA2Error,
@@ -31,6 +31,8 @@ class HumanRequirement(Record):
     resume_condition: str
     evidence_refs: list[str] = []
     evidence: dict = {}
+    # Display-only: excluded from model_dump and prerequisite identity.
+    _native_denial_diagnostic: str = PrivateAttr(default="")
 
     @model_serializer(mode='wrap')
     def serialize_evidence(self, handler):
@@ -42,6 +44,11 @@ class HumanRequirement(Record):
         return value
 
     def prompt(self):
+        from .provider_failure import DENIAL_DIAGNOSTICS
+        if self._native_denial_diagnostic in DENIAL_DIAGNOSTICS:
+            return (self._native_denial_diagnostic + "。\n"
+                    "需要处理：核对保留的拒绝证据并停止对应操作；不据此推断认证或连接故障，不更换命令、路径或工具绕过。\n"
+                    "继续条件：在原权限和范围内解决实际前提后按正常流程核对；确认不授权重试未解决的拒绝、放宽权限或跳过验收。")
         return f"{self.reason}\n需要处理：{self.action}\n继续条件：{self.resume_condition}"
 
 
@@ -139,12 +146,16 @@ def known_exception(error, phase):
             reason_code=error.code, phase=phase)
     if isinstance(error, (ConfigurationError, ProviderError)):
         from .installation_failure import failure_references
-        return HumanIntervention(HumanRequirement(kind="external_input",
+        requirement = HumanRequirement(kind="external_input",
             reason=f"外部配置或 provider 尚不可用（{error.code}）。",
             action="检查项目配置和原生 provider 的认证、连接状态。",
             resume_condition="配置验证和原生 provider 检查通过后重新执行当前已声明操作。",
-            evidence_refs=failure_references(error), evidence=getattr(error, "evidence", {})),
-            reason_code=error.code, phase=phase)
+            evidence_refs=failure_references(error), evidence=getattr(error, "evidence", {}))
+        from .provider_failure import DENIAL_DIAGNOSTICS
+        diagnostic = getattr(error, "native_denial_diagnostic", "")
+        if type(diagnostic) is str and diagnostic in DENIAL_DIAGNOSTICS:
+            requirement._native_denial_diagnostic = diagnostic
+        return HumanIntervention(requirement, reason_code=error.code, phase=phase)
     if isinstance(error, PolicyViolation):
         return StateConflict("当前操作未通过路径、权限或候选完整性核对；保留未应用提案及现场。", phase=phase)
     return None

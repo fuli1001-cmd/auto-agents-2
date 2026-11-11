@@ -22,7 +22,12 @@ from .output_limit_recovery import CALL, CORRECTION, Incident, current_call
 from .progress import capture_output
 from .prompt_rules import is_review
 from .prompts import PROMPT_VERSION, PromptCompiler
-from .provider_failure import ProviderFailureFacts, failure_evidence
+from .provider_failure import (
+    COMMAND_DENIAL_DIAGNOSTIC,
+    ProviderFailureFacts,
+    denial_diagnostic,
+    failure_evidence,
+)
 from .readview import VIEW_VERSION, create_artifact_view, create_view
 from .resources import ResourceManager
 from .review_materials import ReviewMaterialChanged, ReviewMaterials
@@ -372,7 +377,20 @@ class ProviderRouter:
                                      "retry": retry + 1, "delay": min(2 ** retry, 15)})
                     await asyncio.sleep(min(2 ** retry, 15))
         error = InvalidStructuredResponse if set(error_kinds.values()) == {"invalid_structured_response"} else ProviderError
-        raise error("; ".join(errors)[-3000:], evidence=failure_evidence(failure_refs))
+        failure = error("; ".join(errors)[-3000:], evidence=failure_evidence(failure_refs))
+        # Retained observations also survive exhausted-budget restarts. The hint
+        # never changes error type, retryability, evidence or authorization.
+        hints = []
+        for ref in failure.evidence.get("provider_failures", []):
+            try:
+                hint = denial_diagnostic(ArtifactStore(self.store.root).json(ref))
+            except Exception:
+                continue  # Optional presentation cannot replace the original failure.
+            if hint:
+                hints.append(hint)
+        failure.native_denial_diagnostic = (COMMAND_DENIAL_DIAGNOSTIC if COMMAND_DENIAL_DIAGNOSTIC in hints
+                                           else hints[0] if hints else "")
+        raise failure
 
     async def _call(self, eff, stage, context, schema, workspace, run_id, operation, fresh):
         scope = current_call(self.store, run_id, stage, operation)

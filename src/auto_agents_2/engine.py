@@ -464,7 +464,16 @@ class WorkflowEngine:
         attempt = self.store.get(rid, key, 0)
         interaction = choice_spec(["已处理，重新核对", "暂停，稍后续跑"], ["retry", "pause"], yes_no=True)
         interaction["pause_on"] = "n"
-        await self._ask(rid, f"{key}/{attempt}", error.requirement.prompt(), identity, interaction)
+        question_key = f"{key}/{attempt}"
+        prompt = error.requirement.prompt()
+        if error.reason_code == ProviderError.code or error.requirement._native_denial_diagnostic:
+            # Optional denial observations may become unavailable on restart;
+            # neither gaining nor losing a hint may rewrite an existing question.
+            retained = self.store.decision_questions(rid, [question_key])
+            prior = next((q for q in retained if q["artifact_hash"] == identity), None)
+            if prior:
+                prompt = self.store.question(prior["id"])["prompt"]
+        await self._ask(rid, question_key, prompt, identity, interaction)
         if source_wait is not None:
             questions = self.store.decision_questions(rid, [f"{key}/{attempt}"])
             matching = [question for question in questions

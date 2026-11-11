@@ -1,0 +1,60 @@
+{
+  "date": "2026-11-11",
+  "base_commit": "9d6f15c48f39b2a9869c265f44a114dd2be25e9a",
+  "environment": "WSL2 Ubuntu-20.04; project Conda Python 3.11.18; pytest 9.0.3",
+  "final_source_sha256": {
+    "src/auto_agents_2/engine.py": "1016edbe87f7e9de932ebf9cb666599d2165acba2c2f1119dcbddaaa16268a98",
+    "src/auto_agents_2/faults.py": "7e1ed875a7d2e44e9754b8245415fa61f5dc0487a070d5ee9bafd5988549c971",
+    "src/auto_agents_2/prompts.py": "a3005571558bdd73e9ddc947224454929a54ed19401e79ef5c8b81e0a072d704",
+    "src/auto_agents_2/provider_failure.py": "e30cf2d4b62eb06bb39d4e207e9dd294a2213cb1cc44eccbad056d831eeb0b8d",
+    "src/auto_agents_2/providers.py": "fa45d92b5a862ae18263950ab035fb731205dac06133293bbd258bf774d0ae39",
+    "tests/test_provider_denial_display.py": "bf193ebaf625775c8db5dc6e2d5a5241b97188bb6246da7359ec83846dfdc350",
+    "tests/test_worker_controller_scope.py": "8a30b43c8026392b582b0bc59f80acfcbd72e98b6a2b775140d1fa374752e172"
+  },
+  "runs": [
+    {
+      "report": "run-20b3002e48dd40a89d0d6d979dd22b66.json",
+      "sha256": "d0ec496038c960fbb8b56039c4b902a5730b9430566372b211ae3a284f0b3a71",
+      "scope": "initial focused run: 24 passed, 2 failed; fixed missing prompt projection before subsequent runs",
+      "counts": {
+        "setup:passed": 26,
+        "call:passed": 24,
+        "teardown:passed": 26,
+        "call:failed": 2
+      },
+      "exitstatus": 1
+    },
+    {
+      "report": "run-8c6542903d5649058d51c6058614dffe.json",
+      "sha256": "716350a23469d62a39a8cf66d5fcc501b0157572c7c8a8a94aaacc82e9062e89",
+      "scope": "affected provider, prototype, recovery and approval suite: 322 passed; before final hint-unavailable prompt-preservation correction",
+      "counts": {
+        "setup:passed": 322,
+        "call:passed": 322,
+        "teardown:passed": 322
+      },
+      "exitstatus": 0
+    },
+    {
+      "report": "run-d88ef9f790dd4c46bd0ed005150f5da6.json",
+      "sha256": "732ef5d1b0c921efedd824a03aa85b65e55284101d607acc34fb9f4c75a2165b",
+      "scope": "final affected denial-display, prerequisite-recovery and prototype-approval suite: 70 passed",
+      "counts": {
+        "setup:passed": 70,
+        "call:passed": 70,
+        "teardown:passed": 70
+      },
+      "exitstatus": 0
+    }
+  ],
+  "checks": [
+    "targeted Ruff passed",
+    "git diff --check passed",
+    "independent read-only review: no remaining concrete findings"
+  ],
+  "limits": [
+    "No full regression run",
+    "No real AGY call after these fixes",
+    "No native permission, configuration, retry-budget or human-approval changes"
+  ]
+}

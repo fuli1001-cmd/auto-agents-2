@@ -35,6 +35,9 @@ TARGET_FIELDS = (
     "path", "file_path", "directory", "cwd", "url",
 )
 LIMIT = 16
+COMMAND_DENIAL_DIAGNOSTIC = "保留的原生证据包含命令操作拒绝，具体规则未明"
+TOOL_DENIAL_DIAGNOSTIC = "保留的原生证据包含工具操作拒绝，具体规则未明"
+DENIAL_DIAGNOSTICS = frozenset({COMMAND_DENIAL_DIAGNOSTIC, TOOL_DENIAL_DIAGNOSTIC})
 MAX_RETRY_AFTER_SECONDS = 86400
 # Only these shallow native error fields are examined; no payload/header traversal.
 HTTP_FIELDS = ("http_status", "http_status_code", "httpStatus", "status_code", "statusCode")
@@ -291,6 +294,27 @@ class ProviderFailureFacts:
                         for source, state in self.streams.items()},
             "os_errno": error.errno if isinstance(error, OSError) else None,
         }
+
+
+def denial_diagnostic(record):
+    """Presentation only, from retained safe observations, never a retry decision."""
+    if (not isinstance(record, dict) or record.get("version") != 1
+            or record.get("authority") != "provider_failure_observation"
+            or record.get("kind") != "antigravity"
+            or "result.denied_actions" not in record.get("error_sources", [])):
+        return ""
+    terminals = [*record.get("terminal_failures", []), record.get("last_terminal")]
+    for terminal in terminals:
+        if not isinstance(terminal, dict):
+            continue
+        for action in terminal.get("denied_actions", []):
+            if not isinstance(action, dict):
+                continue
+            headless = action.get("headless_action", {}).get("value")
+            tool = action.get("tool", {}).get("value")
+            if headless in {"command", "run_command"} or tool == "run_command":
+                return COMMAND_DENIAL_DIAGNOSTIC
+    return TOOL_DENIAL_DIAGNOSTIC
 
 
 def failure_evidence(refs):

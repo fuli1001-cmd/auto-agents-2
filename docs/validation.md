@@ -498,3 +498,14 @@ AA2_BROWSER_CACHE="$PWD/.cache/browsers" python tests/manual_frontend.py
 在 aa2 项目 Conda 环境执行：专项 7 项通过，相关回归 163 项通过，全量 `python -m pytest -v --tb=short tests --junitxml=…/full-suite.xml` 共 2984 项全部通过，失败、错误、跳过均为 0，耗时 4293.73 秒。全量运行前后及最终审查时的 258 个源码、测试和配置输入指纹一致，因此最终审查没有重复运行全套。Ruff 与 Git 差异检查通过。
 
 本机原始证据保存在 `/tmp/muya-clarify-answers-repair-20261029/`：`repro.log` 记录修复前失败，`focused.xml`、`related.xml`、`full-suite.xml` 和相应日志记录通过结果，`full-source-before.json` 与 `full-source-after.json` 保存完整输入指纹。全量 JUnit SHA-256 为 `ac82834d10b0ec2f4e1871496e0fed01d1f34d2410c859a58b8b3e1b67dae711`。此结果验证控制器修复，不代表 Muya 新原型已通过人工审核。
+
+
+## 原型原生权限边界与拒绝提示修复（2026-11-11）
+
+本次仅收紧静态原型作者的提示边界，并从已保留的安全观察生成显示用拒绝提示。原型不应发现宿主工具链或搜索宿主媒体目录；仅在原始需求允许时使用明确标识的模拟处理，真实文件、解码、浏览器检查、独立审查和人工审批门槛不变。命令拒绝仅显示“具体规则未明”，不推断认证或连接故障。显示提示不参与前提身份；已有问题、回答、证据和累计调用次数保持不变，即使重启后可选诊断不可读，也不改写旧问题。
+
+环境为 WSL2 Ubuntu-20.04、项目 Conda Python 3.11.18、pytest 9.0.3。初次定向检查 24 项通过、2 项失败，原因是问题摘要不含 prompt；改为读取完整问题后，受影响回归 322 项通过。独立复审发现可选提示丢失时仍需保留旧问题文案，修正并补充重启断言后，最终恢复、拒绝显示和审批回归 70 项通过。后者与前者有重叠，不合计为独立测试总数。受影响文件 Ruff 和 git diff --check 通过，最终独立审查无剩余具体问题。复用未受最后显示回退修改影响的测试结果，没有重复全套回归。
+
+322 项范围：test_provider_denial_display.py、test_worker_controller_scope.py、test_provider_failure_facts.py、test_provider_terminal_state.py、test_provider_pause_accounting.py、test_research_prerequisite_wait.py、test_prototype_capability_contract.py、test_prototype_approvals.py。最终 70 项范围：test_provider_denial_display.py、test_research_prerequisite_wait.py、test_prototype_approvals.py。均通过 PYTHONPATH=src 和项目 Conda 的 python -B -m pytest -q 执行，使用合成 provider 夹具，不产生真实模型调用。
+
+[验证摘要与最终源码指纹](evidence/agy-headless-guidance-validation.json) 保留初次失败及两组通过报告的散列。修复后未再调用 AGY；此前获准的一次真实重跑仍为原型阶段暂停，原生命令拒绝的具体匹配规则没有证实。本次不改变原生权限、配置、历史、重试预算或验收门槛，不能视作真实原型已通过。

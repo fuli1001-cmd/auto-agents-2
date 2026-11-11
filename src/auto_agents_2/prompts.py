@@ -11,7 +11,7 @@ from .research_contract import RESEARCH_PUBLICATION_RULE
 from .visual_design import visual_instructions
 
 INVOCATION_CONTRACT_VERSION = "2026-10-16.2"
-PROMPT_VERSION = "2026-11-10.shared-review-responsibility-v1"
+PROMPT_VERSION = "2026-11-11.prototype-native-boundary-v1"
 CORE = COMMON
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
@@ -93,6 +93,18 @@ class PromptCompiler:
                     'Do not search for images, list parent directories, or read unlisted paths. '
                     'Tokens are test data, not credentials, and are not provided inline. '
                     'If the listed text cannot be read, return an empty text_token. Do not infer or guess a token.')
+        if stage == "prototype":
+            task += (" Native inspection remains subject to the selected provider's actual permissions; "
+                     "read-only shell guidance does not grant command access or promise headless approval. "
+                     "Use the supplied source and admitted materials to author this static proposal. Do not "
+                     "probe the host toolchain or search host directories for media or other prototype assets. "
+                     "When the original requirements permit simulated processing, use clearly identified local "
+                     "or inline demo data rather than introducing a production-tool prerequisite. Preserve explicit "
+                     "requirements for real files, decoding, checks and approval; do not fake media bytes or waive "
+                     "missing evidence. After a concrete native denial, stop that operation and target without "
+                     "changing commands, paths or tools to bypass it. Report the actual remaining gap through the "
+                     "current schema; do not claim a missing host tool, authentication failure or unavailable "
+                     "connection without evidence. File application and execution remain with the controller.")
         if purpose == "prototype":
             from .prototype_contract import prototype_instructions
             from .prototype_review import review_instructions

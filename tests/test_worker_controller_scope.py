@@ -147,3 +147,21 @@ async def test_prompt_version_uses_new_session_without_resetting_logical_input_o
     assert invocation_identity("clarify", context, IntakeResult, tmp_path, config.load(),
                                execution="fixture-execution") == identity
     assert store.get(rid, "provider-result/clarify") is None
+
+
+@pytest.mark.parametrize("model", ["gpt-fixture", "gemini-fixture", "claude-fixture"])
+def test_static_prototype_respects_native_permissions_without_weakening_acceptance(model):
+    raw = "Fixture: simulated processing permitted; real MP4 decoding and human approval still required."
+    context = {"raw_requirements": raw, "project": {"read_on_demand": ["public.txt"]}}
+    prompt, _ = PromptCompiler().compile("prototype", context, model)
+    assert compiled_context(prompt) == context
+    assert "read-only shell guidance does not grant command access or promise headless approval" in prompt
+    assert "Do not probe the host toolchain or search host directories" in prompt
+    assert "After a concrete native denial, stop that operation and target" in prompt
+    assert "Preserve explicit requirements for real files, decoding, checks and approval" in prompt
+    assert "do not fake media bytes or waive missing evidence" in prompt
+    assert "The controller runs these checks after applying your proposal" in prompt
+    assert "Respect required human prototype approval" in prompt
+    other, _ = PromptCompiler().compile("clarify", context, model)
+    assert "read-only shell and image tools may be used when needed for that inspection" in other
+    assert "Do not probe the host toolchain or search host directories" not in other
