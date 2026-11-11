@@ -1,0 +1,143 @@
+{
+  "date": "2026-11-11",
+  "base_commit": "8658e60204768cf2ad975a3eefe2a43fbe7485aa",
+  "scope": "prototype author inspection text and prompt presentation version only",
+  "prompt_version": "2026-11-11.prototype-file-inspection-v2",
+  "source_worktree": "/home/fuli/projects/aa2-agy-prototype-read-guidance-20261111",
+  "python": "/home/fuli/projects/auto-agents-2/.conda-env/bin/python",
+  "pythonpath": "/home/fuli/projects/aa2-agy-prototype-read-guidance-20261111/src:/home/fuli/projects/aa2-agy-prototype-read-guidance-20261111",
+  "verified_imports": {
+    "executable": "/home/fuli/projects/auto-agents-2/.conda-env/bin/python",
+    "python": "3.11.18 (main, Oct 26 2026, 11:35:17) [GCC 15.3.0]",
+    "prompt_rules": "/home/fuli/projects/aa2-agy-prototype-read-guidance-20261111/src/auto_agents_2/prompt_rules.py",
+    "prompts": "/home/fuli/projects/aa2-agy-prototype-read-guidance-20261111/src/auto_agents_2/prompts.py",
+    "providers": "/home/fuli/projects/aa2-agy-prototype-read-guidance-20261111/src/auto_agents_2/providers.py",
+    "prompt_version": "2026-11-11.prototype-file-inspection-v2"
+  },
+  "final_source_sha256": {
+    "src/auto_agents_2/prompt_rules.py": "a4eb53a040ce560d0205475123582b1727c0363dc2b7ad1766547c89b154f9f4",
+    "src/auto_agents_2/prompts.py": "7bd3ed35c57e6c378c50937e31f458f4eeaf56a9656219f42d1e112f0c65b471",
+    "tests/test_worker_controller_scope.py": "1e918a259737a343ef8b3ff70021bb2b280db37fc85e190425dbb8a6faf47fe2",
+    "docs/design.md": "de266fa933a6ea4f2addaa821f31ce6384bc84e84657993069700713963c3ccf"
+  },
+  "input_manifest_files": 376,
+  "test_inputs_unchanged": true,
+  "commands": [
+    {
+      "name": "imports",
+      "command": "cd /home/fuli/projects/aa2-agy-prototype-read-guidance-20261111 && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/fuli/projects/aa2-agy-prototype-read-guidance-20261111/src:/home/fuli/projects/aa2-agy-prototype-read-guidance-20261111 /home/fuli/projects/auto-agents-2/.conda-env/bin/python -B -c 'import json, sys; import auto_agents_2.prompt_rules as r; import auto_agents_2.prompts as p; import auto_agents_2.providers as v; print(json.dumps({'\"'\"'executable'\"'\"': sys.executable, '\"'\"'python'\"'\"': sys.version, '\"'\"'prompt_rules'\"'\"': r.__file__, '\"'\"'prompts'\"'\"': p.__file__, '\"'\"'providers'\"'\"': v.__file__, '\"'\"'prompt_version'\"'\"': p.PROMPT_VERSION}, indent=2)); assert all(x.__file__.startswith('\"'\"'/home/fuli/projects/aa2-agy-prototype-read-guidance-20261111/src/'\"'\"') for x in (r,p,v))'",
+      "started_utc": "2026-11-11T14:01:24.675819+00:00",
+      "exit_code": 0,
+      "log": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/imports.log"
+    },
+    {
+      "name": "focused",
+      "command": "cd /home/fuli/projects/aa2-agy-prototype-read-guidance-20261111 && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/fuli/projects/aa2-agy-prototype-read-guidance-20261111/src:/home/fuli/projects/aa2-agy-prototype-read-guidance-20261111 /home/fuli/projects/auto-agents-2/.conda-env/bin/python -B -m pytest -v --tb=short tests/test_worker_controller_scope.py tests/test_prototype_session_isolation.py tests/test_prototype_capability_contract.py tests/test_prototype_approvals.py tests/test_provider_prompt_delivery.py tests/test_complete_snapshot_discovery.py tests/test_context_plan.py::test_presentation_version_does_not_change_logical_call_identity --junitxml=/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/focused.xml",
+      "started_utc": "2026-11-11T14:01:25.072718+00:00",
+      "exit_code": 1,
+      "log": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/focused.log"
+    },
+    {
+      "name": "ruff",
+      "command": "cd /home/fuli/projects/aa2-agy-prototype-read-guidance-20261111 && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/fuli/projects/aa2-agy-prototype-read-guidance-20261111/src:/home/fuli/projects/aa2-agy-prototype-read-guidance-20261111 /home/fuli/projects/auto-agents-2/.conda-env/bin/python -B -m ruff check src/auto_agents_2/prompt_rules.py src/auto_agents_2/prompts.py tests/test_worker_controller_scope.py",
+      "started_utc": "2026-11-11T14:02:24.968896+00:00",
+      "exit_code": 0,
+      "log": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/ruff.log"
+    },
+    {
+      "name": "diff-check",
+      "command": "cd /home/fuli/projects/aa2-agy-prototype-read-guidance-20261111 && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/fuli/projects/aa2-agy-prototype-read-guidance-20261111/src:/home/fuli/projects/aa2-agy-prototype-read-guidance-20261111 git diff --check",
+      "started_utc": "2026-11-11T14:02:24.995020+00:00",
+      "exit_code": 0,
+      "log": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/diff-check.log"
+    }
+  ],
+  "focused_pytest": {
+    "tests": 99,
+    "passed": 97,
+    "failed": 2,
+    "errors": 0,
+    "skipped": 0,
+    "duration_seconds": 58.56,
+    "new_contract_cases": 10,
+    "new_contract_cases_passed": 10,
+    "failures": [
+      {
+        "file": "tests/test_complete_snapshot_discovery.py",
+        "name": "test_v8_native_argv_does_not_resume_retained_v7_conversation[codex]",
+        "line": 146,
+        "assertion": "Expected presentation/clarify/<identity>/context-v8 is absent"
+      },
+      {
+        "file": "tests/test_complete_snapshot_discovery.py",
+        "name": "test_v8_native_argv_does_not_resume_retained_v7_conversation[antigravity]",
+        "line": 146,
+        "assertion": "Expected presentation/clarify/<identity>/context-v8 is absent"
+      }
+    ],
+    "failure_classification": "The two known baseline stale presentation-key fixture assertions are preserved; no fixture or expectation was changed.",
+    "baseline_evidence": "docs/evidence/agy-prototype-inspection-validation.json retains the prior clean official baseline reproduction; this patch did not rerun that baseline."
+  },
+  "reports": [
+    {
+      "path": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/run_validation.py",
+      "sha256": "de84339df78999409411aa4618da413036715a8e752dcafe57494e7bd92fb1a8"
+    },
+    {
+      "path": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/validation.log",
+      "sha256": "9f6f0ebee30dd41d2a565c0ae0542f465dbac543c5d70cf838e1b3b6e1df6a6c"
+    },
+    {
+      "path": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/imports.log",
+      "sha256": "72dc16b1f8aabaa7b59d452b4207b4ba9ff3b25bd207569689d86fc59626fecc"
+    },
+    {
+      "path": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/focused.log",
+      "sha256": "31296eea6e096f992a0974e7aa86a25d41f109f3b2d5cbd35dfb6d7550257353"
+    },
+    {
+      "path": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/focused.xml",
+      "sha256": "7f6d5330b097f87db2cfcba4589425935ed8faee28f655804a899bbeee87deff"
+    },
+    {
+      "path": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/pytest-report.json",
+      "sha256": "b29d0f922af2151d643d75c2e6f3aa087c6c2568695b1e47f4495e27c2b1a49f"
+    },
+    {
+      "path": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/ruff.log",
+      "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+    },
+    {
+      "path": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/diff-check.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/commands.json",
+      "sha256": "c96bea5aa00e4871bb2482f66ab742eb2933998c9bdcb4b16a7d149f11ca9c76"
+    },
+    {
+      "path": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/summary.json",
+      "sha256": "3e853d8c78fb043307f0cce320d00cfb831b154e8a901302308f192283b4ff3a"
+    },
+    {
+      "path": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/inputs-before.json",
+      "sha256": "358ab2cf35b21dcbd84ecab2451b81121a45247f9799bff84b44041019b89770"
+    },
+    {
+      "path": "/home/fuli/projects/aa2-agy-prototype-read-guidance-validation-20261111/inputs-after.json",
+      "sha256": "358ab2cf35b21dcbd84ecab2451b81121a45247f9799bff84b44041019b89770"
+    }
+  ],
+  "checks": [
+    "Targeted Ruff passed",
+    "git diff --check passed",
+    "376 tracked source/test/configuration/design inputs unchanged before and after verification"
+  ],
+  "limits": [
+    "Focused checks only; no full regression run.",
+    "The focused suite is not wholly green: the two known fixture assertions failed.",
+    "No live provider call or task recovery was run for this patch.",
+    "Text/session contract tests do not guarantee native model compliance.",
+    "No changes to native permissions, models, schemas, material projection, read implementation, media service, controller gates or task state."
+  ]
+}

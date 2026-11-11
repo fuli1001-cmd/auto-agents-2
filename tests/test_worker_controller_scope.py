@@ -193,3 +193,108 @@ def test_prototype_inspection_uses_admitted_files_not_native_tool_discovery(mode
         other, _ = PromptCompiler().compile(stage, context, model)
         assert "read-only shell and image tools may be used when needed for that inspection" in other
         assert "Static prototype inspection:" not in other
+
+
+@pytest.mark.parametrize("model", ["gpt-fixture", "gemini-fixture", "claude-fixture", "generic-fixture"])
+def test_prototype_read_guidance_uses_explicit_paths_and_tool_pagination(model):
+    context = {
+        "workspace": "/fixture/public-workspace",
+        "project": {"read_on_demand": [{"path": "design/prototypes/task/index.html"}]},
+        "context_files": ["/fixture/artifacts/ab/abcdef-fixture"],
+        "raw_requirements": "Required real file evidence, independent review and human approval remain.",
+    }
+    before = copy.deepcopy(context)
+    prompt, _ = PromptCompiler().compile("prototype", context, model)
+
+    assert compiled_context(prompt) == before and context == before
+    assert "Do not test or demonstrate restrictions or permissions" in prompt
+    assert "including seemingly harmless command probes" in prompt
+    assert "form an absolute file path from the supplied workspace root" in prompt
+    assert "an explicitly provided relative file path" in prompt
+    assert "use the complete file path provided in this input" in prompt
+    assert "do not read a shard directory as a file or invent hashes or paths" in prompt
+    assert "Follow the read tool's advertised pagination instructions" in prompt
+    assert "read required content completely" in prompt
+    assert "recheck the supplied file reference and the tool's input contract" in prompt
+    assert "do not switch to commands, directory scans or guessed paths" in prompt
+    assert "report the specific missing material in the current schema" in prompt
+    # The generic contract must not impose one native provider's read-tool fields.
+    assert "ByteOffset" not in prompt
+    assert "After a concrete native denial, stop that operation and target" in prompt
+    assert "Preserve explicit requirements for real files, decoding, checks and approval" in prompt
+    assert "The controller runs these checks after applying your proposal" in prompt
+    assert "Respect required human prototype approval" in prompt
+
+
+@pytest.mark.parametrize("model", ["gpt-fixture", "gemini-fixture", "claude-fixture", "generic-fixture"])
+def test_prototype_read_guidance_does_not_change_other_stages_or_diagnostics(model, monkeypatch):
+    from auto_agents_2 import prompt_rules
+    from auto_agents_2.prompts import ROLES
+
+    cases = [(stage, {}) for stage in ROLES if stage != "prototype"]
+    cases += [
+        ("review", {"review_kind": "prototype"}),
+        ("prototype", {"input_contract": {"purpose": "material_probe"}}),
+        ("review", {"input_contract": {"purpose": "provider_probe"}}),
+    ]
+    before = [PromptCompiler().compile(stage, context, model) for stage, context in cases]
+    monkeypatch.setattr(prompt_rules, "PROTOTYPE_INSPECTION", "REPLACED_PROTOTYPE_ONLY_INSPECTION")
+    assert [PromptCompiler().compile(stage, context, model) for stage, context in cases] == before
+
+
+@pytest.mark.parametrize("kind", ["codex", "antigravity"])
+async def test_prototype_read_prompt_revision_retains_history_but_not_old_native_session(
+    tmp_path, monkeypatch, kind
+):
+    import sys
+
+    from test_complete_snapshot_discovery import fixture_router
+
+    from auto_agents_2.context_plan import CONTEXT_VERSION
+    from auto_agents_2.evidence import invocation_identity
+    from auto_agents_2.models import DocumentResult
+    from auto_agents_2.prompts import PROMPT_VERSION
+    from auto_agents_2.providers import VIEW_VERSION
+    from auto_agents_2.transports import CodexTransport
+    from auto_agents_2.util import digest
+
+    old_version = "2026-11-11.prototype-file-inspection-v1"
+    assert PROMPT_VERSION != old_version
+    config, store, rid, router, context = fixture_router(tmp_path)
+    monkeypatch.setattr(router, "execution_identity", lambda stage: "fixture-execution")
+    effective = {"kind": kind, "provider": "fixture", "model": "fixture-model",
+                 "fingerprint": "fixture-settings", "binary": sys.executable,
+                 "prompt_profile": "auto", "level": "deep"}
+    identity = invocation_identity("prototype", context, DocumentResult, tmp_path, config.load(),
+                                   execution="fixture-execution")
+    old_key = "/".join(["session", "prototype", "fixture", VIEW_VERSION, old_version,
+                       CONTEXT_VERSION, effective["fingerprint"], digest(config.load().sensitive_paths)])
+    store.checkpoint(rid, old_key, "fixture-retained-prototype-conversation")
+    budget = {"failures": 3, "grant": 2, "pending": False, "error_kind": "permission_denied"}
+    store.checkpoint(rid, "infra/prototype/fixture", budget)
+    seen = []
+
+    class CapturedNativeArguments(Exception):
+        pass
+
+    class Capture(CodexTransport):
+        def argv(self, effective, workspace, schema, output, prompt, previous, images, context_files=()):
+            seen.append(previous)
+            assert "Do not test or demonstrate restrictions or permissions" in prompt
+            assert "advertised pagination instructions" in prompt
+            raise CapturedNativeArguments
+
+    router.transports[kind] = Capture()
+    with pytest.raises(CapturedNativeArguments):
+        await router._call(effective, "prototype", copy.deepcopy(context), DocumentResult,
+                           tmp_path, rid, "prototype", fresh=False)
+
+    assert seen == [None]
+    assert store.get(rid, old_key) == "fixture-retained-prototype-conversation"
+    assert store.get(rid, "infra/prototype/fixture") == budget
+    assert store.get(rid, "provider-result/prototype") is None
+    with monkeypatch.context() as patch:
+        patch.setattr("auto_agents_2.prompts.PROMPT_VERSION", old_version)
+        patch.setattr("auto_agents_2.providers.PROMPT_VERSION", old_version)
+        assert invocation_identity("prototype", context, DocumentResult, tmp_path, config.load(),
+                                   execution="fixture-execution") == identity

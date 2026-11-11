@@ -11,7 +11,7 @@ from .research_contract import RESEARCH_PUBLICATION_RULE
 from .visual_design import visual_instructions
 
 INVOCATION_CONTRACT_VERSION = "2026-10-16.2"
-PROMPT_VERSION = "2026-11-11.prototype-file-inspection-v1"
+PROMPT_VERSION = "2026-11-11.prototype-file-inspection-v2"
 CORE = COMMON
 SOURCES = {
     "openai": "https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices",
