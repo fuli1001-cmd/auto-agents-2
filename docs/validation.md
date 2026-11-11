@@ -509,3 +509,10 @@ AA2_BROWSER_CACHE="$PWD/.cache/browsers" python tests/manual_frontend.py
 322 项范围：test_provider_denial_display.py、test_worker_controller_scope.py、test_provider_failure_facts.py、test_provider_terminal_state.py、test_provider_pause_accounting.py、test_research_prerequisite_wait.py、test_prototype_capability_contract.py、test_prototype_approvals.py。最终 70 项范围：test_provider_denial_display.py、test_research_prerequisite_wait.py、test_prototype_approvals.py。均通过 PYTHONPATH=src 和项目 Conda 的 python -B -m pytest -q 执行，使用合成 provider 夹具，不产生真实模型调用。
 
 [验证摘要与最终源码指纹](evidence/agy-headless-guidance-validation.json) 保留初次失败及两组通过报告的散列。修复后未再调用 AGY；此前获准的一次真实重跑仍为原型阶段暂停，原生命令拒绝的具体匹配规则没有证实。本次不改变原生权限、配置、历史、重试预算或验收门槛，不能视作真实原型已通过。
+
+
+## AGY prototype native-inspection scope (2026-11-11)
+
+A real AGY prototype call could read admitted design text but then attempted unrelated native application-data discovery and was refused. Prototype authors now receive a bounded native file/image-read contract without the general shell-inspection suggestion. Other stages and diagnostic read contracts stay unchanged. This prompt-only correction neither changes native permissions nor guarantees provider compliance.
+
+The focused seven-module suite against the verified worktree import produced **88 passed, 2 failed**. Both failures are unchanged test_v8_native_argv_does_not_resume_retained_v7_conversation presentation-key assertions (Codex and Antigravity), separately reproduced on clean official d981e5a; they are retained, not relabeled as passes or repaired in this scope. The initial invocation accidentally imported that official baseline and produced 85 passes plus 5 failures, including the three new assertions; it is not validation of the changed source. Targeted Ruff, git diff --check and an independent read-only review passed. Source hashes and all observations are in [the validation record](evidence/agy-prototype-inspection-validation.json). No full regression or live provider success is claimed.

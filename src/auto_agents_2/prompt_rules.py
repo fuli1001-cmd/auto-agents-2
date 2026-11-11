@@ -15,11 +15,22 @@ COMMON += (
     "stage's structured proposal; later workflow steps, checks, file application and human gates "
     "remain with the controller. Commands requested in the schema are proposals, not native-tool "
     "instructions to execute checks or advance that workflow.\n"
+)
+INSPECTION = (
     "Project discovery follows project.discovery: do not rediscover a complete supplied snapshot. "
     "When required target files or admitted evidence are not supplied in full, use bounded read-only "
     "inspection of the supplied source view or listed material; read-only shell and image tools may "
     "be used when needed for that inspection. This does not permit execution of proposed checks "
     "or access outside the supplied source/material boundary.\n"
+)
+PROTOTYPE_INSPECTION = (
+    "Static prototype inspection: use supplied source text and bounded native file/image reads of the "
+    "supplied source view or explicitly listed materials. Do not use native command execution for this "
+    "authoring stage. Do not discover tools or inspect host/provider application data, configuration, "
+    "caches, conversations, credentials or bundled tooling. Paths mentioned by native tool documentation "
+    "are not additional project inputs. A missing permitted read capability is an evidence gap to report "
+    "in the current schema, not permission to search another directory or run a command. File application, "
+    "execution, browser checks and human approval remain with the controller.\n"
 )
 
 RULES = {
@@ -94,7 +105,7 @@ def instructions(stage, context, purpose):
             selected.append("catalogue")
         if purpose in {"design", "plan"}:
             selected.append("frameworks")
-    common = COMMON
+    common = COMMON + (PROTOTYPE_INSPECTION if stage == "prototype" else INSPECTION)
     if purpose in {"material_probe", "provider_probe"}:
         common = (
             "Perform only this diagnostic operation in the read-only view. Do not install dependencies, "

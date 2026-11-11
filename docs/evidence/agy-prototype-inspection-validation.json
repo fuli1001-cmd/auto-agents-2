@@ -1,0 +1,58 @@
+{
+  "date": "2026-11-11",
+  "base_commit": "d981e5a2e1c2f7a9d305ca30826e603cde6aeced",
+  "scope": "prototype author native inspection prompt only; no permission, configuration, invocation-identity, counter or acceptance-gate changes",
+  "final_source_sha256": {
+    "src/auto_agents_2/prompt_rules.py": "91c72d24478da4f67bbdf765f65c2f87d1a0a1690dd8ab819cf4d4ff97985596",
+    "src/auto_agents_2/prompts.py": "d30142fbe7861d6dc96d76bbd54a7ad9d5559425d65575678458f43060344ec0",
+    "tests/test_worker_controller_scope.py": "6fd423b48f36f4cebc98c7ff013d19b9a5c62cf6c016c6997af587864248f0ab"
+  },
+  "runs": [
+    {
+      "report": "run-3b8837d81c964f96a37efbad38062a91.json",
+      "sha256": "77d922e674b65ccd0471348f473dfd276fc84206dad1107fe5b611795b9df31b",
+      "scope": "initial invocation imported official baseline rather than proposed source; 85 passed, 5 failed; not verification of proposed source",
+      "counts": {
+        "setup:passed": 90,
+        "call:passed": 85,
+        "teardown:passed": 90,
+        "call:failed": 5
+      },
+      "exitstatus": 1
+    },
+    {
+      "report": "run-84350fc1d31d4e49bf4b844dcb6cc855.json",
+      "sha256": "760ca040d664cc49e725a6df097035d1587af92cfc05735937af4f98e43b46d6",
+      "scope": "verified absolute worktree source import; 88 passed, 2 pre-existing snapshot presentation-key assertions failed",
+      "counts": {
+        "setup:passed": 90,
+        "call:passed": 88,
+        "teardown:passed": 90,
+        "call:failed": 2
+      },
+      "exitstatus": 1
+    },
+    {
+      "report": "run-2f49f6c5b0fe41948a66ed7cbefa9207.json",
+      "sha256": "a81697fbfc310577747d7a78c0e6141b6afad6eea094c944a405ea5eabddf909",
+      "scope": "official unchanged d981e5a baseline; both corresponding snapshot assertions reproduced as failures",
+      "counts": {
+        "setup:passed": 2,
+        "call:failed": 2,
+        "teardown:passed": 2
+      },
+      "exitstatus": 1
+    }
+  ],
+  "checks": [
+    "targeted Ruff passed",
+    "git diff --check passed",
+    "independent read-only review: no concrete blocking findings"
+  ],
+  "limits": [
+    "No full regression run",
+    "The focused suite is not wholly green: two unchanged snapshot presentation-key failures also reproduce on the official baseline",
+    "No live AGY call with this prompt revision at the time of publication",
+    "Prompt scope is not a guarantee that a native provider complies; concrete refusals continue to block and are not retry authority"
+  ]
+}

@@ -165,3 +165,31 @@ def test_static_prototype_respects_native_permissions_without_weakening_acceptan
     other, _ = PromptCompiler().compile("clarify", context, model)
     assert "read-only shell and image tools may be used when needed for that inspection" in other
     assert "Do not probe the host toolchain or search host directories" not in other
+
+
+@pytest.mark.parametrize("model", ["gpt-fixture", "gemini-fixture", "claude-fixture"])
+def test_prototype_inspection_uses_admitted_files_not_native_tool_discovery(model):
+    context = {
+        "raw_requirements": "Fixture: preserve real download, decoding, review and human approval.",
+        "project": {"read_on_demand": ["design/existing.html"]},
+        "context_files": ["/fixture/admitted-design.md"],
+    }
+    before = copy.deepcopy(context)
+    prompt, _ = PromptCompiler().compile("prototype", context, model)
+
+    assert compiled_context(prompt) == before and context == before
+    assert "bounded native file/image reads" in prompt
+    assert "Do not use native command execution for this authoring stage" in prompt
+    assert "Do not discover tools or inspect host/provider application data" in prompt
+    assert "configuration, caches, conversations, credentials or bundled tooling" in prompt
+    assert "Paths mentioned by native tool documentation are not additional project inputs" in prompt
+    assert "A missing permitted read capability is an evidence gap to report" in prompt
+    assert "read-only shell and image tools may be used" not in prompt
+    assert "Preserve explicit requirements for real files, decoding, checks and approval" in prompt
+    assert "After a concrete native denial, stop that operation and target" in prompt
+
+    # Review and other author stages retain their existing bounded inspection contract.
+    for stage in ("clarify", "review", "implement"):
+        other, _ = PromptCompiler().compile(stage, context, model)
+        assert "read-only shell and image tools may be used when needed for that inspection" in other
+        assert "Static prototype inspection:" not in other
