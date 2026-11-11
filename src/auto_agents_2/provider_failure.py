@@ -16,6 +16,12 @@ TOOLS = frozenset({
     "run_command", "send_command_input", "command_status", "read_url_content",
     "search_web", "browser_subagent",
 })
+# Headless permissions use action categories, not canonical tool names.
+# Preserve tool-shaped entries emitted by older integrations as well.
+# https://antigravity.google/docs/permissions?tab=cli#supported-cli-actions-and-matching-rules
+HEADLESS_ACTIONS = TOOLS | frozenset({
+    "read_file", "write_file", "read_url", "execute_url", "command", "unsandboxed", "mcp",
+})
 CODES = frozenset({
     "SUCCESS", "ERROR", "FAILED", "FAILURE", "CANCELLED", "INTERRUPTED", "TIMEOUT",
     "DENIED", "PERMISSION_DENIED", "ACCESS_DENIED", "UNAUTHORIZED", "UNAUTHENTICATED",
@@ -78,10 +84,13 @@ def denied_action(value):
             ("action", "display_name", "tool_name", "toolName", "args", "reason_code", "reason")}
         if "action" in value or "display_name" in value:
             result["wire_shape"] = "headless_action_display"
-            result["headless_action"] = code(value.get("action"), TOOLS)
+            result["headless_action"] = code(value.get("action"), HEADLESS_ACTIONS)
             result["display_name"] = opaque(value.get("display_name"))
         result["tool"] = code(value.get("tool_name", value.get("toolName")), TOOLS)
-        result["reason"] = code(value.get("reason_code", value.get("reason")))
+        reason = value.get("reason_code", value.get("reason"))
+        result["reason"] = code(reason)
+        if "reason_code" in value or "reason" in value:
+            result["reason_signals"] = native_signals(reason)
         args = value.get("args")
         result["arguments"] = opaque(args)
         targets = []
@@ -176,6 +185,8 @@ class ProviderFailureFacts:
         self.failure_count = 0
         self.errors = []
         self.error_count = 0
+        self.tool_errors = []
+        self.tool_error_count = 0
         self.sources = set()
         self.streams = {}
 
@@ -193,7 +204,21 @@ class ProviderFailureFacts:
             self.errors.append({"source": source, **native_error(value)})
 
     def event(self, event):
-        if self.kind == "antigravity" and event.get("event") == "result":
+        if self.kind == "antigravity" and event.get("event") == "step_update":
+            step = event.get("step_update")
+            if type(step) is not dict or step.get("step_type") != "tool":
+                return
+            info = step.get("tool_info")
+            if type(info) is not dict or info.get("error") is None:
+                return
+            # Error-bearing events, not a count of distinct failed/denied actions.
+            # Do not infer a link to terminal denials or promote these to terminal failure.
+            self.sources.add("step_update.tool_info.error")
+            self.tool_error_count += 1
+            if len(self.tool_errors) < LIMIT:
+                self.tool_errors.append({"tool": code(step.get("tool_name"), TOOLS),
+                    "tool_info_name": code(info.get("name"), TOOLS), "error": native_error(info["error"])})
+        elif self.kind == "antigravity" and event.get("event") == "result":
             self.result_seen = True
             result = event.get("result", event)
             if type(result) is not dict:
@@ -258,6 +283,8 @@ class ProviderFailureFacts:
             "terminal_failures_truncated": self.failure_count > len(self.failures),
             "error_count": self.error_count, "errors": self.errors,
             "errors_truncated": self.error_count > len(self.errors),
+            "tool_error_count": self.tool_error_count, "tool_errors": self.tool_errors,
+            "tool_errors_truncated": self.tool_error_count > len(self.tool_errors),
             "error_sources": sorted(self.sources | {"controller." + phase}),
             "streams": {source: {"bytes": state["bytes"], "chunks": state["chunks"],
                                  "sha256": state["digest"].hexdigest()}

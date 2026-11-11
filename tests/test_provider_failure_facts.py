@@ -261,6 +261,133 @@ async def test_headless_success_with_denial_still_fails_once_and_keeps_safe_acti
 
 
 
+
+@pytest.mark.parametrize("action", [
+    "read_file", "write_file", "read_url", "execute_url", "command", "unsandboxed", "mcp",
+])
+def test_headless_permission_categories_are_not_invented_canonical_tools(action):
+    safe = denied_action({"action": action, "display_name": "EXAMPLE_PRIVATE_DISPLAY"})
+    assert safe["headless_action"]["value"] == action
+    assert safe["tool"]["value"] == safe["reason"]["value"] == "unknown"
+    assert "reason_signals" not in safe and safe["targets"] == []
+    assert "EXAMPLE_" not in json.dumps(safe)
+
+
+@pytest.mark.parametrize("action", [
+    "command(EXAMPLE_PRIVATE_COMMAND)", "mcp(EXAMPLE_SERVER/EXAMPLE_TOOL)",
+    "read_url(EXAMPLE_HOST)", "command EXAMPLE_TOKEN", "Command", ["command"],
+])
+def test_headless_action_resources_and_unknown_values_stay_opaque(action):
+    safe = denied_action({"action": action})
+    assert safe["headless_action"]["value"] == "unknown"
+    assert "EXAMPLE_" not in json.dumps(safe)
+
+
+def test_denial_reason_markers_are_not_promoted_to_an_exact_reason():
+    reason = "PERMISSION_DENIED permission EXAMPLE_REASON /EXAMPLE_PATH --token=EXAMPLE_TOKEN"
+    safe = denied_action({"reason": reason})
+    assert safe["reason"]["value"] == "unknown"
+    assert safe["reason_signals"]["public_codes"] == ["PERMISSION_DENIED"]
+    assert safe["reason_signals"]["keyword_signals"] == ["permission"]
+    assert safe["reason_signals"]["authority"] == "native_text_or_field_markers_only"
+    assert "EXAMPLE_" not in json.dumps(safe)
+    # Preserve exact-code priority even if a different free-text field looks informative.
+    safe = denied_action({"reason_code": None, "reason": reason})
+    assert safe["reason"]["value"] == "unknown" and not safe["reason_signals"]["public_codes"]
+
+
+def tool_error_event(error=None, **step):
+    return {"event": "step_update", "step_update": {
+        "step_type": "tool", "tool_name": "run_command", "state": "DONE",
+        "tool_info": {"name": "run_command", "error": error,
+                      "parameters": {"CommandLine": "EXAMPLE_COMMAND --token=EXAMPLE_TOKEN"},
+                      "output": "EXAMPLE_PRIVATE_OUTPUT"}, **step}}
+
+
+def test_native_tool_error_identifiers_and_reason_are_independent_safe_observations():
+    facts = ProviderFailureFacts("antigravity")
+    facts.event(tool_error_event({"type": "PERMISSION_DENIED",
+        "message": "access denied EXAMPLE_REASON https://EXAMPLE_USER:EXAMPLE_PASSWORD@EXAMPLE_HOST/EXAMPLE_PATH",
+        "headers": {"Authorization": "EXAMPLE_TOKEN"}}, tool_name="read_file"))
+    assert facts.tool_error_count == 1 and facts.failure_count == facts.terminal_count == 0
+    item = facts.tool_errors[0]
+    assert item["tool"]["value"] == "read_file"
+    assert item["tool_info_name"]["value"] == "run_command"  # Do not silently reconcile a mismatch.
+    assert item["error"]["code"]["value"] == "PERMISSION_DENIED"
+    assert item["error"]["observed_signals"]["keyword_signals"] == ["permission"]
+    assert facts.sources == {"step_update.tool_info.error"}
+    assert "EXAMPLE_" not in json.dumps(facts.tool_errors)
+
+
+@pytest.mark.parametrize("step", [None, [], "EXAMPLE_STEP", {},
+    {"step_type": "agent_response", "tool_info": {"error": "EXAMPLE_ERROR"}},
+    {"step_type": "tool", "tool_info": "EXAMPLE_INFO"},
+    {"step_type": "tool", "tool_info": {}},
+    {"step_type": "tool", "tool_info": {"error": None}},
+])
+def test_unrelated_or_absent_tool_error_is_not_a_failure_observation(step):
+    facts = ProviderFailureFacts("antigravity")
+    facts.event({"event": "step_update", "step_update": step})
+    assert facts.tool_error_count == facts.error_count == facts.failure_count == 0
+    assert not facts.sources
+
+
+def test_tool_error_observations_are_bounded_count_events_and_leave_unknowns_opaque():
+    facts = ProviderFailureFacts("antigravity")
+    event = tool_error_event(tool_name="EXAMPLE_TOOL", tool_info={
+        "name": "EXAMPLE_OTHER_TOOL", "error": {"type": "EXAMPLE_ERROR", "message": "EXAMPLE_MESSAGE",
+        "payload": {"message": "PERMISSION_DENIED"}}})
+    for _ in range(LIMIT + 1):
+        facts.event(event)  # Repeated step updates are not distinct denied operations.
+    record = facts.record(run_id="run", attempt="attempt", stage="review", operation="review",
+                          provider="antigravity", input_identity="identity",
+                          process=SimpleNamespace(returncode=0),
+                          decoder=SimpleNamespace(finished=False, error="opaque"),
+                          phase="terminal_validation", error=None)
+    assert record["tool_error_count"] == LIMIT + 1
+    assert len(record["tool_errors"]) == LIMIT and record["tool_errors_truncated"]
+    assert record["terminal_failure_count"] == 0
+    item = record["tool_errors"][0]
+    assert item["tool"]["value"] == item["tool_info_name"]["value"] == item["error"]["code"]["value"] == "unknown"
+    assert not item["error"]["observed_signals"]["public_codes"]
+    assert "EXAMPLE_" not in json.dumps(record)
+    codex = ProviderFailureFacts("codex")
+    codex.event(event)
+    assert codex.tool_error_count == 0
+
+
+async def test_future_headless_denial_keeps_tool_error_evidence_without_retry_or_acceptance(tmp_path):
+    events = [tool_error_event({"type": "PERMISSION_DENIED", "message": "EXAMPLE_REASON"}),
+              result(denied_actions=[{"action": "command", "display_name": "EXAMPLE_DISPLAY"}]), result()]
+    router, project, store, rid = fixture_router(tmp_path, events, kind="antigravity")
+    for _ in range(2):
+        with pytest.raises(ProviderError):
+            await router.invoke("review", {}, ReviewResult, project, rid, "review")
+    refs, facts = observations(store, rid)
+    assert len(refs) == len(facts) == 1
+    fact = facts[0]
+    assert fact["tool_error_count"] == 1 and not fact["tool_errors_truncated"]
+    assert fact["tool_errors"][0]["tool"]["value"] == "run_command"
+    assert fact["tool_errors"][0]["error"]["code"]["value"] == "PERMISSION_DENIED"
+    denial = fact["terminal_failures"][0]["denied_actions"][0]
+    assert denial["headless_action"]["value"] == "command"
+    assert denial["tool"]["value"] == denial["reason"]["value"] == "unknown"
+    assert fact["last_terminal"]["status"]["value"] == "SUCCESS" and fact["terminal_failure_count"] == 1
+    state = store.get(rid, "infra/review/antigravity")
+    assert state["failures"] == 1 and state["grant"] == 0 and not state["pending"]
+    assert store.get(rid, "provider-result/review") is None
+    assert len([row for row in store.events(rid) if row["kind"] == "agent.started"]) == 1
+    assert "EXAMPLE_" not in json.dumps(facts)
+
+
+async def test_recovered_tool_error_does_not_change_success_acceptance(tmp_path):
+    router, project, store, rid = fixture_router(tmp_path, [
+        tool_error_event({"type": "NOT_FOUND", "message": "EXAMPLE_TOOL_ERROR"}), result()], kind="antigravity")
+    assert (await router.invoke("review", {}, ReviewResult, project, rid, "review")).approved is False
+    assert observations(store, rid) == ([], [])
+    assert store.get(rid, "provider-result/review") is not None
+
+
 def signals(value):
     return native_error(value)["observed_signals"]
 
