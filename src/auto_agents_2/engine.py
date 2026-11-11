@@ -1685,7 +1685,9 @@ class WorkflowEngine:
             if specification.visual_brief and specification.visual_brief.design_update == "required":
                 if "DESIGN.md" not in scopes:
                     raise Replan("clarify", "Required DESIGN.md synchronization needs formal prototype_paths revision")
-                if not any(change.path == "DESIGN.md" for change in document.files):
+                from .prototype_design import PrototypeDesign
+                if (not any(change.path == "DESIGN.md" for change in document.files)
+                        and not PrototypeDesign(self).synchronized(rid, work, assessment)):
                     raise Replan("prototype", "Synchronize DESIGN.md with the accepted visual brief in the structured proposal")
             try:
                 files, prepared = await self.patch_repair.prepare(rid, work, document.files, scopes,
@@ -1708,9 +1710,20 @@ class WorkflowEngine:
                 validate_prepared(work, pending["prepared"])
                 self._replan_contract(rid, "prototype_scope", False)
                 raise Replan("prototype", str(exc)) from exc
+            # A saved HTML-only preparation cannot hide DESIGN drift while
+            # paused. Recheck application continuity before applying that batch.
+            if (specification.visual_brief and specification.visual_brief.design_update == "required"
+                    and not any(row["path"] == "DESIGN.md" for row in pending["prepared"])):
+                from .prototype_design import PrototypeDesign
+                if ("DESIGN.md" not in (specification.prototype_paths or ["design/prototypes", "DESIGN.md"])
+                        or not PrototypeDesign(self).synchronized(rid, work, assessment)):
+                    validate_prepared(work, pending["prepared"])
+                    raise Replan("prototype", "Synchronize DESIGN.md with the accepted visual brief in the structured proposal")
             # Actual file drift or permission failures must still block application.
             apply_prepared(work, pending["prepared"])
             pending["fingerprint"] = self._prototype_hash(work)
+            from .prototype_design import PrototypeDesign
+            PrototypeDesign(self).record_application(rid, work, assessment, pending)
             self.store.checkpoint(rid, key, pending)
         self._replan_contract(rid, "prototype_scope", True)
         fingerprint = self._prototype_hash(work)
