@@ -54,7 +54,7 @@ RETRY_VALUE = "(?:" + HTTP_DATE + "|" + RFC3339 + r"|[0-9]{1,6})"
 RETRY_MARKER = re.compile(
     r"(?<![\w./\\-])(?:\"(?P<quoted_key>" + "|".join(RETRY_FIELDS) + r")\"|(?P<key>"
     + "|".join(RETRY_FIELDS) + r"))[ \t]*[:=][ \t]*(?:\"(?P<quoted>" + RETRY_VALUE
-    + r")\"|(?P<bare>" + RETRY_VALUE + r"))(?=[ \t]*(?:$|[\r\n,;}\])]))", re.I)
+    + r")\"|(?P<bare>" + RETRY_VALUE + r"))(?!\s*,\s*\d)(?=[ \t]*(?:$|[\r\n,;}\])]))", re.I)
 
 
 def opaque(value):

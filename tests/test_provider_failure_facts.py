@@ -356,6 +356,7 @@ def test_retry_fields_accept_only_bounded_whole_seconds(key, value, seconds):
 @pytest.mark.parametrize("message", [
     "Retry-After: 30", "retry-after: 30", '"retry_after": "30"', '{"retryAfterSeconds":30}',
     "HTTP 429; Retry-After: 30; EXAMPLE_SECRET", "Retry-After: 30\nEXAMPLE_SECRET",
+    '{"retry_after":30, "status_code":429}', '{"retry_after":"30", "message":"EXAMPLE_SECRET"}',
 ])
 def test_explicit_retry_text_field_normalizes_without_copying_message(message):
     assert signals(message)["retry_after_markers"] == [{"kind": "seconds", "value": 30}]
@@ -385,6 +386,8 @@ def test_retry_dates_require_valid_timezone_and_normalize_to_utc(value, utc):
     "Thu, 11 Nov 2026 02:00:00 GMT", "Wed, 11 Nov 2026 02:00:00 PST",
     "Wed, 11 Nov 2026 02:00:00", "Wed, 31 Nov 2026 02:00:00 GMT",
     "30 EXAMPLE_TOKEN", '30"EXAMPLE_SECRET',
+    "30,000", "30, 000", "30 ,000", "30 , 000", "30,\t000", "30,\n000", "30\n,\n000",
+    "30,\u00a0000", "30, １２３", '"30",000', '"30", 000',
 ])
 def test_invalid_or_out_of_range_retry_values_are_not_partially_captured(value):
     assert signals({"Retry-After": value})["retry_after_markers"] == []
